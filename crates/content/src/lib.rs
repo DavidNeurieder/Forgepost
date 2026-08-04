@@ -6,9 +6,15 @@
 //! version pool (§5.1 of the plan), so block-level analytics stay meaningful
 //! across edits.
 
+pub mod diff;
+pub mod markdown;
+
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+pub use diff::merge_blocks;
+pub use markdown::{html_escape, parse_markdown, render_html};
 
 pub type DocumentId = Uuid;
 pub type VersionId = Uuid;
@@ -41,6 +47,13 @@ impl BlockKind {
     }
 }
 
+/// A block as freshly parsed from Markdown (no identity yet).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParsedBlock {
+    pub kind: BlockKind,
+    pub content: BlockContent,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlockVersion {
     pub id: VersionId,
@@ -56,6 +69,9 @@ pub struct Block {
     pub kind: BlockKind,
     /// Current immutable version; older versions are append-only.
     pub version_id: VersionId,
+    /// Position within the document (0-based).
+    pub position: i64,
+    pub created_at_ms: i64,
     /// When the block last changed (Unix ms).
     pub updated_at_ms: i64,
 }
@@ -131,6 +147,8 @@ mod tests {
             id: block_id,
             kind: BlockKind::Paragraph,
             version_id: v2.id,
+            position: 0,
+            created_at_ms: 1,
             updated_at_ms: 2,
         });
         doc.versions.extend([v1, v2]);
@@ -147,5 +165,14 @@ mod tests {
         assert!(BlockKind::Heading { level: 2 }.is_experimentable());
         assert!(BlockKind::CallToAction.is_experimentable());
         assert!(!BlockKind::Divider.is_experimentable());
+    }
+
+    #[test]
+    fn parse_then_render_roundtrip() {
+        let src = "# Title\n\nHello **world**.\n";
+        let blocks = parse_markdown(src);
+        assert_eq!(blocks.len(), 2);
+        let html = render_html(blocks.iter().map(|b| (b.kind, &b.content)));
+        assert!(html.contains("<h1>Title</h1>"));
     }
 }

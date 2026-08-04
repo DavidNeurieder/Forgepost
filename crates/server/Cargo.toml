@@ -11,20 +11,27 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+argon2 = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
+hex = { workspace = true }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 openpublish-analytics = { path = "../analytics" }
 openpublish-content = { path = "../content" }
 openpublish-experiments = { path = "../experiments" }
+password-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
+http-body-util = "0.1"
 tokio = { workspace = true }
+tower = { version = "0.5", features = ["util"] }

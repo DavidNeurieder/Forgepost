@@ -1,11 +1,15 @@
 //! Server library: application wiring, routes, and the repository layer.
 
+pub mod auth;
+pub mod error;
+pub mod model;
 pub mod repository;
 pub mod routes;
 
 use std::sync::Arc;
 
 use axum::Router;
+use axum::routing::{get, post};
 
 use crate::repository::Repository;
 
@@ -20,7 +24,29 @@ pub struct AppState {
 pub fn app(repo: Arc<dyn Repository>) -> Router {
     let state = AppState { repo };
     Router::new()
-        .route("/health", axum::routing::get(routes::health))
-        .route("/setup", axum::routing::get(routes::setup_status))
+        .route("/health", get(routes::health))
+        .route("/setup", get(routes::setup_status).post(routes::setup))
+        .route("/api/login", post(routes::login))
+        .route("/api/logout", post(routes::logout))
+        .route("/api/me", get(routes::me))
+        .route(
+            "/api/documents",
+            get(routes::list_documents).post(routes::create_document),
+        )
+        .route(
+            "/api/documents/{id}",
+            get(routes::get_document).put(routes::update_document),
+        )
+        .route(
+            "/api/documents/{id}/publish",
+            post(routes::publish_document),
+        )
+        .route("/api/comments/{id}/approve", post(routes::approve_comment))
+        .route("/articles/{slug}", get(routes::article))
+        .route(
+            "/articles/{slug}/comments",
+            get(routes::list_comments).post(routes::create_comment),
+        )
+        .route("/rss", get(routes::rss))
         .with_state(state)
 }
