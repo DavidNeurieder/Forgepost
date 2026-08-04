@@ -60,7 +60,8 @@ pub trait Repository: Send + Sync {
         slug: &str,
     ) -> Result<Option<FullDocument>, RepositoryError>;
     async fn list_published(&self) -> Result<Vec<DocumentSummary>, RepositoryError>;
-
+    /// All non-deleted documents regardless of status (used by `export`).
+    async fn list_all_documents(&self) -> Result<Vec<DocumentSummary>, RepositoryError>;
     // Tags
     async fn set_document_tags(
         &self,
@@ -347,6 +348,17 @@ impl Repository for SqliteRepository {
             "SELECT id, title, slug, status, published_at_ms, updated_at_ms
              FROM documents WHERE status = 'published' AND deleted_at_ms IS NULL
              ORDER BY published_at_ms DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_document_summary).collect())
+    }
+
+    async fn list_all_documents(&self) -> Result<Vec<DocumentSummary>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT id, title, slug, status, published_at_ms, updated_at_ms
+             FROM documents WHERE deleted_at_ms IS NULL
+             ORDER BY updated_at_ms DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -731,7 +743,7 @@ impl Repository for SqliteRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        let summaries = self.list_published().await?;
+        let summaries = self.list_all_documents().await?;
         let mut documents = Vec::new();
         for summary in summaries {
             if let Some(full) = self.get_document(summary.id).await? {
@@ -920,5 +932,24 @@ mod tests {
         let dump = repo.export_json().await.unwrap();
         assert_eq!(dump["documents"].as_array().unwrap().len(), 1);
         assert_eq!(dump["documents"][0]["title"], "Exported");
+    }
+
+    #[tokio::test]
+    async fn export_includes_unpublished_drafts() {
+        let repo = repo().await;
+        let user = seed_user(&repo).await;
+        let full = repo.create_document(user.id, "Draft only").await.unwrap();
+        let doc_id = full.document.id;
+        let parsed = openpublish_content::parse_markdown("unpublished body");
+        let merged = openpublish_content::merge_blocks(&[], &[], parsed, now_ms());
+        repo.save_document_blocks(doc_id, &merged.blocks, &merged.versions)
+            .await
+            .unwrap();
+
+        let dump = repo.export_json().await.unwrap();
+        let docs = dump["documents"].as_array().unwrap();
+        assert_eq!(docs.len(), 1, "drafts must be part of backups");
+        assert_eq!(docs[0]["title"], "Draft only");
+        assert_eq!(docs[0]["status"], "draft");
     }
 }
