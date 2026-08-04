@@ -1,0 +1,1458 @@
+With all the ideas combined, the MVP has become much clearer.
+
+The MVP is not a federated Internet, not a book platform, not a video platform, and not a full WordPress replacement.
+
+The MVP is:
+
+An open-source, self-hostable blogging platform with built-in content optimization: publish, automatically A/B test, measure, and improve.
+
+Think: "GitHub for creators + analytics lab for blogs."
+
+MVP Core Product
+1. Self-hosted blogging server
+
+Someone runs:
+
+docker compose up
+
+
+They get their own publishing site.
+
+Basic features:
+
+User accounts
+Profiles
+Markdown editor
+Publish articles
+Tags/categories
+Comments
+RSS feed
+Themes
+2. Analytics engine (the main differentiator)
+
+Every article collects:
+
+Views
+Unique readers
+Reading time
+Scroll depth
+Completion rate
+Returning readers
+Referral source
+Subscriber conversion
+
+Dashboard:
+
+Article: "Building a Home Server"
+
+Views:             42,810
+Avg reading time:  6:24
+Completion:        71%
+Subscribers gained:+392
+
+Traffic:
+Search     54%
+Direct     22%
+Social     18%
+Other       6%
+
+3. Automatic A/B testing
+
+This is the killer feature.
+
+Before publishing:
+
+Creator provides:
+
+Headlines
+A: "How I Built a Home Server"
+
+B: "I Replaced My Cloud Subscription With This"
+
+C: "The $200 Home Server Experiment"
+
+Images
+Image A
+Image B
+Image C
+
+
+The platform automatically:
+
+Splits traffic
+Measures results
+Picks the winner
+Switches the article
+Reports results
+
+Example report:
+
+Experiment Complete
+
+Winner:
+Headline B
+
+Confidence:
+97%
+
+Results:
+
+CTR:
+A 4.2%
+B 7.8%
+C 5.1%
+
+Average Reading:
+A 4:20
+B 6:10
+C 4:55
+
+Subscriber Conversion:
+B +42%
+
+4. Creator leaderboard (optional but important)
+
+Make it engaging.
+
+Not just views.
+
+Rank:
+
+Fastest growing creator
+Best reader retention
+Best improvement
+Best experimenter
+Most valuable articles
+
+Example:
+
+Weekly Creator Rankings
+
+1. Alice
+   +38% audience growth
+
+2. Bob
+   Highest retention
+
+3. Maria
+   Best experiments
+
+5. Open-source foundation
+
+Repository:
+
+openpublish/
+
+├── core
+│   ├── users
+│   ├── posts
+│   └── permissions
+│
+├── analytics
+│   ├── event tracking
+│   └── metrics
+│
+├── experiments
+│   └── AB testing engine
+│
+├── themes
+│
+└── plugins
+
+
+Anyone can contribute.
+
+Explicitly NOT in MVP
+
+Do not build yet:
+
+❌ Federation protocol
+❌ Global search engine
+❌ Video hosting
+❌ Book publishing
+❌ AI writing assistant
+❌ Plugin marketplace
+❌ Social network
+
+Those are expansion layers.
+
+The MVP success test
+
+You know you have something if:
+
+50–100 writers install it
+They publish regularly
+They check analytics daily
+They run experiments
+Their articles improve over time
+
+The question you are testing is:
+
+"Will creators become more engaged because publishing becomes a measurable optimization game?"
+
+If yes, then federation becomes the natural next step:
+
+Single servers
+       ↓
+Connected servers
+       ↓
+Shared discovery
+       ↓
+Open publishing ecosystem
+
+
+The MVP is essentially the first piece of the future ecosystem: the optimization engine for creators.
+
+
+
+
+Rust actually fits the long-term vision quite well, especially if you are thinking about self-hosted servers, federation, performance, and a durable open-source project.
+
+I would adjust the stack like this:
+
+Rust-based architecture
+                 Browser
+
+                    |
+                    v
+
+              Web Frontend
+             (SvelteKit)
+
+                    |
+                    v
+
+             Rust Backend
+          (API + Core Engine)
+
+        ┌───────────┼───────────┐
+        v           v           v
+
+   PostgreSQL   Analytics   Search
+                Engine
+
+Backend: Rust
+
+Good choices:
+
+Web framework
+Axum (my first choice)
+Built on Tokio
+Modern Rust ecosystem
+Type-safe
+Good async support
+Maintained by the Tokio ecosystem
+
+Alternative:
+
+Actix Web (very fast, mature)
+
+I would choose:
+
+Rust + Axum + Tokio
+
+Database layer
+PostgreSQL
+
+Rust ecosystem support is excellent:
+
+SQLx
+Diesel
+SeaORM
+
+I would lean toward:
+
+SQLx
+
+
+because it gives compile-time checked SQL without hiding the database too much.
+
+Content model
+
+Rust is especially interesting because your content objects will expand.
+
+Instead of a "post table," think:
+
+enum ContentType {
+    Article,
+    Video,
+    Book,
+    Podcast,
+    Dataset,
+}
+
+
+Then:
+
+Content {
+    id: Uuid,
+    author: Identity,
+    content_type: ContentType,
+    body: Document,
+    metrics: Metrics,
+}
+
+
+This makes future expansion easier.
+
+Analytics engine
+
+For MVP:
+
+Rust event collector:
+
+Browser
+   |
+   |
+Analytics API (Rust)
+   |
+   |
+PostgreSQL
+
+
+Events:
+
+{
+  "event": "article_read",
+  "article": "abc",
+  "duration": 322,
+  "completion": 0.84
+}
+
+
+Later:
+
+Rust Collector
+       |
+       v
+   ClickHouse
+
+
+Rust + ClickHouse is a strong combination for high-volume analytics.
+
+A/B testing engine
+
+This is where Rust is a good fit.
+
+You can make it a deterministic service:
+
+Experiment Engine
+
+Input:
+- variants
+- audience
+- goal
+
+Output:
+- winner
+- confidence
+- explanation
+
+
+Example:
+
+struct Experiment {
+    variants: Vec<Variant>,
+    metric: Metric,
+    confidence_threshold: f64,
+}
+
+Federation later
+
+Rust is also a good choice here.
+
+You could create a protocol crate:
+
+openpublish-protocol
+
+
+Containing:
+
+identity objects
+signatures
+content exchange
+reputation events
+federation messages
+
+Other implementations could use it.
+
+Frontend
+
+I would still probably not use Rust for the browser UI.
+
+Options:
+
+SvelteKit
+
+Probably best for:
+
+publishing pages
+dashboards
+fast SEO
+Leptos (Rust frontend)
+
+Interesting, but I would be cautious for a first version.
+
+The Rust ecosystem is improving, but Svelte/React has a much larger pool of contributors.
+
+Repository structure
+
+Something like:
+
+openpublish/
+
+├── crates/
+│
+│   ├── server
+│   ├── content
+│   ├── analytics
+│   ├── experiments
+│   ├── federation
+│   └── protocol
+│
+├── frontend/
+│
+├── migrations/
+│
+├── docker/
+│
+└── docs/
+
+
+This is a very natural Rust workspace structure.
+
+Why Rust makes sense here
+
+Your project has several characteristics where Rust shines:
+
+Long-lived infrastructure
+Self-hosted deployments
+Security-sensitive federation
+High-volume analytics
+Plugin/runtime boundaries
+Protocol design
+
+The main tradeoff is contributor accessibility. A Rust-only project will attract a more specialized developer community than a TypeScript/Python project.
+
+A good compromise could be:
+
+Rust core engine
+SvelteKit web interface
+PostgreSQL storage
+Open APIs for plugins
+
+That gives you a serious infrastructure foundation without making every contributor learn Rust just to build a theme or extension.
+
+
+
+
+AGPL is actually a very interesting fit for the direction you're describing.
+
+Your philosophy becomes:
+
+"Anyone can run it, modify it, and improve it — but if they offer it as a network service, their improvements must remain available to the community."
+
+That matches the idea of an open publishing ecosystem better than a permissive license if you want to prevent a company from taking the platform, adding proprietary features, and turning it into a closed competitor.
+
+License strategy
+
+A possible structure:
+
+OpenPublish
+│
+├── Core server
+│   └── AGPL-3.0
+│
+├── Federation protocol
+│   └── AGPL-3.0 / Apache-2.0 consideration
+│
+├── Official clients
+│   ├── Desktop app
+│   └── Mobile apps
+│
+├── SDKs
+│   └── Apache-2.0 or MIT
+│
+└── Themes/plugins
+    └── creator choice
+
+
+You may want legal advice before finalizing, because license choices around SDKs, plugins, and clients can affect adoption.
+
+Mobile and desktop apps fit naturally
+
+Your architecture should treat apps as clients, not separate products.
+
+Something like:
+
+                 OpenPublish Server
+
+                       |
+                    API Layer
+
+          ┌────────────┼────────────┐
+
+          Web App   Desktop App   Mobile App
+
+
+The server remains the source of truth.
+
+Desktop app
+
+Potential features:
+
+Creator Studio
+
+Like a professional publishing tool:
+
+Write offline
+Manage drafts
+View analytics
+Run experiments
+Edit books
+Upload media
+Schedule posts
+
+Possible technologies:
+
+Tauri + Rust
+
+This is a very natural fit:
+
+Small binaries
+Uses your Rust ecosystem
+Uses web UI technology
+Cross-platform
+
+Targets:
+
+Windows
+macOS
+Linux
+Mobile apps
+
+Two approaches:
+
+Option 1: Native
+iOS: Swift
+Android: Kotlin
+
+Best experience, more maintenance.
+
+Option 2: Cross-platform
+
+Examples:
+
+Flutter
+React Native
+Kotlin Multiplatform
+
+A creator app could focus on:
+
+writing drafts
+notifications
+analytics
+comments
+community interaction
+The API becomes extremely important
+
+Do not make the web frontend special.
+
+Design:
+
+                 API
+
+        /content
+        /analytics
+        /experiments
+        /media
+        /federation
+        /books
+        /identity
+
+
+Then:
+
+Web uses it
+Desktop uses it
+Mobile uses it
+Third-party apps use it
+A very powerful future feature: local AI assistants
+
+Because creators own their servers, they could run local tools:
+
+Example:
+
+Creator Laptop
+
+Local AI assistant
+
+    |
+    |
+OpenPublish API
+
+    |
+    |
+Your content + analytics
+
+
+It could suggest:
+
+better headlines
+article improvements
+book chapters
+content gaps
+
+without sending private data to a third party.
+
+The full vision becomes something like:
+                 OpenPublish Network
+
+                         |
+             -------------------------
+             |           |           |
+          Server A    Server B    Server C
+
+             |
+      ------------------
+      |        |        |
+
+    Web    Desktop    Mobile
+
+             |
+      Content Intelligence
+
+      - Analytics
+      - A/B testing
+      - Search
+      - Books
+      - Video
+      - Federation
+
+
+Rust + AGPL + self-hosting + first-party apps is a coherent direction. The main thing I would protect early is the protocol and data model. If those are well designed, the clients and future features become replaceable pieces rather than a rewrite every few years.
+
+
+
+
+That is actually a very important addition. It changes the federation model from just communication between servers into something closer to a resilient distributed publishing network.
+
+You are describing federated caching / replication.
+
+The idea:
+
+If a server disappears, the content is not necessarily lost because other participating nodes have cached copies.
+
+Concept: Content Availability Network
+
+Example:
+
+Author Server
+
+    article.md
+    images
+    metadata
+
+          |
+          |
+   Federation Network
+
+     Node A
+     Node B
+     Node C
+
+   cached replicas
+
+
+If the original server goes offline:
+
+example.com/article123
+        |
+        X
+   server unavailable
+
+
+The network can still provide:
+
+article123
+ ↓
+cached copy
+ ↓
+available from another node
+
+But ownership needs to be clear
+
+You probably don't want "everyone copies everything."
+
+A better model:
+
+Original owner
+
+The author/server remains authoritative.
+
+{
+  "content_id": "abc123",
+  "origin": "alice.blog",
+  "version": 7
+}
+
+
+Other servers hold:
+
+cached copies
+mirrors
+availability replicas
+Similar ideas exist elsewhere
+
+The concepts are related to:
+
+Git: many copies of repositories
+BitTorrent: distributed content availability
+IPFS: content-addressed storage
+Email: independent servers communicating
+
+But your focus would be publishing objects, not generic files.
+
+Content addressing
+
+A powerful design would be:
+
+Every piece of content gets a hash:
+
+article:
+Qm8x92k...abc
+
+
+The network knows:
+
+"This exact article version exists on these nodes."
+
+Example:
+
+Content ID:
+abc123
+
+Available:
+
+✓ author.blog
+✓ university.server
+✓ archive.node
+✓ community.node
+
+Versioning becomes critical
+
+Since you want books, articles, and collaborative editing:
+
+Never overwrite content.
+
+Use versions:
+
+Article: AI Explained
+
+v1.0
+ |
+v1.1
+ |
+v1.2
+ |
+v2.0
+
+
+A cached copy always knows exactly which version it has.
+
+Storage incentives
+
+A future ecosystem question:
+
+Why would a server store someone else's content?
+
+Possible reasons:
+
+Community servers
+
+A university might mirror science content.
+
+Reputation
+
+Nodes earn reputation:
+
+Storage contribution:
++450 points
+
+Reliable availability:
++200 points
+
+Paid storage
+
+A server operator could offer:
+
+"Keep your content replicated here."
+
+Privacy and permissions
+
+You need rules.
+
+Not everything should be cached.
+
+Content metadata could include:
+
+{
+ "replication": "allowed",
+ "license": "CC-BY",
+ "mirror_policy": "public"
+}
+
+
+Private posts:
+
+{
+ "replication": "forbidden"
+}
+
+Architecture addition
+
+Your system becomes:
+
+                 OpenPublish Protocol
+
+                       |
+        --------------------------------
+
+        Publishing       Federation       Storage
+          Core              Layer          Layer
+
+                            |
+                     Replica Manager
+
+                            |
+          ---------------------------------
+          |              |                |
+
+       Node A         Node B          Node C
+       origin         cache           backup
+
+The really interesting consequence
+
+Now a creator is not just publishing to a website.
+
+They are publishing into a persistent knowledge network.
+
+A 10-year-old article could still exist because:
+
+people referenced it
+servers cached it
+books incorporated it
+communities preserved it
+
+That fits your original idea very well: blogs becoming books, videos, knowledge graphs, and a competitive ecosystem.
+
+The architecture is starting to look less like WordPress and more like an open publishing infrastructure for the web.
+
+
+
+That's actually an even more ambitious approach, and it's similar in spirit to how some document editors and knowledge management systems model content.
+
+Instead of storing a document as a JSON blob, you're proposing an entity-based document model, where every piece of content is individually addressable.
+
+For example, instead of:
+
+{
+  "blocks": [
+    { "type": "paragraph", "text": "Rust is a systems language." }
+  ]
+}
+
+
+you'd have something like:
+
+Document
+--------
+id: 123
+
+Block
+-----
+id: 1
+document: 123
+type: heading
+order: 0
+
+Text
+----
+id: 10
+block: 1
+value: "Building a Rust Server"
+
+Block
+-----
+id: 2
+document: 123
+type: paragraph
+order: 1
+
+Text
+----
+id: 11
+block: 2
+value: "Rust is a systems programming language..."
+
+
+The HTML renderer walks the document tree and produces HTML.
+
+Going one step further
+
+If search is central to your platform, you could make text itself addressable.
+
+Document
+ ├── Section
+ │    ├── Heading
+ │    ├── Paragraph
+ │    └── List
+ │
+Paragraph
+ ├── Sentence
+ └── Sentence
+
+Sentence
+ ├── Text
+ ├── Keywords
+ ├── Language
+ ├── Embedding (later)
+ └── Version
+
+
+Now you can answer questions like:
+
+"Which sentence changed between versions?"
+"Which paragraph gets readers to leave?"
+"Which paragraph is quoted most often?"
+"Which paragraph should become part of a book?"
+
+Those are difficult if your unit of storage is an HTML or Markdown blob.
+
+Why this is interesting
+
+Imagine your analytics:
+
+Reading Completion
+
+Introduction      98%
+
+Section 2         94%
+
+Section 3         53%  ← readers leave here
+
+Conclusion        91%
+
+
+Now you know exactly which paragraph or section needs improvement.
+
+The A/B testing engine could even test individual sections instead of whole articles.
+
+One concern: granularity
+
+I would stop at the block or paragraph level for the initial implementation.
+
+If every sentence or every word becomes a database row from day one, you'll dramatically increase complexity:
+
+More joins
+More indexing
+Harder editing logic
+More migration work
+
+You can always evolve the model later.
+
+For an MVP, a hierarchy like this is a good balance:
+
+Document
+    │
+    ├── Section
+    │
+    ├── Heading
+    │
+    ├── Paragraph
+    │
+    ├── Image
+    │
+    ├── Code Block
+    │
+    ├── Quote
+    │
+    └── Table
+
+
+Each node is a row in the database, each has its own ID, metadata, version history, analytics, and relationships.
+
+That still gives you all the benefits of structured storage while keeping the system manageable.
+
+I especially like one consequence of this design: HTML becomes just one renderer. The same document tree can generate:
+
+HTML for the web
+EPUB for books
+PDF
+Native mobile views
+Desktop views
+Search indexes
+AI-friendly structured data
+Federation payloads
+
+In other words, the database stores the semantic document, and every presentation format is derived from it. That philosophy aligns very well with the broader publishing platform you're envisioning.
+
+
+This is actually a fun database design problem. I would not duplicate articles. Instead, think of experiments as overlays on top of the canonical document.
+
+The canonical content is always there, and experiments temporarily substitute parts of it.
+
+Canonical document
+Document
+--------
+id: 123
+
+Block
+-----
+id: 1
+document_id: 123
+type: heading
+
+Block
+-----
+id: 2
+document_id: 123
+type: paragraph
+
+Block
+-----
+id: 3
+document_id: 123
+type: image
+
+
+Each block has one "published" version.
+
+BlockVersion
+------------
+
+id: 101
+block_id: 1
+status: published
+content: "How to Build a Rust Server"
+
+id: 102
+block_id: 2
+status: published
+content: "Rust is a systems programming language..."
+
+id: 103
+block_id: 3
+status: published
+asset_id: 87
+
+Now create an experiment
+Experiment
+----------
+
+id: 50
+
+document_id: 123
+
+goal:
+maximize_read_completion
+
+status:
+running
+
+confidence:
+95%
+
+Experiment variants
+
+Instead of changing the document, create variants.
+
+ExperimentVariant
+
+id: 1
+experiment_id: 50
+block_id: 1
+
+traffic:
+33%
+
+content:
+"Build Faster Servers with Rust"
+
+ExperimentVariant
+
+id: 2
+experiment_id: 50
+block_id: 1
+
+traffic:
+33%
+
+content:
+"Rust Backend Development Guide"
+
+ExperimentVariant
+
+id: 3
+experiment_id: 50
+block_id: 1
+
+traffic:
+34%
+
+content:
+"How to Build a Rust Server"
+
+
+The original block is untouched.
+
+Rendering
+
+When a visitor loads the page:
+
+Document
+
+↓
+
+Renderer
+
+↓
+
+Experiment Engine
+
+↓
+
+Heading?
+
+
+Experiment engine answers:
+
+Visitor #39284
+
+Show:
+
+Variant 2
+
+
+Renderer inserts that text.
+
+Analytics
+
+Every page impression records:
+
+Experiment Impression
+
+experiment_id: 50
+
+variant_id: 2
+
+visitor: xyz
+
+
+Later:
+
+Experiment Conversion
+
+experiment_id: 50
+
+variant_id: 2
+
+completion: 81%
+
+reading_time: 421 seconds
+
+
+Now you know exactly how every variant performed.
+
+Finishing
+
+When confidence reaches your threshold:
+
+Winner
+
+Variant 2
+
+
+The system simply creates a new published block version:
+
+BlockVersion
+
+id: 104
+
+block_id: 1
+
+status:
+published
+
+content:
+"Rust Backend Development Guide"
+
+
+The experiment is archived.
+
+Nothing was overwritten.
+
+Even better: immutable versions
+
+I'd probably make everything immutable.
+
+Instead of editing:
+
+BlockVersion
+
+101
+
+
+Create:
+
+BlockVersion
+
+101
+
+
+↓
+
+BlockVersion
+
+104
+
+
+The block simply points to the newest version.
+
+Benefits:
+
+perfect history
+rollback
+books always reference exact versions
+federation is easier
+backups are simpler
+The result
+
+You end up with something like this:
+
+Document
+    │
+    ▼
+Block
+    │
+    ├── Published Version
+    │
+    └── Experiment
+            │
+            ├── Variant A
+            ├── Variant B
+            └── Variant C
+
+
+The renderer always asks:
+
+"For this visitor, which version of this block should I render?"
+
+That architecture scales nicely. Tomorrow you can run experiments on:
+
+headings
+images
+paragraphs
+CTAs
+book covers
+video thumbnails
+
+without changing the underlying document model.
+
+One suggestion I'd make is to avoid storing the experimental content directly on the ExperimentVariant row. Instead, let variants reference the same immutable BlockVersion objects as the published content. Then both published content and experiments are built from the same primitives:
+
+Block
+   │
+   ├── BlockVersion #101 (published)
+   ├── BlockVersion #102 (headline variant)
+   ├── BlockVersion #103 (headline variant)
+   └── BlockVersion #104 (headline variant)
+
+Experiment
+   ├── uses BlockVersion #102
+   ├── uses BlockVersion #103
+   └── uses BlockVersion #104
+
+
+This keeps one consistent versioning model throughout the system and makes future features like federation, undo/redo, and collaborative editing much cleaner.
+
+
+
+
+
+Yes, but not as a full marketing automation platform.
+
+I would include just enough so that the platform can answer a creator's biggest question:
+
+"Did this article actually help me achieve my goal?"
+
+Views alone aren't enough. The platform should optimize for outcomes.
+
+I'd include these in the MVP
+✅ Email sign-ups
+
+Every article can have one or more sign-up forms.
+
+Analytics show:
+
+Article:
+10,243 readers
+
+Newsletter sign-ups:
+412
+
+Conversion:
+4.0%
+
+
+This becomes another optimization metric.
+
+✅ Calls to Action (CTAs)
+
+Instead of hardcoding a button, treat it as another block.
+
+CTA
+
+Variant A
+"Subscribe"
+
+Variant B
+"Get the free guide"
+
+Variant C
+"Join 12,000 readers"
+
+
+The experiment engine can optimize it just like headlines.
+
+✅ Landing pages
+
+Not every page needs to be a blog post.
+
+Content types could include:
+
+Article
+Landing Page
+Book
+About Page
+
+A landing page uses the same document model and experiment engine.
+
+✅ Simple funnels
+
+Don't build HubSpot.
+
+Build a simple conversion graph:
+
+Search
+
+↓
+
+Article
+
+↓
+
+Newsletter
+
+↓
+
+Book Download
+
+↓
+
+Paid Course
+
+
+Then show analytics:
+
+Visitors:
+10,000
+
+↓
+
+Read article:
+7,200
+
+↓
+
+Newsletter:
+510
+
+↓
+
+Book download:
+184
+
+↓
+
+Purchased:
+23
+
+
+That's enough for creators to understand their funnel.
+
+I would NOT build initially
+
+❌ Email sending infrastructure
+
+❌ Marketing automation
+
+❌ CRM
+
+❌ Sales pipelines
+
+❌ Contact management
+
+Instead, integrate with existing providers.
+
+For example:
+
+OpenPublish
+
+↓
+
+Email Provider API
+
+↓
+
+Mailcoach
+Listmonk
+Brevo
+Mailchimp
+ConvertKit
+
+
+Your platform tracks conversions while another system sends newsletters and manages subscribers.
+
+Why this fits your vision
+
+Your platform isn't trying to replace every marketing tool.
+
+It's trying to become the operating system for creators.
+
+Everything a creator wants to optimize is represented as an object:
+
+Headline
+Image
+Paragraph
+CTA
+Sign-up form
+Landing page
+
+Each object can:
+
+have variants
+be measured
+be improved automatically
+participate in experiments
+
+That consistency is much more valuable than adding dozens of unrelated features.
+
+I would summarize the MVP around five pillars:
+Structured content (database-first, no HTML source of truth)
+Automatic experimentation (headlines, images, CTAs)
+Deep analytics (reading behavior and conversions)
+Conversion goals (email sign-ups, downloads, purchases)
+Self-hosted and open source (Rust + AGPL)
+
+Those five pieces reinforce each other. Everything else you've discussed—books, federation, video, global search, replication, mobile apps—is a natural extension rather than a prerequisite.
