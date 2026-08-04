@@ -26,6 +26,7 @@ pub fn app(repo: Arc<dyn Repository>) -> Router {
     Router::new()
         .route("/health", get(routes::health))
         .route("/setup", get(routes::setup_status).post(routes::setup))
+        .route("/api/setup", get(routes::setup_status).post(routes::setup))
         .route("/api/login", post(routes::login))
         .route("/api/logout", post(routes::logout))
         .route("/api/me", get(routes::me))
@@ -42,11 +43,20 @@ pub fn app(repo: Arc<dyn Repository>) -> Router {
             post(routes::publish_document),
         )
         .route("/api/comments/{id}/approve", post(routes::approve_comment))
+        .route("/api/comments/pending", get(routes::pending_comments))
+        .route("/api/articles", get(routes::list_articles))
+        .route("/api/articles/{slug}", get(routes::article))
+        .route(
+            "/api/articles/{slug}/comments",
+            get(routes::list_comments).post(routes::create_comment),
+        )
+        .route("/api/render", post(routes::render_markdown))
         .route("/articles/{slug}", get(routes::article))
         .route(
             "/articles/{slug}/comments",
             get(routes::list_comments).post(routes::create_comment),
         )
         .route("/rss", get(routes::rss))
+        .route("/api/rss", get(routes::rss))
         .with_state(state)
 }

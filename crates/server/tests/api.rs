@@ -685,3 +685,340 @@ async fn rss_lists_published_articles_only() {
     assert!(feed.contains("published-one"));
     assert!(!feed.contains("draft-only"));
 }
+
+#[tokio::test]
+async fn render_preview_parses_and_renders() {
+    let app = test_app().await;
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/setup",
+            None,
+            None,
+            Some(json!({
+                "email": "a@b.com",
+                "password": "password123",
+                "display_name": "Alice",
+            })),
+        ),
+    )
+    .await;
+    let cookie = session_cookie(&resp);
+
+    // Render requires auth.
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/render",
+            None,
+            None,
+            Some(json!({ "markdown": "# Hi\n\nBody" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/render",
+            Some(&cookie),
+            None,
+            Some(json!({ "markdown": "# Hi\n\nSome **bold** body\n\n> quote" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let view = body_json(resp).await;
+    assert_eq!(view["blocks"].as_array().unwrap().len(), 3);
+    assert_eq!(view["blocks"][0]["kind"], "Heading { level: 1 }");
+    assert!(view["html"].as_str().unwrap().contains("<h1>Hi</h1>"));
+    assert!(
+        view["html"]
+            .as_str()
+            .unwrap()
+            .contains("<blockquote>quote</blockquote>")
+    );
+}
+
+#[tokio::test]
+async fn articles_list_is_public_and_lists_published_only() {
+    let app = test_app().await;
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/setup",
+            None,
+            None,
+            Some(json!({
+                "email": "a@b.com",
+                "password": "password123",
+                "display_name": "Alice",
+            })),
+        ),
+    )
+    .await;
+    let cookie = session_cookie(&resp);
+    let csrf = body_json(resp).await["csrf_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (_, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/documents",
+            Some(&cookie),
+            Some(&csrf),
+            Some(json!({ "title": "Hidden Draft", "markdown": "draft", "tags": [] })),
+        ),
+    )
+    .await;
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/documents",
+            Some(&cookie),
+            Some(&csrf),
+            Some(json!({ "title": "Public Post", "markdown": "live", "tags": [] })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let published = body_json(resp).await;
+    let pub_id = published["id"].as_str().unwrap().to_string();
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/documents/{pub_id}/publish"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(body_json(resp).await["status"], "published");
+
+    // Public endpoint, no auth required.
+    let (status, resp) = send(
+        &app,
+        json_req(Method::GET, "/api/articles", None, None, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let articles = body_json(resp).await;
+    assert_eq!(articles.as_array().unwrap().len(), 1);
+    assert_eq!(articles[0]["slug"], "public-post");
+    assert_eq!(articles[0]["title"], "Public Post");
+}
+
+#[tokio::test]
+async fn pending_comments_are_listed_and_approvable() {
+    let app = test_app().await;
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/setup",
+            None,
+            None,
+            Some(json!({
+                "email": "a@b.com",
+                "password": "password123",
+                "display_name": "Alice",
+            })),
+        ),
+    )
+    .await;
+    let cookie = session_cookie(&resp);
+    let csrf = body_json(resp).await["csrf_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/documents",
+            Some(&cookie),
+            Some(&csrf),
+            Some(json!({ "title": "Moderate Me", "markdown": "body", "tags": [] })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = body_json(resp).await["id"].as_str().unwrap().to_string();
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/documents/{id}/publish"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(body_json(resp).await["status"], "published");
+
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/articles/moderate-me/comments",
+            None,
+            None,
+            Some(json!({ "author_name": "Spam", "body": "buy my stuff" })),
+        ),
+    )
+    .await;
+    let comment_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    // Pending list requires auth.
+    let (status, _) = send(
+        &app,
+        json_req(Method::GET, "/api/comments/pending", None, None, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            "/api/comments/pending",
+            Some(&cookie),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let pending = body_json(resp).await;
+    assert_eq!(pending.as_array().unwrap().len(), 1);
+    assert_eq!(pending[0]["body"], "buy my stuff");
+
+    let (_, _resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/comments/{comment_id}/approve"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            "/api/comments/pending",
+            Some(&cookie),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(body_json(resp).await.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn editing_with_insert_keeps_stable_block_ids() {
+    let app = test_app().await;
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/setup",
+            None,
+            None,
+            Some(json!({
+                "email": "a@b.com",
+                "password": "password123",
+                "display_name": "Alice",
+            })),
+        ),
+    )
+    .await;
+    let cookie = session_cookie(&resp);
+    let csrf = body_json(resp).await["csrf_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/documents",
+            Some(&cookie),
+            Some(&csrf),
+            Some(json!({
+                "title": "Stable IDs",
+                "markdown": "# Heading\n\nOriginal body.",
+                "tags": [],
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let doc = body_json(resp).await;
+    let id = doc["id"].as_str().unwrap().to_string();
+    let heading_id = doc["blocks"][0]["id"].as_str().unwrap().to_string();
+
+    // Insert a paragraph at the top (before the heading) and reword body.
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::PUT,
+            &format!("/api/documents/{id}"),
+            Some(&cookie),
+            Some(&csrf),
+            Some(json!({
+                "title": "Stable IDs",
+                "markdown": "Inserted at top.\n\n# Heading\n\nReworded body.",
+                "tags": [],
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "edit with insert must not collide");
+    let edited = body_json(resp).await;
+    assert_eq!(edited["blocks"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        edited["blocks"][1]["id"], heading_id,
+        "heading keeps its id"
+    );
+
+    // Publish and confirm the public article reflects the edit.
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/documents/{id}/publish"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(body_json(resp).await["status"], "published");
+    let (_, resp) = send(
+        &app,
+        json_req(Method::GET, "/api/articles/stable-ids", None, None, None),
+    )
+    .await;
+    let article = body_json(resp).await;
+    let html = article["html"].as_str().unwrap();
+    assert!(html.contains("Inserted at top."));
+    assert!(html.contains("<h1>Heading</h1>"));
+}

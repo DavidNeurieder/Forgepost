@@ -97,6 +97,20 @@ pub struct CommentView {
     pub created_at_ms: i64,
 }
 
+/// A single block from a fresh Markdown parse (no stable identity yet).
+#[derive(Serialize)]
+pub struct ParsedBlockView {
+    pub kind: String,
+    pub content: serde_json::Value,
+}
+
+/// Result of rendering Markdown for live editor preview.
+#[derive(Serialize)]
+pub struct RenderView {
+    pub html: String,
+    pub blocks: Vec<ParsedBlockView>,
+}
+
 fn block_views(doc: &Document) -> Vec<BlockView> {
     doc.blocks
         .iter()
@@ -182,6 +196,11 @@ pub struct UpdateDocumentRequest {
 pub struct CommentRequest {
     author_name: String,
     body: String,
+}
+
+#[derive(Deserialize)]
+pub struct RenderRequest {
+    markdown: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +296,43 @@ pub async fn list_documents(
 ) -> Result<Json<Vec<DocumentSummary>>, ApiError> {
     let docs = state.repo.list_documents(auth.user.id).await?;
     Ok(Json(docs))
+}
+
+/// Public: published articles for the blog home page.
+pub async fn list_articles(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<DocumentSummary>>, ApiError> {
+    let docs = state.repo.list_published().await?;
+    Ok(Json(docs))
+}
+
+/// Authenticated: render Markdown for the editor's live preview. Read-only, so
+/// no CSRF is required — the server parser stays the single source of truth
+/// for what the published article will look like.
+pub async fn render_markdown(
+    _state: State<AppState>,
+    _auth: AuthUser,
+    Json(body): Json<RenderRequest>,
+) -> Result<Json<RenderView>, ApiError> {
+    let parsed = openpublish_content::parse_markdown(&body.markdown);
+    let html = render_html(parsed.iter().map(|b| (b.kind, &b.content)));
+    let blocks = parsed
+        .into_iter()
+        .map(|b| ParsedBlockView {
+            kind: format!("{:?}", b.kind),
+            content: b.content,
+        })
+        .collect();
+    Ok(Json(RenderView { html, blocks }))
+}
+
+/// Authenticated: comments awaiting moderation across all documents.
+pub async fn pending_comments(
+    State(state): State<AppState>,
+    _auth: AuthUser,
+) -> Result<Json<Vec<CommentView>>, ApiError> {
+    let comments = state.repo.pending_comments().await?;
+    Ok(Json(comments.into_iter().map(comment_view).collect()))
 }
 
 pub async fn create_document(

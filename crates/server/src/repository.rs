@@ -81,6 +81,7 @@ pub trait Repository: Send + Sync {
         document_id: DocumentId,
         status: Option<&str>,
     ) -> Result<Vec<Comment>, RepositoryError>;
+    async fn pending_comments(&self) -> Result<Vec<Comment>, RepositoryError>;
     async fn set_comment_status(&self, id: Uuid, status: &str) -> Result<(), RepositoryError>;
 
     // Export
@@ -504,6 +505,13 @@ impl Repository for SqliteRepository {
         versions: &[BlockVersion],
     ) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await?;
+        // Park existing blocks out of the unique (document_id, position) space
+        // first, so renumbering (e.g. inserting at position 0) cannot collide
+        // transiently while other rows still hold the old positions.
+        sqlx::query("UPDATE blocks SET position = -(position + 1) WHERE document_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
         for block in blocks {
             let kind = serde_json::to_string(&block.kind).unwrap_or_default();
             let updated: Option<(String,)> =
@@ -685,6 +693,26 @@ impl Repository for SqliteRepository {
             return Err(RepositoryError::NotFound("comment".into()));
         }
         Ok(())
+    }
+
+    async fn pending_comments(&self) -> Result<Vec<Comment>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT id, document_id, author_name, body, status, created_at_ms FROM comments
+             WHERE status = 'pending' ORDER BY created_at_ms ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| Comment {
+                id: Uuid::from_str(&r.get::<String, _>("id")).unwrap_or_default(),
+                document_id: Uuid::from_str(&r.get::<String, _>("document_id")).unwrap_or_default(),
+                author_name: r.get("author_name"),
+                body: r.get("body"),
+                status: r.get("status"),
+                created_at_ms: r.get("created_at_ms"),
+            })
+            .collect())
     }
 
     async fn export_json(&self) -> Result<serde_json::Value, RepositoryError> {

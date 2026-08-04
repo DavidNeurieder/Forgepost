@@ -2,6 +2,8 @@ import adapter from '@sveltejs/adapter-auto';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
+const apiBase = process.env.OPENPUBLISH_API || 'http://127.0.0.1:8080';
+
 export default defineConfig({
 	plugins: [
 		sveltekit({
@@ -16,5 +18,15 @@ export default defineConfig({
 			// See https://svelte.dev/docs/kit/adapters for more information about adapters.
 			adapter: adapter()
 		})
-	]
+	],
+	server: {
+		proxy: {
+			// Solo mode: the Rust binary is the API origin. Cookies stay
+			// same-origin through the dev server so auth just works.
+			'/api': {
+				target: apiBase,
+				changeOrigin: true
+			}
+		}
+	}
 });
