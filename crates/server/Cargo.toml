@@ -1,0 +1,30 @@
+[package]
+name = "openpublish-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OpenPublish server: Axum API + core engine"
+
+[[bin]]
+name = "openpublish"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+openpublish-analytics = { path = "../analytics" }
+openpublish-content = { path = "../content" }
+openpublish-experiments = { path = "../experiments" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

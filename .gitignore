@@ -1,2 +1,18 @@
-
 opencode/
+
+# Rust
+target/
+
+# Node / SvelteKit
+node_modules/
+.svelte-kit/
+frontend/build/
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+
+# Misc
+.env
+.env.*

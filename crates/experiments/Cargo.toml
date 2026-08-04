@@ -1,0 +1,11 @@
+[package]
+name = "openpublish-experiments"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A/B experiment overlay engine (Bayesian + sequential)"
+
+[dependencies]
+openpublish-content = { path = "../content" }
+serde = { workspace = true }
+uuid = { workspace = true }
