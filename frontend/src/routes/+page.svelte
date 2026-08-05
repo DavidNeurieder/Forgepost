@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { api } from '$lib/api';
 	import type { DocumentSummary } from '$lib/types';
 
@@ -12,6 +13,11 @@
 	}
 
 	$effect(() => {
+		api<{ setup_complete: boolean }>('/setup')
+			.then((s) => {
+				if (!s.setup_complete) goto('/setup');
+			})
+			.catch(() => {});
 		api<DocumentSummary[]>('/articles')
 			.then((a) => (articles = a))
 			.catch((e) => (error = e instanceof Error ? e.message : 'Failed to load posts.'))

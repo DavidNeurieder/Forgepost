@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { bootstrap, currentSession } from '$lib/api';
+	import { api, bootstrap, currentSession } from '$lib/api';
 
 	let email = $state('');
 	let password = $state('');
@@ -9,8 +9,11 @@
 	let checking = $state(true);
 
 	$effect(() => {
-		currentSession()
-			.then(() => goto('/admin'))
+		api<{ setup_complete: boolean }>('/setup')
+			.then((s) => {
+				if (!s.setup_complete) return goto('/setup');
+				return currentSession().then(() => goto('/admin'));
+			})
 			.catch(() => {})
 			.finally(() => (checking = false));
 	});
