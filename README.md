@@ -250,11 +250,41 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 cd frontend && npm run check    # svelte-check (type checks all routes)
 cd frontend && npm run build
+cd frontend && npm run test     # Vitest: unit (src/lib) + component (@testing-library/svelte)
 ```
 
 The `experiments` crate's correctness tests are golden (hand-computed beta
 probabilities) plus property tests (posterior sanity, sample-size
 concentration, no-winner/stop correctness, assignment honesty).
+
+The frontend test suite covers the tracker (`src/lib/tracker.test.ts`) and the
+API client (`src/lib/api.test.ts`) at the unit level, plus component tests for
+every route that talks to the API (editor, article, dashboard, stats, login,
+setup). Run a single suite with:
+
+```sh
+cd frontend && npx vitest run src/lib          # unit only
+cd frontend && npx vitest run src/routes       # component only
+```
+
+### End-to-end tests
+
+`npm run test:e2e` drives a real headless browser through the full creator
+journey against a real server: first-run setup, write + publish, read + comment
+as a visitor, moderation, analytics, an experiment lifecycle, and logout/login.
+Playwright spawns the `openpublish` binary and the Vite dev server on free ports
+with a throwaway SQLite database (a fresh server every run), so no setup is
+needed beyond building the binary:
+
+```sh
+cargo build --bin openpublish
+cd frontend && npx playwright install chromium   # first time only
+cd frontend && npm run test:e2e
+```
+
+To point Playwright at an already-built binary instead of compiling on the
+spot, set `OPENPUBLISH_BIN=/path/to/openpublish`. Specs live in
+`frontend/e2e/`.
 
 ## License
 

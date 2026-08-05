@@ -160,7 +160,9 @@ export function trackArticle(slug: string): Tracker {
 		}
 	}
 
-	// Ensure a read is recorded even if the reader leaves after reaching the end.
+	// Fire scroll-depth bands as the reader scrolls, and ensure a read is
+	// recorded even if the reader leaves after reaching the end.
+	window.addEventListener('scroll', onScroll, { passive: true });
 	const onLeave = (): void => {
 		if (reached100 && performance.now() - startedAt >= MIN_DWELL_MS) fireRead();
 	};
@@ -172,6 +174,7 @@ export function trackArticle(slug: string): Tracker {
 	return {
 		dispose(): void {
 			observer?.disconnect();
+			window.removeEventListener('scroll', onScroll);
 			document.removeEventListener('visibilitychange', onLeave);
 			window.removeEventListener('pagehide', onLeave);
 		}

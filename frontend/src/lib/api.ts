@@ -76,6 +76,8 @@ export function currentSession(): Promise<SessionResponse> {
 export async function logout(): Promise<void> {
 	try {
 		await api<void>('/logout', { method: 'POST' });
+	} catch {
+		// Best-effort: clear the local session even if the server is unreachable.
 	} finally {
 		setCsrf(null);
 	}
