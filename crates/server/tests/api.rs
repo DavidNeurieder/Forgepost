@@ -6,12 +6,15 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, Response, StatusCode, header};
 use http_body_util::BodyExt;
+use openpublish_experiments::assign_variant;
 use openpublish_server::app;
 use openpublish_server::repository::SqliteRepository;
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use std::str::FromStr;
 use std::sync::Arc;
 use tower::ServiceExt;
+use uuid::Uuid;
 
 const CSRF_HEADER: &str = "x-csrf-token";
 
@@ -1507,4 +1510,560 @@ async fn article_includes_rendered_blocks() {
         assert!(!rb["html"].as_str().unwrap().is_empty());
     }
     assert!(rendered[0]["html"].as_str().unwrap().contains("<h1>"));
+}
+
+// ---------------------------------------------------------------------------
+// Experiments (M3)
+// ---------------------------------------------------------------------------
+
+/// Create an experiment on `block_id` (a "New headline" variant) and start it.
+/// Returns the create response (includes `id` and `variants`).
+async fn seed_running_experiment(
+    app: &Router,
+    cookie: &str,
+    csrf: &str,
+    doc_id: &str,
+    block_id: &str,
+    min_sample: u64,
+) -> Value {
+    let (status, resp) = send(
+        app,
+        json_req(
+            Method::POST,
+            "/api/experiments",
+            Some(cookie),
+            Some(csrf),
+            Some(json!({
+                "document_id": doc_id,
+                "block_id": block_id,
+                "name": "Headline test",
+                "traffic_weight": 50,
+                "confidence_threshold": 0.95,
+                "min_sample_per_variant": min_sample,
+                "variants": [
+                    { "content": { "text": "New headline" }, "weight": 50 },
+                ],
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "experiment created");
+    let exp = body_json(resp).await;
+    let id = exp["id"].as_str().unwrap().to_string();
+    let (status, _) = send(
+        app,
+        json_req(
+            Method::POST,
+            &format!("/api/experiments/{id}/start"),
+            Some(cookie),
+            Some(csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "experiment started");
+    exp
+}
+
+/// Control/variant ids from an experiment view.
+fn variant_ids(exp: &Value) -> (String, String) {
+    let variants = exp["variants"].as_array().unwrap();
+    let control = variants
+        .iter()
+        .find(|v| v["is_control"] == json!(true))
+        .expect("control variant");
+    let variant = variants
+        .iter()
+        .find(|v| v["is_control"] == json!(false))
+        .expect("non-control variant");
+    (
+        control["id"].as_str().unwrap().to_string(),
+        variant["id"].as_str().unwrap().to_string(),
+    )
+}
+
+/// Distinct visitors whose traffic-split assignment matches `want` (true =
+/// variant, false = control), mirroring the server's deterministic assignment.
+fn visitors_for(exp_id: Uuid, control: Uuid, variant: Uuid, want: bool, n: usize) -> Vec<Uuid> {
+    let mut out = Vec::new();
+    let mut i = 0u128;
+    while out.len() < n {
+        i += 1;
+        let v = Uuid::from_u128(i);
+        let chosen = assign_variant(&exp_id, &v, control, 0.5, &[(variant, 50.0)]);
+        if (chosen == variant) == want {
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// Impress (and optionally convert) a visitor on an experiment.
+async fn post_experiment_event(
+    app: &Router,
+    slug: &str,
+    visitor: Uuid,
+    exp_id: &str,
+    variant_id: &str,
+    convert: bool,
+) {
+    post_event(
+        app,
+        &visitor.to_string(),
+        json!({
+            "slug": slug,
+            "session_id": Uuid::new_v4(),
+            "kind": "experiment_impression",
+            "experiment_id": exp_id,
+            "variant_id": variant_id,
+            "payload": {},
+        }),
+    )
+    .await;
+    if convert {
+        post_event(
+            app,
+            &visitor.to_string(),
+            json!({
+                "slug": slug,
+                "session_id": Uuid::new_v4(),
+                "kind": "experiment_conversion",
+                "experiment_id": exp_id,
+                "variant_id": variant_id,
+                "payload": {},
+            }),
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn experiment_lifecycle_and_live_report() {
+    let app = test_app().await;
+    let (cookie, csrf, id, slug, block_ids) = seed_published_article(&app).await;
+    let exp = seed_running_experiment(&app, &cookie, &csrf, &id, &block_ids[0], 100).await;
+    let exp_id = exp["id"].as_str().unwrap().to_string();
+    assert_eq!(exp["goal"], "completion");
+    assert_eq!(exp["variants"].as_array().unwrap().len(), 2);
+
+    // Fresh report: no data, no decision, engine recommends continuing.
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/documents/{id}/experiments"),
+            Some(&cookie),
+            None,
+            None,
+        ),
+    )
+    .await;
+    let list = body_json(resp).await;
+    let e = &list.as_array().unwrap()[0];
+    assert_eq!(e["status"], "running");
+    assert_eq!(e["report"]["recommendation"]["type"], "continue");
+    assert_eq!(e["report"]["variants"].as_array().unwrap().len(), 2);
+    assert_eq!(e["decisions"].as_array().unwrap().len(), 0);
+
+    // Experiments need at least one variant.
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/experiments",
+            Some(&cookie),
+            Some(&csrf),
+            Some(json!({
+                "document_id": id,
+                "block_id": block_ids[1],
+                "variants": [],
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Owner-only: unauthenticated reads are rejected.
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/documents/{id}/experiments"),
+            None,
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let _ = slug;
+    let _ = exp_id;
+}
+
+#[tokio::test]
+async fn experiment_serves_stable_variants_to_visitors() {
+    let app = test_app().await;
+    let (cookie, csrf, id, slug, block_ids) = seed_published_article(&app).await;
+    let exp = seed_running_experiment(&app, &cookie, &csrf, &id, &block_ids[0], 100).await;
+    let exp_id = exp["id"].as_str().unwrap().to_string();
+    let (control_id, variant_id) = variant_ids(&exp);
+
+    let visitor = "99999999-9999-9999-9999-999999999999";
+    let get_article = || async {
+        let (_, resp) = send(
+            &app,
+            json_req(
+                Method::GET,
+                &format!("/api/articles/{slug}"),
+                Some(&format!("opv={visitor}")),
+                None,
+                None,
+            ),
+        )
+        .await;
+        body_json(resp).await
+    };
+
+    let a1 = get_article().await;
+    let rb = &a1["rendered_blocks"][0];
+    assert_eq!(rb["experiment_id"], json!(exp_id));
+    let assigned = rb["variant_id"].as_str().unwrap().to_string();
+    assert!(assigned == control_id || assigned == variant_id);
+    let expected = if assigned == variant_id {
+        "New headline"
+    } else {
+        "Headline"
+    };
+    assert!(
+        rb["html"].as_str().unwrap().contains(expected),
+        "block shows the assigned variant: {}",
+        rb["html"]
+    );
+    // Non-experiment blocks carry no experiment attributes.
+    assert!(a1["rendered_blocks"][1]["experiment_id"].is_null());
+    assert!(a1["rendered_blocks"][1]["variant_id"].is_null());
+
+    // Reloading with the same visitor keeps the same assignment.
+    let a2 = get_article().await;
+    assert_eq!(a2["rendered_blocks"][0]["variant_id"], json!(assigned));
+}
+
+#[tokio::test]
+async fn experiment_rejects_invalid_events_and_requires_owner() {
+    let app = test_app().await;
+    let (cookie, csrf, id, slug, block_ids) = seed_published_article(&app).await;
+    let exp = seed_running_experiment(&app, &cookie, &csrf, &id, &block_ids[0], 100).await;
+    let exp_id = exp["id"].as_str().unwrap().to_string();
+    let (_, variant_id) = variant_ids(&exp);
+    let session = Uuid::new_v4();
+
+    // Unknown experiment id -> 400.
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/events",
+            Some("opv=v1"),
+            None,
+            Some(json!({
+                "slug": slug,
+                "session_id": session,
+                "kind": "experiment_impression",
+                "experiment_id": "00000000-0000-0000-0000-000000000000",
+                "variant_id": variant_id,
+                "payload": {},
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Variant from a different experiment -> 400.
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/events",
+            Some("opv=v1"),
+            None,
+            Some(json!({
+                "slug": slug,
+                "session_id": session,
+                "kind": "experiment_impression",
+                "experiment_id": exp_id,
+                "variant_id": "00000000-0000-0000-0000-000000000000",
+                "payload": {},
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A stopped experiment rejects further impressions.
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/experiments/{exp_id}/stop"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/events",
+            Some("opv=v1"),
+            None,
+            Some(json!({
+                "slug": slug,
+                "session_id": session,
+                "kind": "experiment_impression",
+                "experiment_id": exp_id,
+                "variant_id": variant_id,
+                "payload": {},
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn experiment_promotes_clear_winner() {
+    let app = test_app().await;
+    let (cookie, csrf, id, slug, block_ids) = seed_published_article(&app).await;
+    let exp = seed_running_experiment(&app, &cookie, &csrf, &id, &block_ids[0], 2).await;
+    let exp_id = Uuid::from_str(exp["id"].as_str().unwrap()).unwrap();
+    let exp_id_str = exp_id.to_string();
+    let (control_id, variant_id) = variant_ids(&exp);
+
+    // Control converts at 0%, variant converts at 100%.
+    for v in visitors_for(
+        exp_id,
+        Uuid::from_str(&control_id).unwrap(),
+        Uuid::from_str(&variant_id).unwrap(),
+        false,
+        5,
+    ) {
+        post_experiment_event(&app, &slug, v, &exp_id_str, &control_id, false).await;
+    }
+    for v in visitors_for(
+        exp_id,
+        Uuid::from_str(&control_id).unwrap(),
+        Uuid::from_str(&variant_id).unwrap(),
+        true,
+        5,
+    ) {
+        post_experiment_event(&app, &slug, v, &exp_id_str, &variant_id, true).await;
+    }
+
+    // Run the decision rules: clear winner -> promote.
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/experiments/{exp_id_str}/decide"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let outcome = body_json(resp).await;
+    assert_eq!(outcome["decision"], "winner");
+    assert_eq!(outcome["winner_variant_id"], json!(variant_id));
+    assert!(outcome["effect_size"].as_f64().unwrap() > 0.5);
+    assert!(outcome["confidence"].as_f64().unwrap() > 0.95);
+
+    // The article now serves the winner as canonical content, no longer as an
+    // experiment overlay.
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/articles/{slug}"),
+            Some("opv=whatever"),
+            None,
+            None,
+        ),
+    )
+    .await;
+    let article = body_json(resp).await;
+    let rb = &article["rendered_blocks"][0];
+    assert!(rb["html"].as_str().unwrap().contains("New headline"));
+    assert!(rb["experiment_id"].is_null());
+
+    // The document itself reflects the promoted version.
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/documents/{id}"),
+            Some(&cookie),
+            None,
+            None,
+        ),
+    )
+    .await;
+    let doc = body_json(resp).await;
+    assert_eq!(
+        doc["blocks"][0]["content"],
+        json!({ "text": "New headline" })
+    );
+
+    // Decision recorded, experiment concluded.
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/documents/{id}/experiments"),
+            Some(&cookie),
+            None,
+            None,
+        ),
+    )
+    .await;
+    let list = body_json(resp).await;
+    let e = &list.as_array().unwrap()[0];
+    assert_eq!(e["status"], "decided");
+    assert_eq!(e["decision"], "winner");
+    assert_eq!(e["winning_variant_id"], json!(variant_id));
+    let decisions = e["decisions"].as_array().unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0]["decision"], "winner");
+}
+
+#[tokio::test]
+async fn experiment_concludes_no_winner() {
+    let app = test_app().await;
+    let (cookie, csrf, id, slug, block_ids) = seed_published_article(&app).await;
+    let exp = seed_running_experiment(&app, &cookie, &csrf, &id, &block_ids[0], 2).await;
+    let exp_id = Uuid::from_str(exp["id"].as_str().unwrap()).unwrap();
+    let exp_id_str = exp_id.to_string();
+    let (control_id, variant_id) = variant_ids(&exp);
+
+    // Control converts at 100%, variant at 0%: variant is clearly worse.
+    for v in visitors_for(
+        exp_id,
+        Uuid::from_str(&control_id).unwrap(),
+        Uuid::from_str(&variant_id).unwrap(),
+        false,
+        5,
+    ) {
+        post_experiment_event(&app, &slug, v, &exp_id_str, &control_id, true).await;
+    }
+    for v in visitors_for(
+        exp_id,
+        Uuid::from_str(&control_id).unwrap(),
+        Uuid::from_str(&variant_id).unwrap(),
+        true,
+        5,
+    ) {
+        post_experiment_event(&app, &slug, v, &exp_id_str, &variant_id, false).await;
+    }
+
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/experiments/{exp_id_str}/decide"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    let outcome = body_json(resp).await;
+    assert_eq!(outcome["decision"], "no_improvement");
+    assert!(outcome["winner_variant_id"].is_null());
+    assert!(outcome["promoted_version_id"].is_null());
+
+    // No promotion: article keeps control content and no experiment attributes.
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/articles/{slug}"),
+            Some("opv=whatever"),
+            None,
+            None,
+        ),
+    )
+    .await;
+    let article = body_json(resp).await;
+    let rb = &article["rendered_blocks"][0];
+    assert!(rb["html"].as_str().unwrap().contains("<h1>Headline</h1>"));
+    assert!(rb["experiment_id"].is_null());
+}
+
+#[tokio::test]
+async fn experiment_manual_stop_and_manual_promote() {
+    let app = test_app().await;
+    let (cookie, csrf, id, slug, block_ids) = seed_published_article(&app).await;
+    let exp = seed_running_experiment(&app, &cookie, &csrf, &id, &block_ids[0], 100).await;
+    let exp_id = exp["id"].as_str().unwrap().to_string();
+    let (_, variant_id) = variant_ids(&exp);
+
+    // Manual stop records a 'stopped' decision and rejects events.
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/experiments/{exp_id}/stop"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/documents/{id}/experiments"),
+            Some(&cookie),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(body_json(resp).await[0]["status"], "stopped");
+
+    // Manual promote overrides the threshold and ships the best variant.
+    let exp2 = seed_running_experiment(&app, &cookie, &csrf, &id, &block_ids[0], 100).await;
+    let exp2_id = exp2["id"].as_str().unwrap().to_string();
+    let exp2_uuid = Uuid::from_str(&exp2_id).unwrap();
+    let (control2, variant2) = variant_ids(&exp2);
+    for v in visitors_for(
+        exp2_uuid,
+        Uuid::from_str(&control2).unwrap(),
+        Uuid::from_str(&variant2).unwrap(),
+        true,
+        2,
+    ) {
+        post_experiment_event(&app, &slug, v, &exp2_id, &variant2, true).await;
+    }
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/experiments/{exp2_id}/promote"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let outcome = body_json(resp).await;
+    assert_eq!(outcome["decision"], "winner");
+    assert_eq!(outcome["winner_variant_id"], json!(variant2));
+    let _ = variant_id;
 }

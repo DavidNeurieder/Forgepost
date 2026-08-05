@@ -3,19 +3,19 @@
 //! The domain never touches SQL. A Postgres implementation of [`Repository`]
 //! can be added later without touching routes or domain logic (§5, §5.4).
 
+use crate::analytics::{ArticleStats, BandReach};
+use crate::auth::{SESSION_TTL_MS, sha256_hex};
+use crate::model::{AnalyticsEvent, Comment, DocumentSummary, FullDocument, Session, User};
 use async_trait::async_trait;
 use openpublish_content::{
-    Block, BlockContent, BlockKind, BlockVersion, Document, DocumentId, now_ms,
+    Block, BlockContent, BlockId, BlockKind, BlockVersion, Document, DocumentId, VersionId, now_ms,
 };
+use openpublish_experiments::{ExperimentId, VariantId};
 use serde_json::json;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::{Row, Transaction};
 use std::str::FromStr;
 use uuid::Uuid;
-
-use crate::analytics::{ArticleStats, BandReach};
-use crate::auth::{SESSION_TTL_MS, sha256_hex};
-use crate::model::{AnalyticsEvent, Comment, DocumentSummary, FullDocument, Session, User};
 
 #[async_trait]
 pub trait Repository: Send + Sync {
@@ -100,6 +100,73 @@ pub trait Repository: Send + Sync {
         &self,
         document_id: DocumentId,
     ) -> Result<std::collections::HashMap<Uuid, i64>, RepositoryError>;
+
+    // Experiments (M3)
+    /// Create an experiment as an overlay on a block. Control is the block's
+    /// current version; each variant writes a fresh immutable version to the
+    /// shared pool without touching the block's canonical `current_version_id`.
+    async fn create_experiment(
+        &self,
+        document_id: DocumentId,
+        block_id: BlockId,
+        new: &crate::model::NewExperiment,
+    ) -> Result<crate::model::ExperimentRecord, RepositoryError>;
+    async fn experiment(
+        &self,
+        id: openpublish_experiments::ExperimentId,
+    ) -> Result<Option<crate::model::ExperimentRecord>, RepositoryError>;
+    async fn experiments_for_document(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<Vec<crate::model::ExperimentRecord>, RepositoryError>;
+    /// Experiments currently running for a document (article render overlay).
+    async fn running_experiments_for_document(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<Vec<crate::model::ExperimentRecord>, RepositoryError>;
+    /// All experiments with status `running` across every document (auto-decider).
+    async fn running_experiments(
+        &self,
+    ) -> Result<Vec<crate::model::ExperimentRecord>, RepositoryError>;
+    async fn start_experiment(
+        &self,
+        id: openpublish_experiments::ExperimentId,
+    ) -> Result<(), RepositoryError>;
+    async fn stop_experiment(
+        &self,
+        id: openpublish_experiments::ExperimentId,
+    ) -> Result<(), RepositoryError>;
+    /// Repoint the block to `version_id` (promotion). Canonical content changes
+    /// only here; the version pool itself is never mutated.
+    async fn promote_block_version(
+        &self,
+        block_id: BlockId,
+        version_id: VersionId,
+    ) -> Result<(), RepositoryError>;
+    /// Append a decision row and update the experiment status atomically.
+    async fn conclude_experiment(
+        &self,
+        id: openpublish_experiments::ExperimentId,
+        decision: &str,
+        winning_variant_id: Option<openpublish_experiments::VariantId>,
+        promoted_version_id: Option<VersionId>,
+        stats: &crate::model::ExperimentDecision,
+    ) -> Result<(), RepositoryError>;
+    /// Per-variant sample counts for a running experiment (deduped by visitor).
+    async fn experiment_counts(
+        &self,
+        id: openpublish_experiments::ExperimentId,
+    ) -> Result<Vec<crate::model::ExperimentCounts>, RepositoryError>;
+    async fn experiment_decisions(
+        &self,
+        id: openpublish_experiments::ExperimentId,
+    ) -> Result<Vec<crate::model::ExperimentDecision>, RepositoryError>;
+    /// Confirm an experiment is running and that `variant_id` belongs to it.
+    async fn experiment_variant_belongs(
+        &self,
+        id: openpublish_experiments::ExperimentId,
+        variant_id: openpublish_experiments::VariantId,
+    ) -> Result<bool, RepositoryError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +185,8 @@ pub enum RepositoryError {
     InvalidInput(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("invalid uuid: {0}")]
+    Uuid(#[from] uuid::Error),
     #[error("rate limited")]
     RateLimited,
 }
@@ -794,6 +863,45 @@ impl Repository for SqliteRepository {
             }
         }
 
+        let experiments: Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            f64,
+            f64,
+            i64,
+            f64,
+            i64,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT id, document_id, block_id, name, status, goal, traffic_weight,
+                    confidence_threshold, min_sample_per_variant, no_winner_prob,
+                    max_duration_ms, started_at_ms, decided_at_ms, decision, winning_variant_id
+             FROM experiments",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let experiment_variants: Vec<(String, String, String, String, f64, i64)> = sqlx::query_as(
+            "SELECT id, experiment_id, block_id, version_id, weight, is_control
+             FROM experiment_variants",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let experiment_decisions: Vec<(String, String, i64, String, Option<String>, Option<String>, Option<f64>, Option<f64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
+            "SELECT id, experiment_id, decided_at_ms, decision, winner_variant_id, promoted_version_id,
+                    effect_size, confidence, control_impressions, control_conversions,
+                    variant_impressions, variant_conversions
+             FROM experiment_decisions",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
         Ok(json!({
             "version": 1,
             "exported_at_ms": now_ms(),
@@ -801,6 +909,9 @@ impl Repository for SqliteRepository {
             "users": users,
             "documents": documents,
             "comments": comments,
+            "experiments": experiments,
+            "experiment_variants": experiment_variants,
+            "experiment_decisions": experiment_decisions,
         }))
     }
 
@@ -808,8 +919,8 @@ impl Repository for SqliteRepository {
         sqlx::query(
             "INSERT INTO analytics_events
                 (id, document_id, event_type, band, block_id, pageview_id, visitor_id,
-                 referrer, user_agent, read_time_ms, created_at_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 referrer, user_agent, read_time_ms, experiment_id, variant_id, created_at_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(event.id.to_string())
         .bind(event.document_id.to_string())
@@ -821,6 +932,8 @@ impl Repository for SqliteRepository {
         .bind(&event.referrer)
         .bind(&event.user_agent)
         .bind(event.read_time_ms)
+        .bind(event.experiment_id.map(|e| e.to_string()))
+        .bind(event.variant_id.map(|v| v.to_string()))
         .bind(event.created_at_ms)
         .execute(&self.pool)
         .await?;
@@ -914,6 +1027,462 @@ impl Repository for SqliteRepository {
             })
             .collect())
     }
+
+    // -----------------------------------------------------------------------
+    // Experiments (M3)
+    // -----------------------------------------------------------------------
+
+    async fn create_experiment(
+        &self,
+        document_id: DocumentId,
+        block_id: BlockId,
+        new: &crate::model::NewExperiment,
+    ) -> Result<crate::model::ExperimentRecord, RepositoryError> {
+        let mut tx = self.pool.begin().await?;
+
+        let control_row =
+            sqlx::query("SELECT current_version_id FROM blocks WHERE id = ? AND document_id = ?")
+                .bind(block_id.to_string())
+                .bind(document_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(control_row) = control_row else {
+            return Err(RepositoryError::NotFound(
+                "block not found for experiment".into(),
+            ));
+        };
+        let control_version_id =
+            Uuid::from_str(&control_row.get::<String, _>("current_version_id"))
+                .map_err(|_| RepositoryError::InvalidInput("bad control version".into()))?;
+
+        let id = openpublish_experiments::ExperimentId::new_v4();
+        let now = now_ms();
+        sqlx::query(
+            "INSERT INTO experiments
+                (id, document_id, block_id, name, status, control_version_id, goal,
+                 traffic_weight, confidence_threshold, min_sample_per_variant,
+                 no_winner_prob, max_duration_ms, created_at_ms)
+             VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id.to_string())
+        .bind(document_id.to_string())
+        .bind(block_id.to_string())
+        .bind(&new.name)
+        .bind(control_version_id.to_string())
+        .bind(&new.goal)
+        .bind(new.traffic_weight)
+        .bind(new.confidence_threshold)
+        .bind(new.min_sample_per_variant as i64)
+        .bind(new.no_winner_prob)
+        .bind(new.max_duration_ms)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        // Control variant row points at the immutable control version.
+        let control_variant_id = VariantId::new_v4();
+        sqlx::query(
+            "INSERT INTO experiment_variants (id, experiment_id, block_id, version_id, weight, is_control)
+             VALUES (?, ?, ?, ?, ?, 1)",
+        )
+        .bind(control_variant_id.to_string())
+        .bind(id.to_string())
+        .bind(block_id.to_string())
+        .bind(control_version_id.to_string())
+        .bind(new.traffic_weight)
+        .execute(&mut *tx)
+        .await?;
+
+        // Each non-control variant writes a NEW immutable version to the shared
+        // pool. The block's canonical current_version_id is left untouched.
+        let mut variant_rows = Vec::new();
+        for input in &new.variants {
+            let variant_id = VariantId::new_v4();
+            let version_id = VersionId::new_v4();
+            sqlx::query(
+                "INSERT INTO block_versions (id, block_id, content_json, created_at_ms)
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(version_id.to_string())
+            .bind(block_id.to_string())
+            .bind(input.content.to_string())
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO experiment_variants (id, experiment_id, block_id, version_id, weight, is_control)
+                 VALUES (?, ?, ?, ?, ?, 0)",
+            )
+            .bind(variant_id.to_string())
+            .bind(id.to_string())
+            .bind(block_id.to_string())
+            .bind(version_id.to_string())
+            .bind(input.weight)
+            .execute(&mut *tx)
+            .await?;
+            variant_rows.push(crate::model::ExperimentVariantRecord {
+                id: variant_id,
+                block_id,
+                version_id,
+                weight: input.weight,
+                is_control: false,
+            });
+        }
+
+        tx.commit().await?;
+
+        let mut variants_all = vec![crate::model::ExperimentVariantRecord {
+            id: control_variant_id,
+            block_id,
+            version_id: control_version_id,
+            weight: new.traffic_weight,
+            is_control: true,
+        }];
+        variants_all.extend(variant_rows);
+        Ok(crate::model::ExperimentRecord {
+            id,
+            document_id,
+            block_id,
+            name: new.name.clone(),
+            status: "draft".into(),
+            control_version_id,
+            goal: new.goal.clone(),
+            traffic_weight: new.traffic_weight,
+            confidence_threshold: new.confidence_threshold,
+            min_sample_per_variant: new.min_sample_per_variant as i64,
+            no_winner_prob: new.no_winner_prob,
+            max_duration_ms: new.max_duration_ms,
+            started_at_ms: None,
+            decided_at_ms: None,
+            decision: None,
+            winning_variant_id: None,
+            created_at_ms: now,
+            variants: variants_all,
+        })
+    }
+
+    async fn experiment(
+        &self,
+        id: openpublish_experiments::ExperimentId,
+    ) -> Result<Option<crate::model::ExperimentRecord>, RepositoryError> {
+        load_experiment(&self.pool, &id).await
+    }
+
+    async fn experiments_for_document(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<Vec<crate::model::ExperimentRecord>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT id FROM experiments WHERE document_id = ? ORDER BY created_at_ms DESC",
+        )
+        .bind(document_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::new();
+        for row in rows {
+            let id: String = row.get("id");
+            if let Some(exp) = load_experiment(&self.pool, &Uuid::parse_str(&id)?).await? {
+                out.push(exp);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn running_experiments_for_document(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<Vec<crate::model::ExperimentRecord>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT id FROM experiments
+             WHERE document_id = ? AND status = 'running' ORDER BY created_at_ms ASC",
+        )
+        .bind(document_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::new();
+        for row in rows {
+            let id: String = row.get("id");
+            if let Some(exp) = load_experiment(&self.pool, &Uuid::parse_str(&id)?).await? {
+                out.push(exp);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn running_experiments(
+        &self,
+    ) -> Result<Vec<crate::model::ExperimentRecord>, RepositoryError> {
+        let rows = sqlx::query("SELECT id FROM experiments WHERE status = 'running'")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut out = Vec::new();
+        for row in rows {
+            let id: String = row.get("id");
+            if let Some(exp) = load_experiment(&self.pool, &Uuid::parse_str(&id)?).await? {
+                out.push(exp);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn start_experiment(
+        &self,
+        id: openpublish_experiments::ExperimentId,
+    ) -> Result<(), RepositoryError> {
+        let now = now_ms();
+        let result = sqlx::query(
+            "UPDATE experiments SET status = 'running', started_at_ms = ?, decided_at_ms = NULL, decision = NULL, winning_variant_id = NULL
+             WHERE id = ? AND status = 'draft'",
+        )
+        .bind(now)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(RepositoryError::Conflict(
+                "only draft experiments can start".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn stop_experiment(
+        &self,
+        id: openpublish_experiments::ExperimentId,
+    ) -> Result<(), RepositoryError> {
+        let result = sqlx::query(
+            "UPDATE experiments SET status = 'stopped', decided_at_ms = ?, decision = 'stopped' WHERE id = ?",
+        )
+        .bind(now_ms())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(RepositoryError::NotFound("experiment".into()));
+        }
+        Ok(())
+    }
+
+    async fn promote_block_version(
+        &self,
+        block_id: BlockId,
+        version_id: VersionId,
+    ) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "UPDATE blocks SET current_version_id = ?, updated_at_ms = ?
+             WHERE id = ?",
+        )
+        .bind(version_id.to_string())
+        .bind(now_ms())
+        .bind(block_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn conclude_experiment(
+        &self,
+        id: openpublish_experiments::ExperimentId,
+        decision: &str,
+        winning_variant_id: Option<openpublish_experiments::VariantId>,
+        promoted_version_id: Option<VersionId>,
+        stats: &crate::model::ExperimentDecision,
+    ) -> Result<(), RepositoryError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO experiment_decisions
+                (id, experiment_id, decided_at_ms, decision, winner_variant_id, promoted_version_id,
+                 effect_size, confidence, control_impressions, control_conversions,
+                 variant_impressions, variant_conversions)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(stats.id.to_string())
+        .bind(id.to_string())
+        .bind(stats.decided_at_ms)
+        .bind(decision)
+        .bind(stats.winner_variant_id.map(|v| v.to_string()))
+        .bind(stats.promoted_version_id.map(|v| v.to_string()))
+        .bind(stats.effect_size)
+        .bind(stats.confidence)
+        .bind(stats.control_impressions)
+        .bind(stats.control_conversions)
+        .bind(stats.variant_impressions)
+        .bind(stats.variant_conversions)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE experiments SET status = 'decided', decided_at_ms = ?, decision = ?, winning_variant_id = ?
+             WHERE id = ? AND status = 'running'",
+        )
+        .bind(stats.decided_at_ms)
+        .bind(decision)
+        .bind(winning_variant_id.map(|v| v.to_string()))
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        if let Some(pid) = promoted_version_id {
+            let exp = load_experiment_tx(&mut tx, &id)
+                .await?
+                .ok_or_else(|| RepositoryError::NotFound("experiment".into()))?;
+            sqlx::query("UPDATE blocks SET current_version_id = ?, updated_at_ms = ? WHERE id = ?")
+                .bind(pid.to_string())
+                .bind(now_ms())
+                .bind(exp.block_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn experiment_counts(
+        &self,
+        id: openpublish_experiments::ExperimentId,
+    ) -> Result<Vec<crate::model::ExperimentCounts>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT variant_id,
+                    COUNT(DISTINCT CASE WHEN event_type = 'experiment_impression' THEN visitor_id END) AS impressions,
+                    COUNT(DISTINCT CASE WHEN event_type = 'experiment_conversion' THEN visitor_id END) AS conversions
+             FROM analytics_events
+             WHERE experiment_id = ?
+             GROUP BY variant_id",
+        )
+        .bind(id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| crate::model::ExperimentCounts {
+                variant_id: Uuid::from_str(&r.get::<String, _>("variant_id")).unwrap_or_default(),
+                impressions: r.get("impressions"),
+                conversions: r.get("conversions"),
+            })
+            .collect())
+    }
+
+    async fn experiment_decisions(
+        &self,
+        id: openpublish_experiments::ExperimentId,
+    ) -> Result<Vec<crate::model::ExperimentDecision>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT id, experiment_id, decided_at_ms, decision, winner_variant_id, promoted_version_id,
+                    effect_size, confidence, control_impressions, control_conversions,
+                    variant_impressions, variant_conversions
+             FROM experiment_decisions WHERE experiment_id = ? ORDER BY decided_at_ms ASC",
+        )
+        .bind(id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| crate::model::ExperimentDecision {
+                id: Uuid::from_str(&r.get::<String, _>("id")).unwrap_or_default(),
+                experiment_id: id,
+                decided_at_ms: r.get("decided_at_ms"),
+                decision: r.get("decision"),
+                winner_variant_id: r
+                    .get::<Option<String>, _>("winner_variant_id")
+                    .and_then(|s| Uuid::parse_str(&s).ok()),
+                promoted_version_id: r
+                    .get::<Option<String>, _>("promoted_version_id")
+                    .and_then(|s| Uuid::parse_str(&s).ok()),
+                effect_size: r.get("effect_size"),
+                confidence: r.get("confidence"),
+                control_impressions: r.get("control_impressions"),
+                control_conversions: r.get("control_conversions"),
+                variant_impressions: r.get("variant_impressions"),
+                variant_conversions: r.get("variant_conversions"),
+            })
+            .collect())
+    }
+
+    async fn experiment_variant_belongs(
+        &self,
+        id: openpublish_experiments::ExperimentId,
+        variant_id: openpublish_experiments::VariantId,
+    ) -> Result<bool, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT 1 AS one FROM experiment_variants WHERE experiment_id = ? AND id = ? LIMIT 1",
+        )
+        .bind(id.to_string())
+        .bind(variant_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+}
+
+/// Load an experiment with its variants (read path: fresh snapshot).
+async fn load_experiment(
+    pool: &SqlitePool,
+    id: &ExperimentId,
+) -> Result<Option<crate::model::ExperimentRecord>, RepositoryError> {
+    let mut tx = pool.begin().await?;
+    load_experiment_tx(&mut tx, id).await
+}
+
+/// Load an experiment with its variants inside a live transaction (promotion
+/// needs a consistent snapshot).
+async fn load_experiment_tx(
+    tx: &mut Transaction<'_, sqlx::sqlite::Sqlite>,
+    id: &ExperimentId,
+) -> Result<Option<crate::model::ExperimentRecord>, RepositoryError> {
+    let row = sqlx::query(
+        "SELECT id, document_id, block_id, name, status, control_version_id, goal,
+                traffic_weight, confidence_threshold, min_sample_per_variant,
+                no_winner_prob, max_duration_ms, started_at_ms, decided_at_ms,
+                decision, winning_variant_id, created_at_ms
+         FROM experiments WHERE id = ?",
+    )
+    .bind(id.to_string())
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let variant_rows = sqlx::query(
+        "SELECT id, block_id, version_id, weight, is_control
+         FROM experiment_variants WHERE experiment_id = ?",
+    )
+    .bind(id.to_string())
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let variants = variant_rows
+        .iter()
+        .map(|r| crate::model::ExperimentVariantRecord {
+            id: Uuid::from_str(&r.get::<String, _>("id")).unwrap_or_default(),
+            block_id: Uuid::from_str(&r.get::<String, _>("block_id")).unwrap_or_default(),
+            version_id: Uuid::from_str(&r.get::<String, _>("version_id")).unwrap_or_default(),
+            weight: r.get("weight"),
+            is_control: r.get::<i64, _>("is_control") != 0,
+        })
+        .collect();
+
+    Ok(Some(crate::model::ExperimentRecord {
+        id: *id,
+        document_id: Uuid::from_str(&row.get::<String, _>("document_id")).unwrap_or_default(),
+        block_id: Uuid::from_str(&row.get::<String, _>("block_id")).unwrap_or_default(),
+        name: row.get("name"),
+        status: row.get("status"),
+        control_version_id: Uuid::from_str(&row.get::<String, _>("control_version_id"))
+            .unwrap_or_default(),
+        goal: row.get("goal"),
+        traffic_weight: row.get("traffic_weight"),
+        confidence_threshold: row.get("confidence_threshold"),
+        min_sample_per_variant: row.get("min_sample_per_variant"),
+        no_winner_prob: row.get("no_winner_prob"),
+        max_duration_ms: row.get("max_duration_ms"),
+        started_at_ms: row.get("started_at_ms"),
+        decided_at_ms: row.get("decided_at_ms"),
+        decision: row.get("decision"),
+        winning_variant_id: row
+            .get::<Option<String>, _>("winning_variant_id")
+            .and_then(|s| Uuid::parse_str(&s).ok()),
+        created_at_ms: row.get("created_at_ms"),
+        variants,
+    }))
 }
 
 #[cfg(test)]

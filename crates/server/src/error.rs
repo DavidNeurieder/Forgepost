@@ -43,6 +43,7 @@ impl IntoResponse for ApiError {
             RepositoryError::InvalidInput(m) => (StatusCode::BAD_REQUEST, m),
             RepositoryError::Conflict(m) => (StatusCode::CONFLICT, m),
             RepositoryError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate limited".into()),
+            RepositoryError::Uuid(_) => (StatusCode::BAD_REQUEST, "invalid id".into()),
             RepositoryError::Database(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             RepositoryError::Migration(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         };

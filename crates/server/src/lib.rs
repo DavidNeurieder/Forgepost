@@ -3,6 +3,7 @@
 pub mod analytics;
 pub mod auth;
 pub mod error;
+pub mod experiments;
 pub mod model;
 pub mod repository;
 pub mod routes;
@@ -63,6 +64,28 @@ pub fn app_with(repo: Arc<dyn Repository>, rate_limiter: RateLimiter) -> Router 
         .route("/api/render", post(routes::render_markdown))
         .route("/api/events", post(routes::record_event))
         .route("/api/documents/{id}/stats", get(routes::document_stats))
+        .route(
+            "/api/documents/{id}/experiments",
+            get(routes::list_experiments),
+        )
+        .route("/api/experiments", post(routes::create_experiment))
+        .route(
+            "/api/experiments/{id}/start",
+            post(routes::start_experiment),
+        )
+        .route("/api/experiments/{id}/stop", post(routes::stop_experiment))
+        .route(
+            "/api/experiments/{id}/decide",
+            post(routes::decide_experiment),
+        )
+        .route(
+            "/api/experiments/{id}/promote",
+            post(routes::promote_experiment),
+        )
+        .route(
+            "/api/experiments/{id}/no-winner",
+            post(routes::conclude_no_winner),
+        )
         .route("/articles/{slug}", get(routes::article))
         .route(
             "/articles/{slug}/comments",

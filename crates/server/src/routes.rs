@@ -8,6 +8,7 @@ use axum::{
 };
 use openpublish_analytics::EventKind;
 use openpublish_content::{Document, now_ms, render_html};
+use openpublish_experiments::{ExperimentId, VariantId, assign_variant};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -94,12 +95,17 @@ pub struct ArticleView {
     pub rendered_blocks: Vec<RenderedBlock>,
 }
 
-/// A single block rendered to HTML, keyed by its stable block id.
+/// A single block rendered to HTML, keyed by its stable block id. When the
+/// block is the subject of a running experiment the served markup is the
+/// assigned variant's, and the experiment/variant ids are attached so the
+/// tracker can report impressions and conversions (§5.1 overlays).
 #[derive(Serialize)]
 pub struct RenderedBlock {
     pub id: Uuid,
     pub kind: String,
     pub html: String,
+    pub experiment_id: Option<Uuid>,
+    pub variant_id: Option<Uuid>,
 }
 
 #[derive(Serialize)]
@@ -168,6 +174,8 @@ fn article_view(full: &FullDocument, tags: Vec<String>) -> ArticleView {
                 id: b.id,
                 kind: format!("{:?}", b.kind),
                 html: render_html([(b.kind, c)]),
+                experiment_id: None,
+                variant_id: None,
             })
         })
         .collect();
@@ -182,6 +190,34 @@ fn article_view(full: &FullDocument, tags: Vec<String>) -> ArticleView {
         html: render_html(block_refs),
         rendered_blocks,
     }
+}
+
+/// Resolve which variant each block in the document shows for `visitor`.
+/// Assignment is deterministic per (experiment, visitor), so a reader sees the
+/// same headline/CTA across reloads. Only the first running experiment per
+/// block participates (one experiment per block at a time).
+fn assigned_variants(
+    experiments: &[crate::model::ExperimentRecord],
+    visitor_id: Uuid,
+) -> std::collections::HashMap<Uuid, (ExperimentId, VariantId)> {
+    let mut map = std::collections::HashMap::new();
+    for exp in experiments {
+        let control = exp
+            .variants
+            .iter()
+            .find(|v| v.is_control)
+            .expect("experiment always has a control variant");
+        let others: Vec<(VariantId, f64)> = exp
+            .variants
+            .iter()
+            .filter(|v| !v.is_control)
+            .map(|v| (v.id, v.weight))
+            .collect();
+        let control_share = 1.0 - (exp.traffic_weight / 100.0).clamp(0.0, 1.0);
+        let chosen = assign_variant(&exp.id, &visitor_id, control.id, control_share, &others);
+        map.entry(exp.block_id).or_insert((exp.id, chosen));
+    }
+    map
 }
 
 // ---------------------------------------------------------------------------
@@ -244,6 +280,65 @@ pub struct EventRequest {
     /// Kind-specific payload: `{"band": 75}` or `{"read_time_ms": 24000}`.
     #[serde(default)]
     payload: serde_json::Value,
+    /// Required for `experiment_impression` / `experiment_conversion`.
+    #[serde(default)]
+    experiment_id: Option<Uuid>,
+    #[serde(default)]
+    variant_id: Option<Uuid>,
+}
+
+/// A new experiment: an overlay on one block with one or more content variants.
+#[derive(Deserialize)]
+pub struct CreateExperimentRequest {
+    document_id: Uuid,
+    block_id: Uuid,
+    #[serde(default)]
+    name: String,
+    /// `completion` is the only goal in the MVP.
+    #[serde(default = "default_goal")]
+    goal: String,
+    /// Percentage of visitors who see a variant (the rest see control).
+    #[serde(default = "default_traffic_weight")]
+    traffic_weight: f64,
+    #[serde(default = "default_confidence")]
+    confidence_threshold: f64,
+    #[serde(default = "default_min_sample")]
+    min_sample_per_variant: u64,
+    #[serde(default = "default_no_winner")]
+    no_winner_prob: f64,
+    #[serde(default = "default_max_duration")]
+    max_duration_ms: i64,
+    variants: Vec<CreateExperimentVariantRequest>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateExperimentVariantRequest {
+    /// Markdown-free structured content for this variant's block kind.
+    content: serde_json::Value,
+    #[serde(default = "default_weight")]
+    weight: f64,
+}
+
+fn default_goal() -> String {
+    "completion".into()
+}
+fn default_traffic_weight() -> f64 {
+    50.0
+}
+fn default_confidence() -> f64 {
+    0.95
+}
+fn default_min_sample() -> u64 {
+    100
+}
+fn default_no_winner() -> f64 {
+    0.05
+}
+fn default_max_duration() -> i64 {
+    30 * 24 * 60 * 60 * 1000
+}
+fn default_weight() -> f64 {
+    50.0
 }
 
 // ---------------------------------------------------------------------------
@@ -489,14 +584,52 @@ pub async fn publish_document(
 pub async fn article(
     State(state): State<AppState>,
     Path(slug): Path<String>,
-) -> Result<Json<ArticleView>, ApiError> {
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
     let full = state
         .repo
         .get_published_by_slug(&slug)
         .await?
         .ok_or_else(|| ApiError::bad_request("article not found"))?;
     let tags = state.repo.document_tags(full.document.id).await?;
-    Ok(Json(article_view(&full, tags)))
+
+    // Stable per-visitor assignment needs the anonymous visitor id, so mint the
+    // cookie here if the reader does not have one yet.
+    let (visitor_id, cookie) = visitor_identity(&headers);
+    let experiments = state
+        .repo
+        .running_experiments_for_document(full.document.id)
+        .await?;
+    let assigned = assigned_variants(&experiments, visitor_id);
+
+    let mut view = article_view(&full, tags);
+    for block in view.rendered_blocks.iter_mut() {
+        let Some((exp_id, variant_id)) = assigned.get(&block.id) else {
+            continue;
+        };
+        let exp = experiments
+            .iter()
+            .find(|e| e.id == *exp_id)
+            .expect("assignment references a running experiment");
+        let Some(variant) = exp.variants.iter().find(|v| v.id == *variant_id) else {
+            continue;
+        };
+        // Render the variant's immutable version content, not the canonical one.
+        if let (Some(content), Some(b)) = (
+            full.document.version(variant.version_id),
+            full.document.block(block.id),
+        ) {
+            block.html = render_html([(b.kind, &content.content)]);
+            block.experiment_id = Some(*exp_id);
+            block.variant_id = Some(*variant_id);
+        }
+    }
+
+    let mut resp_headers = HeaderMap::new();
+    if let Some(c) = cookie {
+        resp_headers.insert(header::SET_COOKIE, c);
+    }
+    Ok((resp_headers, Json(view)).into_response())
 }
 
 pub async fn list_comments(
@@ -597,20 +730,46 @@ pub async fn record_event(
         .ok_or_else(|| ApiError::bad_request("article not found"))?;
     let document_id = full.document.id;
 
-    let (event_type, band, block_id, read_time_ms) = parse_event(&body)?;
-    if let Some(bid) = block_id
+    let parsed = parse_event(&body)?;
+    if let Some(bid) = parsed.block_id
         && full.document.block(bid).is_none()
     {
         return Err(ApiError::bad_request("unknown block"));
+    }
+    // Experiment events must reference a running experiment that owns the
+    // variant and belongs to this article.
+    if let (Some(exp_id), Some(variant_id)) = (parsed.experiment_id, parsed.variant_id) {
+        let exp = state
+            .repo
+            .experiment(exp_id)
+            .await?
+            .ok_or_else(|| ApiError::bad_request("unknown experiment"))?;
+        if exp.status != "running" {
+            return Err(ApiError::bad_request("experiment is not running"));
+        }
+        if exp.document_id != document_id {
+            return Err(ApiError::bad_request(
+                "experiment belongs to another article",
+            ));
+        }
+        if !state
+            .repo
+            .experiment_variant_belongs(exp_id, variant_id)
+            .await?
+        {
+            return Err(ApiError::bad_request(
+                "variant does not belong to experiment",
+            ));
+        }
     }
 
     let (visitor_id, cookie) = visitor_identity(&headers);
     let event = AnalyticsEvent {
         id: Uuid::new_v4(),
         document_id,
-        event_type,
-        band,
-        block_id,
+        event_type: parsed.event_type.into(),
+        band: parsed.band,
+        block_id: parsed.block_id,
         pageview_id: body.session_id,
         visitor_id,
         referrer: headers
@@ -621,7 +780,9 @@ pub async fn record_event(
             .get(header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string()),
-        read_time_ms,
+        read_time_ms: parsed.read_time_ms,
+        experiment_id: parsed.experiment_id,
+        variant_id: parsed.variant_id,
         created_at_ms: now_ms(),
     };
     state.repo.record_analytics_event(&event).await?;
@@ -679,12 +840,209 @@ pub async fn document_stats(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Experiments (M3)
+// ---------------------------------------------------------------------------
+
+/// Admin: all experiments for a document with live reports.
+pub async fn list_experiments(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::experiments::ExperimentView>>, ApiError> {
+    let id = parse_uuid(&id)?;
+    let full = state
+        .repo
+        .get_document(id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("document not found"))?;
+    if full.owner_id != auth.user.id {
+        return Err(ApiError::forbidden());
+    }
+    let experiments = state.repo.experiments_for_document(id).await?;
+    let mut views = Vec::new();
+    for exp in experiments {
+        views.push(crate::experiments::experiment_view(&*state.repo, &exp).await?);
+    }
+    Ok(Json(views))
+}
+
+/// Admin: create an experiment overlay on a block with one or more variants.
+pub async fn create_experiment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    auth: AuthUser,
+    Json(body): Json<CreateExperimentRequest>,
+) -> Result<Json<crate::experiments::ExperimentView>, ApiError> {
+    verify_csrf(&headers, &auth.csrf_token)?;
+    let full = state
+        .repo
+        .get_document(body.document_id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("document not found"))?;
+    if full.owner_id != auth.user.id {
+        return Err(ApiError::forbidden());
+    }
+    let block = full
+        .document
+        .block(body.block_id)
+        .ok_or_else(|| ApiError::bad_request("block not found in document"))?;
+    if !block.kind.is_experimentable() {
+        return Err(ApiError::bad_request(
+            "this block kind cannot be tested (use a heading, paragraph, image, or CTA)",
+        ));
+    }
+    if body.variants.is_empty() {
+        return Err(ApiError::bad_request("at least one variant is required"));
+    }
+    if body.variants.iter().any(|v| v.weight <= 0.0) {
+        return Err(ApiError::bad_request("variant weights must be positive"));
+    }
+    if !(0.0..=100.0).contains(&body.traffic_weight) {
+        return Err(ApiError::bad_request("traffic weight must be 0–100"));
+    }
+
+    let inputs: Vec<crate::model::ExperimentVariantInput> = body
+        .variants
+        .into_iter()
+        .map(|v| crate::model::ExperimentVariantInput {
+            content: v.content,
+            weight: v.weight,
+        })
+        .collect();
+    let exp = state
+        .repo
+        .create_experiment(
+            body.document_id,
+            body.block_id,
+            &crate::model::NewExperiment {
+                name: body.name.trim().to_string(),
+                goal: body.goal,
+                traffic_weight: body.traffic_weight,
+                confidence_threshold: body.confidence_threshold,
+                min_sample_per_variant: body.min_sample_per_variant,
+                no_winner_prob: body.no_winner_prob,
+                max_duration_ms: body.max_duration_ms,
+                variants: inputs,
+            },
+        )
+        .await?;
+    Ok(Json(
+        crate::experiments::experiment_view(&*state.repo, &exp).await?,
+    ))
+}
+
+/// Load an experiment and verify the caller owns its document.
+async fn owned_experiment(
+    state: &AppState,
+    auth: &AuthUser,
+    id: Uuid,
+) -> Result<crate::model::ExperimentRecord, ApiError> {
+    let exp = state
+        .repo
+        .experiment(id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("experiment not found"))?;
+    let full = state
+        .repo
+        .get_document(exp.document_id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("document not found"))?;
+    if full.owner_id != auth.user.id {
+        return Err(ApiError::forbidden());
+    }
+    Ok(exp)
+}
+
+pub async fn start_experiment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    verify_csrf(&headers, &auth.csrf_token)?;
+    let id = parse_uuid(&id)?;
+    owned_experiment(&state, &auth, id).await?;
+    state.repo.start_experiment(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn stop_experiment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    verify_csrf(&headers, &auth.csrf_token)?;
+    let id = parse_uuid(&id)?;
+    owned_experiment(&state, &auth, id).await?;
+    state.repo.stop_experiment(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Run the sequential-test rules now (normally the background auto-decider
+/// does this). Applies a decision if the rules fire.
+pub async fn decide_experiment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<Option<crate::experiments::DecisionOutcome>>, ApiError> {
+    verify_csrf(&headers, &auth.csrf_token)?;
+    let id = parse_uuid(&id)?;
+    owned_experiment(&state, &auth, id).await?;
+    let outcome = crate::experiments::decide_experiment(&*state.repo, id).await?;
+    Ok(Json(outcome))
+}
+
+/// Manual override: promote the current best variant immediately.
+pub async fn promote_experiment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<crate::experiments::DecisionOutcome>, ApiError> {
+    verify_csrf(&headers, &auth.csrf_token)?;
+    let id = parse_uuid(&id)?;
+    owned_experiment(&state, &auth, id).await?;
+    let outcome = crate::experiments::promote_experiment(&*state.repo, id).await?;
+    Ok(Json(outcome))
+}
+
+/// Manual override: conclude "no improvement" without promoting.
+pub async fn conclude_no_winner(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<crate::experiments::DecisionOutcome>, ApiError> {
+    verify_csrf(&headers, &auth.csrf_token)?;
+    let id = parse_uuid(&id)?;
+    owned_experiment(&state, &auth, id).await?;
+    let outcome = crate::experiments::conclude_no_winner(&*state.repo, id).await?;
+    Ok(Json(outcome))
+}
+
 /// Normalized event fields extracted from a validated request.
-type ParsedEvent = (String, Option<i64>, Option<Uuid>, Option<i64>);
+struct ParsedEvent {
+    event_type: &'static str,
+    band: Option<i64>,
+    block_id: Option<Uuid>,
+    read_time_ms: Option<i64>,
+    experiment_id: Option<Uuid>,
+    variant_id: Option<Uuid>,
+}
 
 fn parse_event(body: &EventRequest) -> Result<ParsedEvent, ApiError> {
     match body.kind {
-        EventKind::View => Ok(("view".into(), None, None, None)),
+        EventKind::View => Ok(ParsedEvent {
+            event_type: "view",
+            band: None,
+            block_id: None,
+            read_time_ms: None,
+            experiment_id: None,
+            variant_id: None,
+        }),
         EventKind::BandedScroll => {
             let band = body
                 .payload
@@ -694,7 +1052,14 @@ fn parse_event(body: &EventRequest) -> Result<ParsedEvent, ApiError> {
             if !crate::analytics::SCROLL_BANDS.contains(&band) {
                 return Err(ApiError::bad_request("invalid scroll band"));
             }
-            Ok(("banded_scroll".into(), Some(band), None, None))
+            Ok(ParsedEvent {
+                event_type: "banded_scroll",
+                band: Some(band),
+                block_id: None,
+                read_time_ms: None,
+                experiment_id: None,
+                variant_id: None,
+            })
         }
         EventKind::ArticleRead => {
             let read_time_ms = body
@@ -702,13 +1067,46 @@ fn parse_event(body: &EventRequest) -> Result<ParsedEvent, ApiError> {
                 .get("read_time_ms")
                 .and_then(|v| v.as_i64())
                 .ok_or_else(|| ApiError::bad_request("missing read_time_ms"))?;
-            Ok(("article_read".into(), None, None, Some(read_time_ms)))
+            Ok(ParsedEvent {
+                event_type: "article_read",
+                band: None,
+                block_id: None,
+                read_time_ms: Some(read_time_ms),
+                experiment_id: None,
+                variant_id: None,
+            })
         }
         EventKind::BlockImpression => {
             let block_id = body
                 .block_id
                 .ok_or_else(|| ApiError::bad_request("missing block_id"))?;
-            Ok(("block_impression".into(), None, Some(block_id), None))
+            Ok(ParsedEvent {
+                event_type: "block_impression",
+                band: None,
+                block_id: Some(block_id),
+                read_time_ms: None,
+                experiment_id: None,
+                variant_id: None,
+            })
+        }
+        EventKind::ExperimentImpression | EventKind::ExperimentConversion => {
+            let experiment_id = body
+                .experiment_id
+                .ok_or_else(|| ApiError::bad_request("missing experiment_id"))?;
+            let variant_id = body
+                .variant_id
+                .ok_or_else(|| ApiError::bad_request("missing variant_id"))?;
+            Ok(ParsedEvent {
+                event_type: match body.kind {
+                    EventKind::ExperimentImpression => "experiment_impression",
+                    _ => "experiment_conversion",
+                },
+                band: None,
+                block_id: None,
+                read_time_ms: None,
+                experiment_id: Some(experiment_id),
+                variant_id: Some(variant_id),
+            })
         }
         _ => Err(ApiError::bad_request("event kind not supported yet")),
     }

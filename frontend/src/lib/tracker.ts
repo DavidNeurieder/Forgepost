@@ -47,6 +47,10 @@ export function trackArticle(slug: string): Tracker {
 	const firedBands = new Set<number>();
 	let readFired = false;
 	let reached100 = false;
+	// Experiments this session has seen (block intersected) and which ones have
+	// already converted for the `completion` goal (reached 100%).
+	const experimentsSeen = new Map<string, string>();
+	const convertedExperiments = new Set<string>();
 
 	postEvent({ slug, session_id: sessionId, kind: 'view', payload: {} });
 
@@ -55,6 +59,21 @@ export function trackArticle(slug: string): Tracker {
 		const max = doc.scrollHeight - window.innerHeight;
 		if (max <= 0) return 1;
 		return Math.min(1, Math.max(0, window.scrollY / max));
+	}
+
+	function fireConversions(): void {
+		for (const [experimentId, variantId] of experimentsSeen) {
+			if (convertedExperiments.has(experimentId)) continue;
+			convertedExperiments.add(experimentId);
+			postEvent({
+				slug,
+				session_id: sessionId,
+				kind: 'experiment_conversion',
+				experiment_id: experimentId,
+				variant_id: variantId,
+				payload: {}
+			});
+		}
 	}
 
 	function fireRead(): void {
@@ -84,7 +103,10 @@ export function trackArticle(slug: string): Tracker {
 					kind: 'banded_scroll',
 					payload: { band }
 				});
-				if (band === 100) reached100 = true;
+				if (band === 100) {
+					reached100 = true;
+					fireConversions();
+				}
 			}
 		}
 		if (reached100 && !readFired && performance.now() - startedAt >= MIN_DWELL_MS) {
@@ -93,6 +115,8 @@ export function trackArticle(slug: string): Tracker {
 	}
 
 	// Impressions: fire once per block when a meaningful part is on screen.
+	// Blocks that are experiment variants also report their impression (with the
+	// assigned experiment/variant ids) so the engine can count sample sizes.
 	const observed = new Set<string>();
 	const observer =
 		typeof IntersectionObserver === 'undefined'
@@ -101,7 +125,8 @@ export function trackArticle(slug: string): Tracker {
 					(entries) => {
 						for (const entry of entries) {
 							if (!entry.isIntersecting) continue;
-							const id = (entry.target as HTMLElement).dataset.blockId;
+							const el = entry.target as HTMLElement;
+							const id = el.dataset.blockId;
 							if (!id || observed.has(id)) continue;
 							observed.add(id);
 							postEvent({
@@ -111,6 +136,19 @@ export function trackArticle(slug: string): Tracker {
 								block_id: id,
 								payload: {}
 							});
+							const expId = el.dataset.experimentId;
+							const variantId = el.dataset.variantId;
+							if (expId && variantId && !experimentsSeen.has(expId)) {
+								experimentsSeen.set(expId, variantId);
+								postEvent({
+									slug,
+									session_id: sessionId,
+									kind: 'experiment_impression',
+									experiment_id: expId,
+									variant_id: variantId,
+									payload: {}
+								});
+							}
 						}
 					},
 					{ threshold: 0.25 }

@@ -84,7 +84,12 @@
 		{/if}
 		<div class="article-body">
 			{#each article.rendered_blocks as block (block.id)}
-				<div class="tracked-block" data-block-id={block.id}>
+				<div
+					class="tracked-block"
+					data-block-id={block.id}
+					data-experiment-id={block.experiment_id ?? undefined}
+					data-variant-id={block.variant_id ?? undefined}
+				>
 					{@html block.html}
 				</div>
 			{/each}
