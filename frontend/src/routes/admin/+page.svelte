@@ -106,6 +106,7 @@
 					<th>Title</th>
 					<th>Status</th>
 					<th>Updated</th>
+					<th>Analytics</th>
 				</tr>
 			</thead>
 			<tbody>
@@ -118,6 +119,9 @@
 							<span class="badge {d.status}">{d.status}</span>
 						</td>
 						<td class="muted">{formatDate(d.updated_at_ms)}</td>
+						<td>
+							<a class="button small" href={`/admin/stats/${d.id}`}>Stats</a>
+						</td>
 					</tr>
 				{/each}
 			</tbody>

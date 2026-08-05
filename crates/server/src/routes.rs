@@ -1,4 +1,4 @@
-//! HTTP routes: setup, auth, documents, public articles, comments, RSS.
+//! HTTP routes: setup, auth, documents, public articles, comments, RSS, analytics.
 
 use axum::{
     Json,
@@ -6,14 +6,19 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
-use openpublish_content::{Document, render_html};
+use openpublish_analytics::EventKind;
+use openpublish_content::{Document, now_ms, render_html};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::analytics::{block_stats, preview_text};
 use crate::auth::{AuthUser, verify_csrf};
 use crate::error::ApiError;
-use crate::model::{DocumentSummary, FullDocument, User};
+use crate::model::{AnalyticsEvent, DocumentSummary, FullDocument, User};
 use crate::{AppState, repository::Repository};
+
+/// Anonymous visitor cookie used to de-duplicate unique readers.
+pub const VISITOR_COOKIE: &str = "opv";
 
 // ---------------------------------------------------------------------------
 // Response DTOs
@@ -85,6 +90,16 @@ pub struct ArticleView {
     pub tags: Vec<String>,
     pub blocks: Vec<BlockView>,
     pub html: String,
+    /// Per-block rendered HTML so the client can attach tracking attributes.
+    pub rendered_blocks: Vec<RenderedBlock>,
+}
+
+/// A single block rendered to HTML, keyed by its stable block id.
+#[derive(Serialize)]
+pub struct RenderedBlock {
+    pub id: Uuid,
+    pub kind: String,
+    pub html: String,
 }
 
 #[derive(Serialize)]
@@ -144,6 +159,18 @@ fn article_view(full: &FullDocument, tags: Vec<String>) -> ArticleView {
         .iter()
         .filter_map(|b| full.document.current_content(b.id).map(|c| (b.kind, c)))
         .collect();
+    let rendered_blocks = full
+        .document
+        .blocks
+        .iter()
+        .filter_map(|b| {
+            full.document.current_content(b.id).map(|c| RenderedBlock {
+                id: b.id,
+                kind: format!("{:?}", b.kind),
+                html: render_html([(b.kind, c)]),
+            })
+        })
+        .collect();
     ArticleView {
         id: full.document.id,
         title: full.document.title.clone(),
@@ -153,6 +180,7 @@ fn article_view(full: &FullDocument, tags: Vec<String>) -> ArticleView {
         tags,
         blocks: block_views(&full.document),
         html: render_html(block_refs),
+        rendered_blocks,
     }
 }
 
@@ -201,6 +229,21 @@ pub struct CommentRequest {
 #[derive(Deserialize)]
 pub struct RenderRequest {
     markdown: String,
+}
+
+/// One analytics event from the browser tracker (public, unauthenticated).
+#[derive(Deserialize)]
+pub struct EventRequest {
+    /// Slug of the published article the event concerns.
+    slug: String,
+    /// One per page load; ties scroll/read/impression events together.
+    session_id: Uuid,
+    kind: EventKind,
+    #[serde(default)]
+    block_id: Option<Uuid>,
+    /// Kind-specific payload: `{"band": 75}` or `{"read_time_ms": 24000}`.
+    #[serde(default)]
+    payload: serde_json::Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -529,6 +572,190 @@ pub async fn rss(State(state): State<AppState>) -> Result<Html<String>, ApiError
         "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<rss version=\"2.0\"><channel><title>OpenPublish</title>{items}</channel></rss>"
     );
     Ok(Html(feed))
+}
+
+// ---------------------------------------------------------------------------
+// Analytics (M2)
+// ---------------------------------------------------------------------------
+
+/// Collect a tracking event. Public write endpoint: rate-limited per client,
+/// payload-validated, and identity comes from the anonymous `opv` cookie.
+pub async fn record_event(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<EventRequest>,
+) -> Result<(StatusCode, HeaderMap), ApiError> {
+    let client = client_ip(&headers);
+    if !state.rate_limiter.allow(&client, now_ms()) {
+        return Err(ApiError::rate_limited());
+    }
+
+    let full = state
+        .repo
+        .get_published_by_slug(&body.slug)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("article not found"))?;
+    let document_id = full.document.id;
+
+    let (event_type, band, block_id, read_time_ms) = parse_event(&body)?;
+    if let Some(bid) = block_id
+        && full.document.block(bid).is_none()
+    {
+        return Err(ApiError::bad_request("unknown block"));
+    }
+
+    let (visitor_id, cookie) = visitor_identity(&headers);
+    let event = AnalyticsEvent {
+        id: Uuid::new_v4(),
+        document_id,
+        event_type,
+        band,
+        block_id,
+        pageview_id: body.session_id,
+        visitor_id,
+        referrer: headers
+            .get(header::REFERER)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
+        user_agent: headers
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
+        read_time_ms,
+        created_at_ms: now_ms(),
+    };
+    state.repo.record_analytics_event(&event).await?;
+
+    let mut resp_headers = HeaderMap::new();
+    if let Some(c) = cookie {
+        resp_headers.insert(header::SET_COOKIE, c);
+    }
+    Ok((StatusCode::NO_CONTENT, resp_headers))
+}
+
+/// Per-document analytics for the dashboard: article-level aggregates plus
+/// per-block reach/drop-off ("estimated" labeling; §5.2).
+pub async fn document_stats(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<crate::analytics::DocumentStatsView>, ApiError> {
+    let id = parse_uuid(&id)?;
+    let full = state
+        .repo
+        .get_document(id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("document not found"))?;
+    if full.owner_id != auth.user.id {
+        return Err(ApiError::forbidden());
+    }
+
+    let mut article = state.repo.article_stats(id).await?;
+    let band_reach = state.repo.band_reach(id).await?;
+    let impressions = state.repo.block_impressions(id).await?;
+    article.band_reach = band_reach.clone();
+    article.completion = band_reach
+        .iter()
+        .find(|b| b.band == 100)
+        .map(|b| b.pageviews)
+        .filter(|&completed| completed > 0)
+        .map(|completed| completed as f64 / article.views.max(1) as f64);
+
+    let mut blocks_sorted: Vec<&openpublish_content::Block> = full.document.blocks.iter().collect();
+    blocks_sorted.sort_by_key(|b| b.position);
+    let layout: Vec<(Uuid, i64, String, String)> = blocks_sorted
+        .iter()
+        .filter_map(|b| {
+            let kind = format!("{:?}", b.kind);
+            full.document
+                .current_content(b.id)
+                .map(|c| (b.id, b.position, kind.clone(), preview_text(&kind, c)))
+        })
+        .collect();
+    let blocks = block_stats(&layout, &impressions, &band_reach, article.views);
+    Ok(Json(crate::analytics::DocumentStatsView {
+        article,
+        blocks,
+    }))
+}
+
+/// Normalized event fields extracted from a validated request.
+type ParsedEvent = (String, Option<i64>, Option<Uuid>, Option<i64>);
+
+fn parse_event(body: &EventRequest) -> Result<ParsedEvent, ApiError> {
+    match body.kind {
+        EventKind::View => Ok(("view".into(), None, None, None)),
+        EventKind::BandedScroll => {
+            let band = body
+                .payload
+                .get("band")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| ApiError::bad_request("missing band"))?;
+            if !crate::analytics::SCROLL_BANDS.contains(&band) {
+                return Err(ApiError::bad_request("invalid scroll band"));
+            }
+            Ok(("banded_scroll".into(), Some(band), None, None))
+        }
+        EventKind::ArticleRead => {
+            let read_time_ms = body
+                .payload
+                .get("read_time_ms")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| ApiError::bad_request("missing read_time_ms"))?;
+            Ok(("article_read".into(), None, None, Some(read_time_ms)))
+        }
+        EventKind::BlockImpression => {
+            let block_id = body
+                .block_id
+                .ok_or_else(|| ApiError::bad_request("missing block_id"))?;
+            Ok(("block_impression".into(), None, Some(block_id), None))
+        }
+        _ => Err(ApiError::bad_request("event kind not supported yet")),
+    }
+}
+
+/// Best-effort client identity: first `x-forwarded-for` entry (Vite/dev + proxy
+/// deployments) falling back to a placeholder key.
+fn client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+/// Read or mint the anonymous visitor id (`opv` cookie). Returns the visitor id
+/// and, when a new cookie was minted, its `Set-Cookie` header.
+fn visitor_identity(headers: &HeaderMap) -> (Uuid, Option<axum::http::HeaderValue>) {
+    if let Some(v) = headers
+        .get(header::COOKIE)
+        .and_then(|c| c.to_str().ok())
+        .and_then(|c| cookie_value(c, VISITOR_COOKIE))
+        .and_then(|v| Uuid::parse_str(v).ok())
+    {
+        return (v, None);
+    }
+    let v = Uuid::new_v4();
+    let cookie = axum::http::HeaderValue::from_str(&format!(
+        "{VISITOR_COOKIE}={v}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+        365 * 24 * 60 * 60
+    ))
+    .expect("visitor cookie is valid");
+    (v, Some(cookie))
+}
+
+fn cookie_value<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
+    cookies.split(';').find_map(|part| {
+        let part = part.trim();
+        let (k, v) = part.split_once('=')?;
+        if k.trim() == name {
+            Some(v.trim())
+        } else {
+            None
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------

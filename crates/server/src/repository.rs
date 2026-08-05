@@ -13,8 +13,9 @@ use sqlx::{Row, Transaction};
 use std::str::FromStr;
 use uuid::Uuid;
 
+use crate::analytics::{ArticleStats, BandReach};
 use crate::auth::{SESSION_TTL_MS, sha256_hex};
-use crate::model::{Comment, DocumentSummary, FullDocument, Session, User};
+use crate::model::{AnalyticsEvent, Comment, DocumentSummary, FullDocument, Session, User};
 
 #[async_trait]
 pub trait Repository: Send + Sync {
@@ -87,6 +88,18 @@ pub trait Repository: Send + Sync {
 
     // Export
     async fn export_json(&self) -> Result<serde_json::Value, RepositoryError>;
+
+    // Analytics (M2)
+    async fn record_analytics_event(&self, event: &AnalyticsEvent) -> Result<(), RepositoryError>;
+    async fn article_stats(&self, document_id: DocumentId)
+    -> Result<ArticleStats, RepositoryError>;
+    /// Distinct pageviews whose deepest scroll reached each band (cumulative).
+    async fn band_reach(&self, document_id: DocumentId) -> Result<Vec<BandReach>, RepositoryError>;
+    /// Distinct pageviews that rendered each block.
+    async fn block_impressions(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<std::collections::HashMap<Uuid, i64>, RepositoryError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -105,6 +118,8 @@ pub enum RepositoryError {
     InvalidInput(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("rate limited")]
+    RateLimited,
 }
 
 /// SQLite-backed repository (solo mode, the only MVP distribution).
@@ -787,6 +802,117 @@ impl Repository for SqliteRepository {
             "documents": documents,
             "comments": comments,
         }))
+    }
+
+    async fn record_analytics_event(&self, event: &AnalyticsEvent) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "INSERT INTO analytics_events
+                (id, document_id, event_type, band, block_id, pageview_id, visitor_id,
+                 referrer, user_agent, read_time_ms, created_at_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(event.id.to_string())
+        .bind(event.document_id.to_string())
+        .bind(&event.event_type)
+        .bind(event.band)
+        .bind(event.block_id.map(|b| b.to_string()))
+        .bind(event.pageview_id.to_string())
+        .bind(event.visitor_id.to_string())
+        .bind(&event.referrer)
+        .bind(&event.user_agent)
+        .bind(event.read_time_ms)
+        .bind(event.created_at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn article_stats(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<ArticleStats, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT
+                (SELECT COUNT(DISTINCT pageview_id) FROM analytics_events
+                    WHERE document_id = ? AND event_type = 'view') AS views,
+                (SELECT COUNT(DISTINCT visitor_id) FROM analytics_events
+                    WHERE document_id = ? AND event_type = 'view') AS readers,
+                (SELECT COUNT(*) FROM analytics_events
+                    WHERE document_id = ? AND event_type = 'article_read') AS reads,
+                (SELECT AVG(read_time_ms) FROM analytics_events
+                    WHERE document_id = ? AND event_type = 'article_read'
+                      AND read_time_ms IS NOT NULL) AS avg_read",
+        )
+        .bind(document_id.to_string())
+        .bind(document_id.to_string())
+        .bind(document_id.to_string())
+        .bind(document_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+        let views: i64 = row.get("views");
+        let unique_readers: i64 = row.get("readers");
+        let read_events: i64 = row.get("reads");
+        let avg_read_time_ms: Option<f64> = row.get("avg_read");
+        Ok(ArticleStats {
+            views,
+            unique_readers,
+            avg_read_time_ms: avg_read_time_ms.map(|v| v.round() as i64),
+            read_events,
+            completion: None,
+            band_reach: Vec::new(),
+        })
+    }
+
+    async fn band_reach(&self, document_id: DocumentId) -> Result<Vec<BandReach>, RepositoryError> {
+        // Cumulative distinct pageviews per band: for each threshold band B,
+        // count pageviews whose deepest scroll reached at least B.
+        let rows = sqlx::query(
+            "WITH depth AS (
+                SELECT pageview_id, MAX(band) AS max_band
+                FROM analytics_events
+                WHERE document_id = ? AND event_type = 'banded_scroll'
+                GROUP BY pageview_id
+             )
+             SELECT b.band AS band, COUNT(d.pageview_id) AS pvs
+             FROM (SELECT 25 AS band UNION ALL SELECT 50 UNION ALL SELECT 75 UNION ALL SELECT 100) b
+             LEFT JOIN depth d ON b.band <= d.max_band
+             GROUP BY b.band
+             ORDER BY b.band ASC",
+        )
+        .bind(document_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| BandReach {
+                band: r.get("band"),
+                pageviews: r.get("pvs"),
+            })
+            .collect())
+    }
+
+    async fn block_impressions(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<std::collections::HashMap<Uuid, i64>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT block_id, COUNT(DISTINCT pageview_id) AS pvs
+             FROM analytics_events
+             WHERE document_id = ? AND event_type = 'block_impression' AND block_id IS NOT NULL
+             GROUP BY block_id",
+        )
+        .bind(document_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let block_id: String = r.get("block_id");
+                Uuid::from_str(&block_id)
+                    .ok()
+                    .map(|id| (id, r.get::<i64, _>("pvs")))
+            })
+            .collect())
     }
 }
 

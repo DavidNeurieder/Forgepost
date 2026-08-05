@@ -14,6 +14,7 @@ pub type SessionId = Uuid;
 pub type EventId = Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EventKind {
     View,
     BandedScroll,

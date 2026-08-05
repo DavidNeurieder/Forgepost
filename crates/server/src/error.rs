@@ -23,6 +23,9 @@ impl ApiError {
     pub fn conflict(msg: impl Into<String>) -> Self {
         Self(RepositoryError::Conflict(msg.into()))
     }
+    pub fn rate_limited() -> Self {
+        Self(RepositoryError::RateLimited)
+    }
 }
 
 impl From<RepositoryError> for ApiError {
@@ -39,6 +42,7 @@ impl IntoResponse for ApiError {
             RepositoryError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".into()),
             RepositoryError::InvalidInput(m) => (StatusCode::BAD_REQUEST, m),
             RepositoryError::Conflict(m) => (StatusCode::CONFLICT, m),
+            RepositoryError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate limited".into()),
             RepositoryError::Database(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             RepositoryError::Migration(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         };

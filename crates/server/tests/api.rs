@@ -1022,3 +1022,489 @@ async fn editing_with_insert_keeps_stable_block_ids() {
     assert!(html.contains("Inserted at top."));
     assert!(html.contains("<h1>Heading</h1>"));
 }
+
+// ---------------------------------------------------------------------------
+// M2: analytics
+// ---------------------------------------------------------------------------
+
+/// Setup an owner, create a 3-block article, and publish it. Returns the owner
+/// session cookie, CSRF token, document id, slug, and the published block ids.
+async fn seed_published_article(app: &Router) -> (String, String, String, String, Vec<String>) {
+    let (_, resp) = send(
+        app,
+        json_req(
+            Method::POST,
+            "/setup",
+            None,
+            None,
+            Some(json!({
+                "email": "a@b.com",
+                "password": "password123",
+                "display_name": "Alice",
+            })),
+        ),
+    )
+    .await;
+    let cookie = session_cookie(&resp);
+    let csrf = body_json(resp).await["csrf_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (_, resp) = send(
+        app,
+        json_req(
+            Method::POST,
+            "/api/documents",
+            Some(&cookie),
+            Some(&csrf),
+            Some(json!({
+                "title": "Analytics Post",
+                "markdown": "# Headline\n\nBody paragraph one.\n\nBody paragraph two.",
+                "tags": ["tech"],
+            })),
+        ),
+    )
+    .await;
+    let doc = body_json(resp).await;
+    let id = doc["id"].as_str().unwrap().to_string();
+    let slug = doc["slug"].as_str().unwrap().to_string();
+    let block_ids: Vec<String> = doc["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["id"].as_str().unwrap().to_string())
+        .collect();
+
+    let (_, resp) = send(
+        app,
+        json_req(
+            Method::POST,
+            &format!("/api/documents/{id}/publish"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(body_json(resp).await["status"], "published");
+    (cookie, csrf, id, slug, block_ids)
+}
+
+#[tokio::test]
+async fn analytics_events_record_and_aggregate() {
+    let app = test_app().await;
+    let (session_cookie, _, id, slug, block_ids) = seed_published_article(&app).await;
+    let visitor = "11111111-1111-1111-1111-111111111111";
+    let session = "22222222-2222-2222-2222-222222222222";
+
+    // First event mints the visitor cookie.
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/events",
+            None,
+            None,
+            Some(json!({
+                "slug": slug,
+                "session_id": session,
+                "kind": "view",
+                "payload": {},
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let set_cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("visitor cookie minted")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(set_cookie.starts_with("opv="));
+
+    let cookie = format!("opv={visitor}");
+    let post = |body: Value| async {
+        let (status, resp) = send(
+            &app,
+            json_req(Method::POST, "/api/events", Some(&cookie), None, Some(body)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "event accepted");
+        resp
+    };
+
+    // Scroll through the whole article.
+    for band in [25, 50, 75, 100] {
+        post(json!({
+            "slug": slug, "session_id": session, "kind": "banded_scroll",
+            "payload": { "band": band },
+        }))
+        .await;
+    }
+    post(json!({
+        "slug": slug, "session_id": session, "kind": "article_read",
+        "payload": { "read_time_ms": 42_000 },
+    }))
+    .await;
+    for bid in &block_ids {
+        post(json!({
+            "slug": slug, "session_id": session, "kind": "block_impression",
+            "block_id": bid, "payload": {},
+        }))
+        .await;
+    }
+
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/documents/{id}/stats"),
+            Some(&session_cookie),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let stats = body_json(resp).await;
+
+    assert_eq!(stats["article"]["views"], 1);
+    assert_eq!(stats["article"]["unique_readers"], 1);
+    assert_eq!(stats["article"]["read_events"], 1);
+    assert_eq!(stats["article"]["avg_read_time_ms"], 42_000);
+    assert_eq!(stats["article"]["completion"], 1.0);
+
+    let bands = stats["article"]["band_reach"].as_array().unwrap();
+    assert_eq!(bands.len(), 4);
+    assert_eq!(bands[0]["band"], 25);
+    assert_eq!(bands[0]["pageviews"], 1);
+    assert_eq!(bands[3]["band"], 100);
+    assert_eq!(bands[3]["pageviews"], 1);
+
+    // Every block reported an impression and an estimated reach.
+    let blocks = stats["blocks"].as_array().unwrap();
+    assert_eq!(blocks.len(), 3);
+    for b in blocks {
+        assert_eq!(b["impressions"], 1);
+        assert_eq!(b["is_estimate"], true);
+    }
+    // Single-pageview sample: first block reached by the viewer.
+    assert_eq!(blocks[0]["estimated_reach"], 1);
+    assert!(blocks[0]["preview"].as_str().unwrap().contains("Headline"));
+}
+
+#[tokio::test]
+async fn analytics_rejects_unknown_slug_and_bad_payloads() {
+    let app = test_app().await;
+    let (_, _, _, slug, block_ids) = seed_published_article(&app).await;
+
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/events",
+            None,
+            None,
+            Some(json!({
+                "slug": "does-not-exist",
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "kind": "view",
+                "payload": {},
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/events",
+            None,
+            None,
+            Some(json!({
+                "slug": slug,
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "kind": "banded_scroll",
+                "payload": { "band": 37 },
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "invalid band rejected");
+
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/events",
+            None,
+            None,
+            Some(json!({
+                "slug": slug,
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "kind": "block_impression",
+                "block_id": "33333333-3333-3333-3333-333333333333",
+                "payload": {},
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "unknown block rejected");
+
+    // Experiments are not supported until M3.
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/events",
+            None,
+            None,
+            Some(json!({
+                "slug": slug,
+                "session_id": "22222222-2222-2222-2222-222222222222",
+                "kind": "experiment_impression",
+                "payload": {},
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let _ = block_ids;
+}
+
+#[tokio::test]
+async fn analytics_stats_require_owner() {
+    let app = test_app().await;
+    let (_, _, id, _, _) = seed_published_article(&app).await;
+
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/documents/{id}/stats"),
+            None,
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// Send one tracking event from `visitor` with an explicit visitor cookie so
+/// several distinct readers can be simulated without persisting the minted
+/// cookie between calls.
+async fn post_event(app: &Router, visitor: &str, body: Value) {
+    let (status, _) = send(
+        app,
+        json_req(
+            Method::POST,
+            "/api/events",
+            Some(&format!("opv={visitor}")),
+            None,
+            Some(body),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "event accepted");
+}
+
+/// Full drop-off scenario across two visitors:
+///   visitor A reads the whole article; visitor B only reaches the top.
+/// This exercises events → aggregations → estimated per-block reach → drop-off.
+#[tokio::test]
+async fn analytics_multi_visitor_dropoff() {
+    let app = test_app().await;
+    let (session_cookie, _, id, slug, block_ids) = seed_published_article(&app).await;
+    assert_eq!(block_ids.len(), 3, "seed article has 3 blocks");
+
+    // Visitor A: full read + impressions for the first two blocks.
+    let a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    let a_session = "aaaaaa01-0000-0000-0000-000000000000";
+    post_event(
+        &app,
+        a,
+        json!({ "slug": slug, "session_id": a_session, "kind": "view", "payload": {} }),
+    )
+    .await;
+    for band in [25, 50, 75, 100] {
+        post_event(
+            &app,
+            a,
+            json!({
+                "slug": slug, "session_id": a_session, "kind": "banded_scroll",
+                "payload": { "band": band },
+            }),
+        )
+        .await;
+    }
+    post_event(
+        &app,
+        a,
+        json!({
+            "slug": slug, "session_id": a_session, "kind": "article_read",
+            "payload": { "read_time_ms": 42_000 },
+        }),
+    )
+    .await;
+    post_event(
+        &app,
+        a,
+        json!({
+            "slug": slug, "session_id": a_session, "kind": "block_impression",
+            "block_id": block_ids[0], "payload": {},
+        }),
+    )
+    .await;
+    post_event(
+        &app,
+        a,
+        json!({
+            "slug": slug, "session_id": a_session, "kind": "block_impression",
+            "block_id": block_ids[1], "payload": {},
+        }),
+    )
+    .await;
+
+    // Visitor B: only reaches the top of the page.
+    let b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    let b_session = "bbbbbb01-0000-0000-0000-000000000000";
+    post_event(
+        &app,
+        b,
+        json!({ "slug": slug, "session_id": b_session, "kind": "view", "payload": {} }),
+    )
+    .await;
+    post_event(
+        &app,
+        b,
+        json!({
+            "slug": slug, "session_id": b_session, "kind": "banded_scroll",
+            "payload": { "band": 25 },
+        }),
+    )
+    .await;
+    post_event(
+        &app,
+        b,
+        json!({
+            "slug": slug, "session_id": b_session, "kind": "block_impression",
+            "block_id": block_ids[0], "payload": {},
+        }),
+    )
+    .await;
+
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/documents/{id}/stats"),
+            Some(&session_cookie),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let stats = body_json(resp).await;
+
+    // Article-level.
+    assert_eq!(stats["article"]["views"], 2);
+    assert_eq!(stats["article"]["unique_readers"], 2);
+    assert_eq!(stats["article"]["avg_read_time_ms"], 42_000);
+    assert_eq!(stats["article"]["read_events"], 1);
+    assert_eq!(stats["article"]["completion"], 0.5);
+
+    // Cumulative scroll bands: A reached everything, B only 25%.
+    let bands: serde_json::Map<String, Value> = stats["article"]["band_reach"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| (b["band"].to_string(), b["pageviews"].clone()))
+        .collect();
+    assert_eq!(bands["25"], json!(2));
+    assert_eq!(bands["50"], json!(1));
+    assert_eq!(bands["75"], json!(1));
+    assert_eq!(bands["100"], json!(1));
+
+    // Per-block: impressions are exact; reach is scroll-estimated.
+    let blocks = stats["blocks"].as_array().unwrap();
+    assert_eq!(blocks.len(), 3);
+    let by_pos: std::collections::HashMap<Value, &Value> =
+        blocks.iter().map(|b| (b["position"].clone(), b)).collect();
+    let b0 = by_pos[&json!(0)];
+    let b1 = by_pos[&json!(1)];
+    assert_eq!(b0["impressions"], 2, "both visitors rendered block 0");
+    assert_eq!(b0["estimated_reach"], 2, "everyone reaches the top block");
+    assert_eq!(b0["estimated_dropoff"], 0);
+    assert_eq!(b1["impressions"], 1, "only visitor A rendered block 1");
+    assert_eq!(b1["estimated_reach"], 1, "visitor B stopped before block 1");
+    assert_eq!(b1["estimated_dropoff"], 1, "one reader leaves at block 1");
+    assert_eq!(blocks[0]["is_estimate"], true);
+    assert!(blocks[0]["preview"].as_str().unwrap().contains("Headline"));
+}
+
+#[tokio::test]
+async fn analytics_events_are_rate_limited() {
+    use openpublish_server::analytics::RateLimiter;
+    use openpublish_server::app_with;
+
+    let pool = pool().await;
+    let repo = SqliteRepository::from_pool(pool);
+    repo.migrate().await.expect("migrations apply");
+    let app = app_with(Arc::new(repo), RateLimiter::new(3));
+    let (_, _, _, slug, _) = seed_published_article(&app).await;
+
+    let event = json!({
+        "slug": slug,
+        "session_id": "22222222-2222-2222-2222-222222222222",
+        "kind": "view",
+        "payload": {},
+    });
+    for _ in 0..3 {
+        let (status, _) = send(
+            &app,
+            json_req(Method::POST, "/api/events", None, None, Some(event.clone())),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    let (status, _) = send(
+        &app,
+        json_req(Method::POST, "/api/events", None, None, Some(event)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn article_includes_rendered_blocks() {
+    let app = test_app().await;
+    let (_, _, _, slug, block_ids) = seed_published_article(&app).await;
+
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/articles/{slug}"),
+            None,
+            None,
+            None,
+        ),
+    )
+    .await;
+    let article = body_json(resp).await;
+    let rendered = article["rendered_blocks"].as_array().unwrap();
+    assert_eq!(rendered.len(), 3);
+    for (rb, bid) in rendered.iter().zip(&block_ids) {
+        assert_eq!(rb["id"], json!(bid));
+        assert!(!rb["html"].as_str().unwrap().is_empty());
+    }
+    assert!(rendered[0]["html"].as_str().unwrap().contains("<h1>"));
+}

@@ -36,6 +36,43 @@ export interface ArticleView {
 	tags: string[];
 	blocks: BlockView[];
 	html: string;
+	rendered_blocks: RenderedBlock[];
+}
+
+export interface RenderedBlock {
+	id: string;
+	kind: string;
+	html: string;
+}
+
+export interface BandReach {
+	band: number;
+	pageviews: number;
+}
+
+export interface ArticleStats {
+	views: number;
+	unique_readers: number;
+	avg_read_time_ms: number | null;
+	read_events: number;
+	completion: number | null;
+	band_reach: BandReach[];
+}
+
+export interface BlockStat {
+	block_id: string;
+	position: number;
+	kind: string;
+	preview: string;
+	impressions: number;
+	estimated_reach: number;
+	estimated_dropoff: number;
+	is_estimate: boolean;
+}
+
+export interface DocumentStatsView {
+	article: ArticleStats;
+	blocks: BlockStat[];
 }
 
 export interface DocumentSummary {

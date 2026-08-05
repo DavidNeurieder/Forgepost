@@ -54,3 +54,22 @@ pub struct Comment {
     pub status: String,
     pub created_at_ms: i64,
 }
+
+/// A single row of the append-only analytics event stream.
+#[derive(Debug, Clone)]
+pub struct AnalyticsEvent {
+    pub id: Uuid,
+    pub document_id: Uuid,
+    /// Wire event type: `view` | `banded_scroll` | `article_read` | `block_impression`.
+    pub event_type: String,
+    pub band: Option<i64>,
+    pub block_id: Option<Uuid>,
+    /// Client-generated, one per page load (a "session" of events).
+    pub pageview_id: Uuid,
+    /// Anonymous visitor from the `opv` cookie; used for unique-reader counts.
+    pub visitor_id: Uuid,
+    pub referrer: Option<String>,
+    pub user_agent: Option<String>,
+    pub read_time_ms: Option<i64>,
+    pub created_at_ms: i64,
+}

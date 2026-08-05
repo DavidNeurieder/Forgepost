@@ -1,6 +1,8 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
 	import type { ArticleView, CommentView } from '$lib/types';
+	import { trackArticle } from '$lib/tracker';
 
 	let { params } = $props();
 
@@ -32,6 +34,14 @@
 			.then((c) => (comments = c))
 			.catch(() => {});
 	});
+
+	let tracker: ReturnType<typeof trackArticle> | null = null;
+	$effect(() => {
+		if (article && !tracker) {
+			tracker = trackArticle(article.slug);
+		}
+	});
+	onMount(() => () => tracker?.dispose());
 
 	async function submitComment() {
 		submitting = true;
@@ -73,7 +83,11 @@
 			</p>
 		{/if}
 		<div class="article-body">
-			{@html article.html}
+			{#each article.rendered_blocks as block (block.id)}
+				<div class="tracked-block" data-block-id={block.id}>
+					{@html block.html}
+				</div>
+			{/each}
 		</div>
 	</article>
 
