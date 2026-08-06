@@ -12,11 +12,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 use reqwest::Method;
 use reqwest::blocking::Client;
-use reqwest::header::{CONTENT_TYPE, COOKIE};
+use reqwest::header::{CONTENT_TYPE, COOKIE, SET_COOKIE};
 use serde_json::{Value, json};
 
 const PASSWORD: &str = "correct horse battery staple";
@@ -261,6 +262,70 @@ fn export_database(db_path: &Path) -> Value {
         String::from_utf8_lossy(&out.stderr)
     );
     serde_json::from_slice(&out.stdout).expect("export is JSON")
+}
+
+// ---------------------------------------------------------------------------
+// Web-page journey helpers (server-rendered HTML forms, no JS, no build step)
+// ---------------------------------------------------------------------------
+
+/// Extract the `csrf_token` hidden-field value from a rendered form.
+fn csrf_from(html: &str) -> String {
+    html.split("name=\"csrf_token\"")
+        .nth(1)
+        .and_then(|rest| rest.split("value=\"").nth(1))
+        .and_then(|rest| rest.split('"').next())
+        .expect("page carries a hidden csrf_token")
+        .to_string()
+}
+
+/// Extract the article slug from the published editor's "View post" link.
+fn slug_from_editor(html: &str) -> String {
+    html.split("href=\"/articles/")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("published editor links to the article")
+        .to_string()
+}
+
+/// A browser-like client: follows redirects and keeps the session cookie.
+struct Web {
+    http: Client,
+    base: String,
+}
+
+impl Web {
+    fn new(base: &str) -> Self {
+        Self {
+            http: Client::builder()
+                .cookie_store(true)
+                .build()
+                .expect("web client"),
+            base: base.to_string(),
+        }
+    }
+
+    fn get(&self, path: &str) -> (u16, String) {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base, path))
+            .send()
+            .expect("GET succeeds");
+        let status = resp.status().as_u16();
+        (status, resp.text().expect("response body"))
+    }
+
+    /// Form POST; follows redirects and returns `(status, body, final_url)`.
+    fn post(&self, path: &str, fields: &[(&str, &str)]) -> (u16, String, String) {
+        let resp = self
+            .http
+            .post(format!("{}{}", self.base, path))
+            .form(fields)
+            .send()
+            .expect("POST succeeds");
+        let status = resp.status().as_u16();
+        let final_url = resp.url().to_string();
+        (status, resp.text().expect("response body"), final_url)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -661,4 +726,135 @@ fn fresh_setup_locks_and_second_serve_skips_setup() {
     assert_eq!(body, json!({ "setup_complete": true }));
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// The whole creator journey through the real web pages (setup → logout →
+/// login → write → publish), then confirm a published post is served to
+/// several readers pulling the same URL at the same time.
+#[test]
+fn web_reader_concurrency_end_to_end() {
+    let server = start_server();
+    let base = &server.base;
+    let web = Web::new(base);
+
+    const EMAIL: &str = "owner@example.com";
+    const DISPLAY: &str = "Owner";
+    const TITLE: &str = "Concurrent Post";
+    const MARKER: &str = "Unique marker paragraph for concurrent readers.";
+
+    // First run: the home page lands on the setup wizard.
+    let (status, body) = web.get("/");
+    assert_eq!(status, 200);
+    assert!(body.contains("Create account"), "first-run lands on /setup");
+
+    // Create the account; the wizard signs you straight into the dashboard.
+    let (status, body, url) = web.post(
+        "/setup",
+        &[
+            ("email", EMAIL),
+            ("display", DISPLAY),
+            ("password", PASSWORD),
+            ("confirm", PASSWORD),
+        ],
+    );
+    assert_eq!(status, 200);
+    assert!(
+        url.ends_with("/admin"),
+        "setup signs into the dashboard: {url}"
+    );
+    assert!(body.contains(&format!("Signed in as {DISPLAY}")));
+
+    // Explicit log-out, then log back in through the /login form.
+    let csrf = csrf_from(&body);
+    let (status, _body, url) = web.post("/logout", &[("csrf_token", &csrf)]);
+    assert_eq!(status, 200);
+    assert!(url.ends_with("/login"), "logout lands on /login: {url}");
+
+    let (status, body, url) = web.post("/login", &[("email", EMAIL), ("password", PASSWORD)]);
+    assert_eq!(status, 200);
+    assert!(url.ends_with("/admin"), "login lands on /admin: {url}");
+    assert!(body.contains(&format!("Signed in as {DISPLAY}")));
+
+    // Write and publish a post through the dashboard and editor forms.
+    let csrf = csrf_from(&body);
+    let (status, _body, url) = web.post("/admin/new", &[("csrf_token", &csrf)]);
+    assert_eq!(status, 200);
+    let editor = url.replacen(&web.base, "", 1);
+    assert!(
+        editor.starts_with("/admin/editor/"),
+        "new post opens the editor: {editor}"
+    );
+
+    let (status, body) = web.get(&editor);
+    assert_eq!(status, 200);
+    let csrf = csrf_from(&body);
+    let (status, body, _url) = web.post(
+        &editor,
+        &[
+            ("csrf_token", &csrf),
+            ("title", TITLE),
+            ("tags", "demo"),
+            ("markdown", &format!("# {TITLE}\n\n{MARKER}")),
+        ],
+    );
+    assert_eq!(status, 200);
+    assert!(body.contains("Saved"), "editor shows the save confirmation");
+
+    let (status, body, _url) = web.post(&format!("{editor}/publish"), &[("csrf_token", &csrf)]);
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("Published"),
+        "editor shows the publish confirmation"
+    );
+    assert!(
+        body.contains("published"),
+        "status badge flips to published"
+    );
+
+    // The published editor links to the live article; read the slug from it.
+    let (status, body) = web.get(&editor);
+    assert_eq!(status, 200);
+    let slug = slug_from_editor(&body);
+    assert!(!slug.is_empty());
+    assert_ne!(
+        slug, "untitled",
+        "draft slug was regenerated from the title"
+    );
+
+    // A crowd of readers pulls the post at the same time.
+    let reader_count = 6;
+    let barrier = Arc::new(Barrier::new(reader_count));
+    let mut handles = Vec::new();
+    for _ in 0..reader_count {
+        let barrier = barrier.clone();
+        let base = base.clone();
+        let slug = slug.clone();
+        let title = TITLE.to_string();
+        let marker = MARKER.to_string();
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            let client = Client::new();
+            let resp = client
+                .get(format!("{base}/articles/{slug}"))
+                .send()
+                .expect("concurrent article fetch");
+            assert_eq!(resp.status().as_u16(), 200, "concurrent reader gets 200");
+            let set_cookie = resp
+                .headers()
+                .get(SET_COOKIE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let html = resp.text().expect("article body");
+            assert!(html.contains(&title), "article shows the title");
+            assert!(html.contains(&marker), "article shows the content");
+            assert!(
+                set_cookie.contains("opv="),
+                "reader receives a visitor cookie"
+            );
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("concurrent reader thread completes");
+    }
 }
