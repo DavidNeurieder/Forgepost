@@ -5,7 +5,9 @@
 
 use crate::analytics::{ArticleStats, BandReach};
 use crate::auth::{SESSION_TTL_MS, sha256_hex};
-use crate::model::{AnalyticsEvent, Comment, DocumentSummary, FullDocument, Session, User};
+use crate::model::{
+    AnalyticsEvent, Comment, DocumentSummary, FullDocument, Session, SiteSettings, User,
+};
 use async_trait::async_trait;
 use openpublish_content::{
     Block, BlockContent, BlockId, BlockKind, BlockVersion, Document, DocumentId, VersionId, now_ms,
@@ -29,6 +31,12 @@ pub trait Repository: Send + Sync {
     ) -> Result<User, RepositoryError>;
     async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, RepositoryError>;
     async fn find_user_by_id(&self, id: Uuid) -> Result<Option<User>, RepositoryError>;
+
+    // Settings
+    async fn get_setting(&self, key: &str) -> Result<Option<String>, RepositoryError>;
+    async fn set_setting(&self, key: &str, value: &str) -> Result<(), RepositoryError>;
+    /// Read the blog-wide settings, applying the defaults for any unset keys.
+    async fn site_settings(&self) -> Result<SiteSettings, RepositoryError>;
 
     // Sessions
     async fn create_session(&self, user_id: Uuid) -> Result<Session, RepositoryError>;
@@ -318,6 +326,39 @@ impl Repository for SqliteRepository {
             Some(r) => r.get::<String, _>("value") == "1",
             None => false,
         })
+    }
+
+    async fn get_setting(&self, key: &str) -> Result<Option<String>, RepositoryError> {
+        let row = sqlx::query("SELECT value FROM settings WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get::<String, _>("value")))
+    }
+
+    async fn set_setting(&self, key: &str, value: &str) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, strftime('%s','now') * 1000)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                             updated_at = excluded.updated_at",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn site_settings(&self) -> Result<SiteSettings, RepositoryError> {
+        let name = self
+            .get_setting("site.name")
+            .await?
+            .unwrap_or_else(|| "OpenPublish".into());
+        let theme = self
+            .get_setting("theme")
+            .await?
+            .unwrap_or_else(|| "system".into());
+        Ok(SiteSettings { name, theme })
     }
 
     async fn create_first_user(
@@ -1547,6 +1588,39 @@ mod tests {
         assert!(!repo.is_setup_complete().await.unwrap());
         seed_user(&repo).await;
         assert!(repo.is_setup_complete().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn settings_roundtrip_and_defaults() {
+        let repo = repo().await;
+
+        // Fresh database: defaults apply.
+        let site = repo.site_settings().await.unwrap();
+        assert_eq!(site.name, "OpenPublish");
+        assert_eq!(site.theme, "system");
+        assert!(repo.get_setting("site.name").await.unwrap().is_none());
+
+        // Roundtrip an explicit value.
+        repo.set_setting("site.name", "My Blog").await.unwrap();
+        repo.set_setting("theme", "dark").await.unwrap();
+        assert_eq!(
+            repo.get_setting("site.name").await.unwrap().unwrap(),
+            "My Blog"
+        );
+        let site = repo.site_settings().await.unwrap();
+        assert_eq!(site.name, "My Blog");
+        assert_eq!(site.theme, "dark");
+
+        // Overwrite and confirm only one row per key.
+        repo.set_setting("theme", "sepia").await.unwrap();
+        let site = repo.site_settings().await.unwrap();
+        assert_eq!(site.theme, "sepia");
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT key, value FROM settings WHERE key IN ('site.name', 'theme')")
+                .fetch_all(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 2);
     }
 
     #[tokio::test]

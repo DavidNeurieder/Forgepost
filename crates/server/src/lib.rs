@@ -77,6 +77,10 @@ fn app_with_config(
             post(pages::experiment_action),
         )
         .route("/admin/comments/{id}/approve", post(pages::approve_comment))
+        .route(
+            "/admin/settings",
+            get(pages::settings_page).post(pages::settings_form),
+        )
         .route("/articles/{slug}", get(pages::article_page))
         .route("/articles/{slug}/comments", post(pages::comment_form))
         .route("/static/{name}", get(pages::static_file))

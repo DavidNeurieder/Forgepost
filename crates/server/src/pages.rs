@@ -19,6 +19,7 @@ use crate::AppState;
 use crate::auth::{self, AuthUser};
 use crate::error::{ApiError, PageError};
 use crate::experiments::ExperimentView;
+use crate::model::SiteSettings;
 use crate::repository::RepositoryError;
 
 // ---------------------------------------------------------------------------
@@ -30,6 +31,8 @@ use crate::repository::RepositoryError;
 struct HomeTemplate {
     authed: bool,
     flash: String,
+    site_name: String,
+    theme: String,
     posts: Vec<HomePost>,
 }
 
@@ -44,6 +47,8 @@ struct HomePost {
 struct SetupTemplate {
     authed: bool,
     flash: String,
+    site_name: String,
+    theme: String,
     error: String,
 }
 
@@ -52,6 +57,8 @@ struct SetupTemplate {
 struct LoginTemplate {
     authed: bool,
     flash: String,
+    site_name: String,
+    theme: String,
     error: String,
 }
 
@@ -60,6 +67,8 @@ struct LoginTemplate {
 struct DashboardTemplate {
     authed: bool,
     flash: String,
+    site_name: String,
+    theme: String,
     display_name: String,
     csrf_token: String,
     docs: Vec<DashboardDoc>,
@@ -85,6 +94,8 @@ struct PendingComment {
 struct EditorTemplate {
     authed: bool,
     flash: String,
+    site_name: String,
+    theme: String,
     id: String,
     slug: String,
     title: String,
@@ -99,6 +110,8 @@ struct EditorTemplate {
 struct StatsTemplate {
     authed: bool,
     flash: String,
+    site_name: String,
+    theme: String,
     doc_id: String,
     csrf_token: String,
     views: i64,
@@ -174,6 +187,8 @@ struct DecisionRow {
 struct ArticleTemplate {
     authed: bool,
     flash: String,
+    site_name: String,
+    theme: String,
     slug: String,
     title: String,
     date: String,
@@ -201,9 +216,38 @@ struct ArticleComment {
 struct ErrorTemplate {
     authed: bool,
     flash: String,
+    site_name: String,
+    theme: String,
     status: String,
     message: String,
 }
+
+#[derive(Template)]
+#[template(path = "settings.html")]
+struct SettingsTemplate {
+    authed: bool,
+    flash: String,
+    site_name: String,
+    theme: String,
+    csrf_token: String,
+    themes: Vec<ThemeOption>,
+    error: String,
+}
+
+struct ThemeOption {
+    value: String,
+    label: String,
+    selected: bool,
+}
+
+/// The selectable themes (also used to validate the settings form).
+pub(crate) const THEMES: &[(&str, &str)] = &[
+    ("system", "System (auto)"),
+    ("light", "Light"),
+    ("dark", "Dark"),
+    ("sepia", "Sepia"),
+    ("solarized", "Solarized"),
+];
 
 // ---------------------------------------------------------------------------
 // Form payloads
@@ -242,6 +286,15 @@ pub(crate) struct EditorForm {
     tags: String,
     #[serde(default)]
     markdown: String,
+    #[serde(default)]
+    csrf_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SettingsForm {
+    name: String,
+    #[serde(default)]
+    theme: String,
     #[serde(default)]
     csrf_token: Option<String>,
 }
@@ -297,10 +350,17 @@ fn page(tpl: &impl Template) -> Result<Response, PageError> {
     Ok(render(tpl)?.into_response())
 }
 
+/// Current blog-wide settings (name + theme).
+async fn site(state: &AppState) -> Result<SiteSettings, ApiError> {
+    Ok(state.repo.site_settings().await?)
+}
+
 fn error_page(status: StatusCode, message: String) -> Response {
     let tpl = ErrorTemplate {
         authed: false,
         flash: String::new(),
+        site_name: "OpenPublish".into(),
+        theme: "system".into(),
         status: status.as_u16().to_string(),
         message,
     };
@@ -332,6 +392,7 @@ fn flash_message(key: Option<&str>) -> String {
         Some("published") => "Published".into(),
         Some("comment_pending") => "Thanks! Your comment is awaiting moderation.".into(),
         Some("comment_approved") => "Comment approved.".into(),
+        Some("settings_saved") => "Settings saved.".into(),
         Some("logged_out") => "You have been logged out.".into(),
         Some("not_authorized") => "You need to be signed in to do that.".into(),
         Some("experiment_created") => "Experiment created.".into(),
@@ -407,6 +468,7 @@ pub(crate) async fn home_page(State(state): State<AppState>) -> Result<Response,
     if !state.repo.is_setup_complete().await? {
         return Ok(Redirect::to("/setup").into_response());
     }
+    let site = site(&state).await?;
     let published = state.repo.list_published().await?;
     let posts = published
         .iter()
@@ -419,6 +481,8 @@ pub(crate) async fn home_page(State(state): State<AppState>) -> Result<Response,
     page(&HomeTemplate {
         authed: false,
         flash: String::new(),
+        site_name: site.name,
+        theme: site.theme,
         posts,
     })
 }
@@ -427,9 +491,12 @@ pub(crate) async fn setup_page(State(state): State<AppState>) -> Result<Response
     if state.repo.is_setup_complete().await? {
         return Ok(Redirect::to("/login").into_response());
     }
+    let site = site(&state).await?;
     page(&SetupTemplate {
         authed: false,
         flash: String::new(),
+        site_name: site.name,
+        theme: site.theme,
         error: String::new(),
     })
 }
@@ -440,9 +507,12 @@ pub(crate) async fn setup_form(
 ) -> Result<Response, PageError> {
     let error = validate_setup(&body);
     if !error.is_empty() {
+        let site = site(&state).await?;
         return page(&SetupTemplate {
             authed: false,
             flash: String::new(),
+            site_name: site.name,
+            theme: site.theme,
             error,
         });
     }
@@ -486,9 +556,12 @@ pub(crate) async fn login_page(
     if auth::session_user(&state, &headers).await.is_some() {
         return Ok(Redirect::to("/admin").into_response());
     }
+    let site = site(&state).await?;
     page(&LoginTemplate {
         authed: false,
         flash: flash_message(flash.flash.as_deref()),
+        site_name: site.name,
+        theme: site.theme,
         error: String::new(),
     })
 }
@@ -505,9 +578,12 @@ pub(crate) async fn login_form(
         }
         _ => "invalid email or password".to_string(),
     };
+    let site = site(&state).await?;
     page(&LoginTemplate {
         authed: false,
         flash: String::new(),
+        site_name: site.name,
+        theme: site.theme,
         error,
     })
 }
@@ -562,9 +638,12 @@ pub(crate) async fn dashboard_page(
     };
     let docs = state.repo.list_documents(auth.user.id).await?;
     let pending = state.repo.pending_comments().await?;
+    let site = site(&state).await?;
     page(&DashboardTemplate {
         authed: true,
         flash: flash_message(flash.flash.as_deref()),
+        site_name: site.name,
+        theme: site.theme,
         display_name: auth.user.display_name.clone(),
         csrf_token: auth.csrf_token.clone(),
         docs: docs
@@ -621,9 +700,12 @@ pub(crate) async fn editor_page(
         return Err(ApiError::forbidden().into());
     }
     let tags = state.repo.document_tags(id).await?;
+    let site = site(&state).await?;
     page(&EditorTemplate {
         authed: true,
         flash: flash_message(flash.flash.as_deref()),
+        site_name: site.name,
+        theme: site.theme,
         id: id.to_string(),
         slug: full.slug.clone(),
         title: full.document.title.clone(),
@@ -711,6 +793,84 @@ pub(crate) async fn approve_comment(
     Ok(Redirect::to("/admin?flash=comment_approved").into_response())
 }
 
+pub(crate) async fn settings_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(flash): Query<FlashQuery>,
+) -> Result<Response, PageError> {
+    let Some(auth) = require_admin(&state, &headers).await? else {
+        return Ok(login_redirect());
+    };
+    let site = site(&state).await?;
+    page(&settings_template(
+        site,
+        auth,
+        flash_message(flash.flash.as_deref()),
+        String::new(),
+    ))
+}
+
+pub(crate) async fn settings_form(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(body): Form<SettingsForm>,
+) -> Result<Response, PageError> {
+    let Some(auth) = require_admin(&state, &headers).await? else {
+        return Ok(login_redirect());
+    };
+    auth::verify_csrf_form(&headers, body.csrf_token.as_deref(), &auth.csrf_token)?;
+
+    let error = validate_settings(&body);
+    if !error.is_empty() {
+        let site = site(&state).await?;
+        return page(&settings_template(site, auth, String::new(), error));
+    }
+    state
+        .repo
+        .set_setting("site.name", body.name.trim())
+        .await?;
+    state.repo.set_setting("theme", &body.theme).await?;
+    Ok(Redirect::to("/admin/settings?flash=settings_saved").into_response())
+}
+
+fn settings_template(
+    site: SiteSettings,
+    auth: AuthUser,
+    flash: String,
+    error: String,
+) -> SettingsTemplate {
+    let theme = site.theme.clone();
+    SettingsTemplate {
+        authed: true,
+        flash,
+        site_name: site.name,
+        theme: site.theme,
+        csrf_token: auth.csrf_token,
+        themes: THEMES
+            .iter()
+            .map(|(value, label)| ThemeOption {
+                value: value.to_string(),
+                label: label.to_string(),
+                selected: *value == theme,
+            })
+            .collect(),
+        error,
+    }
+}
+
+fn validate_settings(body: &SettingsForm) -> String {
+    if body.name.trim().is_empty() {
+        return "Enter a blog name.".into();
+    }
+    if body.name.trim().len() > 80 {
+        return "Blog name is too long.".into();
+    }
+    if !THEMES.iter().any(|(value, _)| *value == body.theme) {
+        return "Unknown theme.".into();
+    }
+    String::new()
+}
+
 pub(crate) async fn stats_page(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -785,9 +945,12 @@ pub(crate) async fn stats_page(
         .map(|exp| experiment_row(exp, &stats.blocks))
         .collect();
 
+    let site = site(&state).await?;
     page(&StatsTemplate {
         authed: true,
         flash: flash_message(flash.flash.as_deref()),
+        site_name: site.name,
+        theme: site.theme,
         doc_id: doc_id.to_string(),
         csrf_token: auth.csrf_token.clone(),
         views,
@@ -1136,9 +1299,12 @@ async fn build_article_page(
         .repo
         .comments_for_document(full.document.id, Some("approved"))
         .await?;
+    let site = site(state).await?;
     let tpl = ArticleTemplate {
         authed: false,
         flash: flash_message(flash),
+        site_name: site.name,
+        theme: site.theme,
         slug: view.slug.clone(),
         title: view.title.clone(),
         date: format_date(view.published_at_ms),

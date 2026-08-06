@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block title %}Set up · OpenPublish{% endblock %}
+{% block title %}Set up · {{ site_name }}{% endblock %}
 {% block content %}
-<h1>Welcome to OpenPublish</h1>
+<h1>Welcome to {{ site_name }}</h1>
 <p class="muted">Create the owner account. You will be the only administrator of this blog.</p>
 <form method="post" action="/setup">
   <field>

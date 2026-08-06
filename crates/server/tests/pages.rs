@@ -828,3 +828,143 @@ async fn static_assets_are_served() {
     let (status, _) = send(&app, req(Method::GET, "/static/missing.txt", None, None)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ---------------------------------------------------------------------------
+// Settings (blog name + theme)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn settings_page_requires_login() {
+    let app = test_app().await;
+
+    let (status, resp) = send(&app, req(Method::GET, "/admin/settings", None, None)).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers().get(header::LOCATION).unwrap(),
+        "/login?flash=not_authorized"
+    );
+}
+
+#[tokio::test]
+async fn settings_page_shows_current_values_and_default_theme() {
+    let app = test_app().await;
+    let cookie = setup_owner(&app).await;
+
+    let (status, resp) = send(
+        &app,
+        req(Method::GET, "/admin/settings", Some(&cookie), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body_text(resp).await;
+    assert!(html.contains("Blog name"));
+    assert!(html.contains("Save settings"));
+    assert!(html.contains("id=\"name\""));
+    assert!(html.contains("id=\"theme\""));
+    assert!(html.contains("System (auto)"));
+    assert!(html.contains("data-theme=\"system\""));
+    assert!(html.contains("value=\"OpenPublish\""));
+
+    // Defaults also show up on the anonymous pages.
+    let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;
+    let html = body_text(resp).await;
+    assert!(html.contains("<h1>OpenPublish</h1>"));
+    assert!(html.contains("data-theme=\"system\""));
+}
+
+#[tokio::test]
+async fn settings_form_updates_name_and_theme() {
+    let app = test_app().await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+
+    let (status, resp) = send(
+        &app,
+        form_req(
+            Method::POST,
+            "/admin/settings",
+            Some(&cookie),
+            &[
+                ("csrf_token", &csrf),
+                ("name", "My Journal"),
+                ("theme", "sepia"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers().get(header::LOCATION).unwrap(),
+        "/admin/settings?flash=settings_saved"
+    );
+
+    // The redirect target shows the flash and the saved values.
+    let (status, resp) = send(
+        &app,
+        req(
+            Method::GET,
+            "/admin/settings?flash=settings_saved",
+            Some(&cookie),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body_text(resp).await;
+    assert!(html.contains("Settings saved."));
+    assert!(html.contains("value=\"My Journal\""));
+    assert!(html.contains("<option value=\"sepia\" selected>Sepia</option>"));
+
+    // The home page and RSS feed pick up the new name and theme.
+    let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;
+    let html = body_text(resp).await;
+    assert!(html.contains("<h1>My Journal</h1>"));
+    assert!(html.contains("data-theme=\"sepia\""));
+
+    let (_, resp) = send(&app, req(Method::GET, "/rss", None, None)).await;
+    let body = body_text(resp).await;
+    assert!(body.contains("<title>My Journal</title>"));
+}
+
+#[tokio::test]
+async fn settings_form_validates_input() {
+    let app = test_app().await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+
+    // Empty name.
+    let (status, resp) = send(
+        &app,
+        form_req(
+            Method::POST,
+            "/admin/settings",
+            Some(&cookie),
+            &[("csrf_token", &csrf), ("name", "  "), ("theme", "dark")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body_text(resp).await;
+    assert!(html.contains("Enter a blog name."));
+
+    // Unknown theme.
+    let (status, resp) = send(
+        &app,
+        form_req(
+            Method::POST,
+            "/admin/settings",
+            Some(&cookie),
+            &[("csrf_token", &csrf), ("name", "Fine"), ("theme", "neon")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body_text(resp).await;
+    assert!(html.contains("Unknown theme."));
+
+    // Nothing was persisted.
+    let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;
+    let html = body_text(resp).await;
+    assert!(html.contains("<h1>OpenPublish</h1>"));
+    assert!(html.contains("data-theme=\"system\""));
+}

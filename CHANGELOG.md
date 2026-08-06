@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the old `untitled` placeholder; published slugs stay stable.
 - `tests/pages.rs` (server-rendered page flows), `tests/tls.rs` (self-signed
   cert over a real socket), and the relocated e2e suite.
+- Admin **Settings** page (`/admin/settings`) to change the blog name (shown
+  in the header, page titles, home page, and RSS feed) and pick a site-wide
+  theme: system (auto), light, dark, sepia, or solarized. Themes are applied
+  via a `data-theme` attribute; the home page gains a header **Log in** link
+  for anonymous visitors.
 
 ## [0.1.0] - 2026-08-05
 

@@ -702,6 +702,7 @@ pub async fn approve_comment(
 }
 
 pub async fn rss(State(state): State<AppState>) -> Result<Html<String>, ApiError> {
+    let site = state.repo.site_settings().await?;
     let published = state.repo.list_published().await?;
     let mut items = String::new();
     for summary in published {
@@ -718,7 +719,8 @@ pub async fn rss(State(state): State<AppState>) -> Result<Html<String>, ApiError
         }
     }
     let feed = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<rss version=\"2.0\"><channel><title>OpenPublish</title>{items}</channel></rss>"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<rss version=\"2.0\"><channel><title>{}</title>{items}</channel></rss>",
+        xml_escape(&site.name)
     );
     Ok(Html(feed))
 }

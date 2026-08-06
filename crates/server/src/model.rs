@@ -26,6 +26,15 @@ pub struct Session {
     pub expires_at_ms: i64,
 }
 
+/// Blog-wide appearance settings read from the generic `settings` table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SiteSettings {
+    /// Displayed in the header brand, page titles, and the RSS feed title.
+    pub name: String,
+    /// `system` | `light` | `dark` | `sepia` | `solarized`.
+    pub theme: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DocumentSummary {
     pub id: Uuid,
