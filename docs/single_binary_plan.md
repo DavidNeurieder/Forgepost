@@ -1,6 +1,7 @@
 # Single-binary plan: drop SvelteKit, serve everything from Rust
 
-Status: proposed plan (not yet implemented).
+Status: **implemented** (this document is the record of what shipped; see
+"Deviations from the plan" below for the few implementation differences).
 Supersedes: the two-process frontend architecture described in `mvp_plan_v6.md` and
 the README deployment section.
 
@@ -225,3 +226,27 @@ created/migrated on first boot (`--database-url`, default `sqlite://openpublish.
 - Article page + tracker.js: ~1 day
 - TLS (tiers 1 + 2): ~1–2 days
 - Tests (pages + tls + e2e rewrite) + CI + docs + cleanup: ~2–3 days
+
+## 15. Deviations from the plan (as implemented)
+
+- **htmx (Phase 3) was dropped.** The editor live preview uses a small vanilla-JS
+  `fetch('/api/render')` debounce; the create-experiment form has one fixed
+  variant field; comment submit and experiment actions are plain form posts.
+  This is the plan's own documented fallback, minus the removed preview.
+- **Templates differ slightly from the list:** `flash.html`/`comment_form.html`
+  are not separate files (flash is a `base.html` partial and the comment form is
+  inline in `article.html`); `base.html` nav is brand + Dashboard/RSS when
+  authed (the "Blog" link is the brand itself).
+- **Slug fix:** the editor regenerates a draft's slug from its title on save, so
+  UI-created posts publish under their real title slug instead of the old
+  `untitled` placeholder. The API's `PATCH` title update still never changes the
+  slug (stable public URLs), and once a post is published its slug is frozen.
+- **HTTPS redirect is a genuine 301** (the plan says 301; `Redirect::temporary`
+  would have been a 307).
+- **E2E harness lives at the repo-root `e2e/`** instead of `frontend/e2e/`, so
+  `frontend/` could be deleted wholesale as decided.
+- **TLS tests** verify with `add_root_certificate` (the trusted self-signed cert)
+  rather than `danger_accept_invalid_certs(true)`, and cover the Secure-cookie
+  contrast between HTTPS and plain HTTP plus the redirect target/query handling.
+- **The auto-decider and ACME event-loop are background tasks** spawned by
+  `serve`; there is no SIGHUP handling (cert reload is a 30 s mtime poll).

@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · OpenPublish{% endblock %}
+{% block content %}
+<article>
+  <h1>{{ title }}</h1>
+  <p class="muted">{{ date }}</p>
+  {% if !tags.is_empty() %}
+  <p>{% for t in tags %}<span class="badge">{{ t }}</span> {% endfor %}</p>
+  {% endif %}
+  <div class="article-body">
+    {% for block in rendered_blocks %}
+    <div
+      class="tracked-block"
+      data-block-id="{{ block.id }}"
+      {% if !block.experiment_id.is_empty() %}data-experiment-id="{{ block.experiment_id }}"{% endif %}
+      {% if !block.variant_id.is_empty() %}data-variant-id="{{ block.variant_id }}"{% endif %}
+    >{{ block.html|safe }}</div>
+    {% endfor %}
+  </div>
+</article>
+
+<hr class="sep">
+
+<section>
+  <h2>Comments</h2>
+  {% if comments.is_empty() %}
+  <p class="muted">No comments yet.</p>
+  {% else %}
+    {% for c in comments %}
+    <div class="notice">
+      <strong>{{ c.author_name }}</strong>
+      <span class="muted"> · {{ c.date }}</span>
+      <p>{{ c.body }}</p>
+    </div>
+    {% endfor %}
+  {% endif %}
+
+  <form method="post" action="/articles/{{ slug }}/comments">
+    <field>
+      <label for="author">Name</label>
+      <input id="author" name="author" type="text" maxlength="80" placeholder="Your name">
+    </field>
+    <field>
+      <label for="body">Comment</label>
+      <textarea id="body" name="body" maxlength="2000" rows="4" placeholder="Leave a comment"></textarea>
+    </field>
+    {% if !comment_error.is_empty() %}<p class="error">{{ comment_error }}</p>{% endif %}
+    <button type="submit">Post comment</button>
+  </form>
+</section>
+
+<script src="/static/tracker.js" defer></script>
+<script>
+  window.addEventListener('load', function () {
+    if (window.OpenPublishTracker) {
+      window.OpenPublishTracker.trackArticle('{{ slug }}');
+    }
+  });
+</script>
+{% endblock %}

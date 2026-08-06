@@ -4,6 +4,28 @@ All notable changes to OpenPublish are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Single-binary migration** — SvelteKit/Vite/Vitest (`frontend/`) is gone.
+  Rust + Askama renders every page (home, setup, login, dashboard, editor,
+  stats, article, error) with POST-REDIRECT-GET; the `/api/*` JSON surface is
+  unchanged. The Playwright e2e harness moved to `e2e/` at the repo root and
+  now drives the compiled binary directly. See `docs/single_binary_plan.md`.
+
+### Added
+
+- In-process HTTPS with two tiers: automatic Let's Encrypt issuance + renewal
+  (`--tls-domain`) and bring-your-own certificates (`--tls-cert`/`--tls-key`,
+  reloaded on change), plus a configurable HTTP→HTTPS 301 redirect listener
+  and `Secure` session/visitor cookies under TLS.
+- Editor live preview via `POST /api/render` (vanilla JS, no client build).
+- UI-created posts get their slug from the title while still a draft, instead
+  of the old `untitled` placeholder; published slugs stay stable.
+- `tests/pages.rs` (server-rendered page flows), `tests/tls.rs` (self-signed
+  cert over a real socket), and the relocated e2e suite.
+
 ## [0.1.0] - 2026-08-05
 
 First release. The learn-MVP (publish + measure + experiment + dashboard) as a

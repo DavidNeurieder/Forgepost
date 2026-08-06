@@ -88,7 +88,7 @@ async fn health_and_setup_status() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body_json(resp).await, json!({ "status": "ok" }));
 
-    let (status, resp) = send(&app, json_req(Method::GET, "/setup", None, None, None)).await;
+    let (status, resp) = send(&app, json_req(Method::GET, "/api/setup", None, None, None)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body_json(resp).await, json!({ "setup_complete": false }));
 }
@@ -101,7 +101,7 @@ async fn setup_creates_owner_session_and_locks_setup() {
         &app,
         json_req(
             Method::POST,
-            "/setup",
+            "/api/setup",
             None,
             None,
             Some(json!({
@@ -129,7 +129,7 @@ async fn setup_creates_owner_session_and_locks_setup() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body_json(resp).await["user"]["email"], "a@b.com");
 
-    let (status, resp) = send(&app, json_req(Method::GET, "/setup", None, None, None)).await;
+    let (status, resp) = send(&app, json_req(Method::GET, "/api/setup", None, None, None)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body_json(resp).await, json!({ "setup_complete": true }));
 
@@ -138,7 +138,7 @@ async fn setup_creates_owner_session_and_locks_setup() {
         &app,
         json_req(
             Method::POST,
-            "/setup",
+            "/api/setup",
             None,
             None,
             Some(json!({
@@ -160,7 +160,7 @@ async fn login_and_me_roundtrip() {
         &app,
         json_req(
             Method::POST,
-            "/setup",
+            "/api/setup",
             None,
             None,
             Some(json!({
@@ -230,7 +230,7 @@ async fn logout_invalidates_session() {
         &app,
         json_req(
             Method::POST,
-            "/setup",
+            "/api/setup",
             None,
             None,
             Some(json!({
@@ -276,7 +276,7 @@ async fn mutations_require_csrf() {
         &app,
         json_req(
             Method::POST,
-            "/setup",
+            "/api/setup",
             None,
             None,
             Some(json!({
@@ -339,7 +339,7 @@ async fn create_update_publish_and_read_article() {
         &app,
         json_req(
             Method::POST,
-            "/setup",
+            "/api/setup",
             None,
             None,
             Some(json!({
@@ -383,7 +383,7 @@ async fn create_update_publish_and_read_article() {
     // The document is not public yet.
     let (status, _) = send(
         &app,
-        json_req(Method::GET, "/articles/my-first-post", None, None, None),
+        json_req(Method::GET, "/api/articles/my-first-post", None, None, None),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -420,7 +420,7 @@ async fn create_update_publish_and_read_article() {
     // Public article is now served with rendered HTML.
     let (status, resp) = send(
         &app,
-        json_req(Method::GET, "/articles/my-first-post", None, None, None),
+        json_req(Method::GET, "/api/articles/my-first-post", None, None, None),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -453,7 +453,7 @@ async fn create_update_publish_and_read_article() {
     // The slug still resolves, with the new title.
     let (status, resp) = send(
         &app,
-        json_req(Method::GET, "/articles/my-first-post", None, None, None),
+        json_req(Method::GET, "/api/articles/my-first-post", None, None, None),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -477,7 +477,7 @@ async fn comments_require_moderation() {
         &app,
         json_req(
             Method::POST,
-            "/setup",
+            "/api/setup",
             None,
             None,
             Some(json!({
@@ -530,7 +530,7 @@ async fn comments_require_moderation() {
         &app,
         json_req(
             Method::POST,
-            "/articles/with-comments/comments",
+            "/api/articles/with-comments/comments",
             None,
             None,
             Some(json!({ "author_name": "Reader", "body": "Nice post!" })),
@@ -547,7 +547,7 @@ async fn comments_require_moderation() {
         &app,
         json_req(
             Method::GET,
-            "/articles/with-comments/comments",
+            "/api/articles/with-comments/comments",
             None,
             None,
             None,
@@ -601,7 +601,7 @@ async fn comments_require_moderation() {
         &app,
         json_req(
             Method::GET,
-            "/articles/with-comments/comments",
+            "/api/articles/with-comments/comments",
             None,
             None,
             None,
@@ -620,7 +620,7 @@ async fn rss_lists_published_articles_only() {
         &app,
         json_req(
             Method::POST,
-            "/setup",
+            "/api/setup",
             None,
             None,
             Some(json!({
@@ -696,7 +696,7 @@ async fn render_preview_parses_and_renders() {
         &app,
         json_req(
             Method::POST,
-            "/setup",
+            "/api/setup",
             None,
             None,
             Some(json!({
@@ -754,7 +754,7 @@ async fn articles_list_is_public_and_lists_published_only() {
         &app,
         json_req(
             Method::POST,
-            "/setup",
+            "/api/setup",
             None,
             None,
             Some(json!({
@@ -829,7 +829,7 @@ async fn pending_comments_are_listed_and_approvable() {
         &app,
         json_req(
             Method::POST,
-            "/setup",
+            "/api/setup",
             None,
             None,
             Some(json!({
@@ -876,7 +876,7 @@ async fn pending_comments_are_listed_and_approvable() {
         &app,
         json_req(
             Method::POST,
-            "/articles/moderate-me/comments",
+            "/api/articles/moderate-me/comments",
             None,
             None,
             Some(json!({ "author_name": "Spam", "body": "buy my stuff" })),
@@ -941,7 +941,7 @@ async fn editing_with_insert_keeps_stable_block_ids() {
         &app,
         json_req(
             Method::POST,
-            "/setup",
+            "/api/setup",
             None,
             None,
             Some(json!({
@@ -1037,7 +1037,7 @@ async fn seed_published_article(app: &Router) -> (String, String, String, String
         app,
         json_req(
             Method::POST,
-            "/setup",
+            "/api/setup",
             None,
             None,
             Some(json!({

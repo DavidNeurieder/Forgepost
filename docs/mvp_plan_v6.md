@@ -85,14 +85,14 @@ openpublish/
 │   ├── experiments   # A/B engine (Bayesian + sequential)
 │   ├── protocol      # (deferred)
 │   └── federation    # (deferred)
-├── frontend/         # SvelteKit (thin blog + dashboard)
+├── e2e/              # Playwright suite against the single binary
 ├── migrations/       # SQLx, single driver (SQLite) for the MVP
 ├── docker/           # (deferred — server mode post-G2)
 └── docs/
 ```
 
 - **Backend:** Rust + Axum + Tokio + SQLx. **Storage is driver-agnostic via a repository layer** — embedded SQLite for the MVP (one driver, one migration set, one test matrix). Postgres stays a later, documented addition through the same layer — no driver-specific macros or dual builds in the MVP.
-- **Frontend:** SvelteKit.
+- **Frontend:** server-rendered. The SvelteKit shell described in the original plan was removed in the single-binary migration; Rust + Askama renders every page (see `single_binary_plan.md`), and the `/api/*` JSON surface is preserved headless. The Playwright e2e harness in `e2e/` is the only remaining Node.
 - **Analytics:** browser → Rust event API → SQLite (MVP); ClickHouse later.
 - **Setup:** solo = downloaded binary (`./openpublish serve`). Server mode (`install.sh` → Docker + Postgres + Caddy auto-TLS) is deferred. First-boot `/setup` wizard; safe defaults; no config files for 90% of installs.
 - **Growth path:** `./openpublish export` = backups + a documented SQLite→Postgres migration, ready when server mode ships. No lock-in by design.
@@ -102,7 +102,7 @@ openpublish/
 
 We **do not target** big companies (no SSO, roles, SOC2, enterprise sales in the MVP). But the architecture must never make adoption by a large team or a CMS vendor structurally impossible. These are design boundaries, not features:
 
-- **API-first core** — the SvelteKit frontend is a *client* of a JSON API, not a monolith; the engine (documents, experiments, decisions) is reachable headless by construction. Frontend-only features with no API surface are the door-closer to avoid.
+- **API-first core** — the server-rendered pages are a *client* of the same JSON API (see `single_binary_plan.md`); the engine (documents, experiments, decisions) is reachable headless by construction. Frontend-only features with no API surface are the door-closer to avoid.
 - **Auth is a normal `users` table + session cookies** — no hard-coded single-user/singleton shortcuts anywhere; roles and SSO remain a later *extension point*, not built now.
 - **No driver-specific SQL in the domain layer** — SQLite idioms (`json_extract`, SQLite-only functions) live behind the repository boundary; domain logic stays driver-neutral.
 - **Experiment assignment is one reusable engine function** — served over the API *and* used by SSR/hydration. An external CMS could call the same endpoint; no second implementation path.

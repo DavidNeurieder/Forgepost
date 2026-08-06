@@ -1,0 +1,224 @@
+{% extends "base.html" %}
+{% block title %}Analytics · OpenPublish{% endblock %}
+{% block content %}
+<div style="display:flex;align-items:baseline;gap:1rem;flex-wrap:wrap;">
+  <h1 style="margin-bottom:0.25rem;">Analytics</h1>
+  <a class="button secondary small" href="/admin">← Dashboard</a>
+</div>
+<p class="muted" style="margin-top:0.4rem;">
+  Numbers marked “estimated” are inferred from scroll depth and undercount
+  readers with ad-blockers or JavaScript disabled.
+</p>
+
+<h2>Article</h2>
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-value">{{ views }}</div>
+    <div class="stat-label">Views (estimated)</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value">{{ unique_readers }}</div>
+    <div class="stat-label">Unique readers (estimated)</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value">{{ avg_read_time }}</div>
+    <div class="stat-label">Average reading time</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value">{{ completion }}</div>
+    <div class="stat-label">Completed (scrolled to end)</div>
+  </div>
+</div>
+
+<h2 style="margin-top:2rem;">Scroll depth</h2>
+<div class="funnel">
+{% for band in funnel %}
+  <div class="funnel-row">
+    <span class="funnel-label">Past {{ band.band }}%</span>
+    <div class="funnel-bar">
+      <div class="funnel-fill" style="width:{{ band.pct }}%"></div>
+    </div>
+    <span class="funnel-count">{{ band.pageviews }}</span>
+  </div>
+{% endfor %}
+</div>
+
+<h2 style="margin-top:2rem;">Where readers leave</h2>
+{% if blocks.is_empty() %}
+<p class="muted">No blocks in this article.</p>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Block</th>
+      <th>Reached (estimated)</th>
+      <th>Drop-off</th>
+      <th>Impressions</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for b in blocks %}
+    <tr>
+      <td>
+        <span class="badge">{{ b.kind }}</span>
+        <span class="muted" style="display:block;max-width:22rem;">{{ b.preview }}</span>
+      </td>
+      <td>{{ b.reach }}</td>
+      <td>
+        <div class="dropoff">
+          <div class="dropoff-fill" style="width:{{ b.dropoff_pct }}%"></div>
+          <span class="dropoff-count">{{ b.dropoff }}</span>
+        </div>
+      </td>
+      <td class="muted">{{ b.impressions }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2 style="margin-top:2rem;">Experiments</h2>
+<p class="muted">
+  A/B test alternative content on a single block. Visitors are split
+  between control (the current block) and your variants; the goal is
+  reaching the end of the article. Decisions use a Bayesian sequential
+  test that watches for early evidence of a winner.
+</p>
+
+{% if experiments.is_empty() %}
+<p class="muted">No experiments yet — create one below.</p>
+{% else %}
+{% for exp in experiments %}
+  <div class="exp-card">
+    <div style="display:flex;align-items:baseline;gap:0.75rem;flex-wrap:wrap;">
+      <h3 style="margin:0;">{{ exp.name }}</h3>
+      <span class="{{ exp.status_class }}">{{ exp.status }}</span>
+      <span class="muted">Goal: {{ exp.goal }}</span>
+      <span class="muted">{{ exp.traffic }}</span>
+    </div>
+    <p class="muted" style="margin-top:0.4rem;">{{ exp.block_label }}</p>
+
+    {% if exp.draft %}
+      <div class="exp-actions">
+        <form method="post" action="/admin/experiments/{{ exp.id }}/start" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="button small" type="submit">Start experiment</button>
+        </form>
+        <form method="post" action="/admin/experiments/{{ exp.id }}/stop" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="button secondary small" type="submit">Delete</button>
+        </form>
+      </div>
+    {% else %}
+      <table>
+        <thead>
+          <tr>
+            <th>Variant</th>
+            <th>Impressions</th>
+            <th>Conversions</th>
+            <th>Conv. rate</th>
+            <th>P(beats control)</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for v in exp.variants %}
+          <tr>
+            <td>
+              {{ v.label }}
+              <span class="muted" style="display:block;">{{ v.weight_line }}</span>
+            </td>
+            <td>{{ v.impressions }}</td>
+            <td>{{ v.conversions }}</td>
+            <td>{{ v.conv_rate }}</td>
+            <td>
+              {% if v.beats != "—" %}<div class="prob-bar"><div class="prob-fill" style="width:{{ v.beats_pct }}%"></div></div>{% endif %}
+              {{ v.beats }}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+
+      {% if !exp.report_line.is_empty() %}
+        <p class="muted" style="margin:0.75rem 0;">{{ exp.report_line }}</p>
+      {% endif %}
+      {% if !exp.decision_line.is_empty() %}
+        <p class="muted" style="margin:0.75rem 0;">{{ exp.decision_line }}</p>
+      {% endif %}
+
+      {% if exp.running %}
+        <div class="exp-actions">
+          <form method="post" action="/admin/experiments/{{ exp.id }}/decide" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="button small" type="submit">Decide now</button>
+          </form>
+          <form method="post" action="/admin/experiments/{{ exp.id }}/promote" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="button secondary small" type="submit">Promote best</button>
+          </form>
+          <form method="post" action="/admin/experiments/{{ exp.id }}/no-winner" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="button secondary small" type="submit">No improvement</button>
+          </form>
+          <form method="post" action="/admin/experiments/{{ exp.id }}/stop" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="button secondary small" type="submit">Stop</button>
+          </form>
+        </div>
+      {% endif %}
+
+      {% if !exp.decisions.is_empty() %}
+        <h4 style="margin:1rem 0 0.25rem;">Decision history</h4>
+        <ul class="muted decision-list">
+        {% for d in exp.decisions %}
+          <li>{{ d.date }} — {{ d.summary }}</li>
+        {% endfor %}
+        </ul>
+      {% endif %}
+    {% endif %}
+  </div>
+{% endfor %}
+{% endif %}
+
+{% if !blocks_for_test.is_empty() %}
+<details class="exp-card" style="margin-top:1.5rem;">
+  <summary style="cursor:pointer;font-weight:600;">Create experiment</summary>
+  <div style="margin-top:0.75rem;display:grid;gap:0.75rem;max-width:34rem;">
+    <form method="post" action="/admin/stats/{{ doc_id }}/experiments">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <field>
+        <label for="block_id">Block to test</label>
+        <select id="block_id" name="block_id">
+        {% for b in blocks_for_test %}
+          <option value="{{ b.id }}">{{ b.label }}</option>
+        {% endfor %}
+        </select>
+      </field>
+      <field>
+        <label for="exp_name">Name <span class="muted">(optional)</span></label>
+        <input id="exp_name" name="name" placeholder="e.g. New headline">
+      </field>
+      <field>
+        <label for="traffic_weight">Visitors to test</label>
+        <input id="traffic_weight" name="traffic_weight" type="number" min="1" max="100" value="100">
+        <span class="muted">% — the rest always see control.</span>
+      </field>
+      {% for v in variant_fields %}
+        <field>
+          <label for="{{ v.id }}">{{ v.label }}</label>
+          <textarea id="{{ v.id }}" name="{{ v.name }}" rows="2" placeholder="Replacement text for this block"></textarea>
+        </field>
+      {% endfor %}
+      <button type="submit">Create experiment</button>
+    </form>
+  </div>
+</details>
+{% else %}
+<p class="muted">Add a heading, paragraph, or CTA block to run experiments.</p>
+{% endif %}
+<p class="muted" style="margin-top:0.5rem;">
+  Note: promotion replaces the live block with the winning variant, so your
+  article changes immediately. Stopping after “no improvement” keeps the
+  current content.
+</p>
+{% endblock %}

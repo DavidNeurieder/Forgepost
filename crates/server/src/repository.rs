@@ -49,6 +49,14 @@ pub trait Repository: Send + Sync {
         id: DocumentId,
         title: &str,
     ) -> Result<(), RepositoryError>;
+    /// Regenerate the slug from `title` while the document is still a draft;
+    /// once published the slug is stable, so this is a no-op for published
+    /// documents. Returns true when the slug changed.
+    async fn regenerate_draft_slug(
+        &self,
+        id: DocumentId,
+        title: &str,
+    ) -> Result<bool, RepositoryError>;
     async fn save_document_blocks(
         &self,
         id: DocumentId,
@@ -592,6 +600,33 @@ impl Repository for SqliteRepository {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    async fn regenerate_draft_slug(
+        &self,
+        id: DocumentId,
+        title: &str,
+    ) -> Result<bool, RepositoryError> {
+        let mut tx = self.pool.begin().await?;
+        let (owner_id, status): (String, String) =
+            sqlx::query_as("SELECT owner_id, status FROM documents WHERE id = ?")
+                .bind(id.to_string())
+                .fetch_one(&mut *tx)
+                .await?;
+        if status != "draft" {
+            return Ok(false);
+        }
+        let owner_id = Uuid::parse_str(&owner_id)
+            .map_err(|_| RepositoryError::Conflict("invalid owner_id in documents row".into()))?;
+        let slug = next_slug(&mut tx, owner_id, &slugify(title)).await?;
+        sqlx::query("UPDATE documents SET slug = ?, updated_at_ms = ? WHERE id = ?")
+            .bind(&slug)
+            .bind(now_ms())
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     async fn save_document_blocks(

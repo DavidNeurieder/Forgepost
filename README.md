@@ -25,8 +25,9 @@ Version **0.1.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
   spending-bound-corrected confidence threshold, a no-winner stopping rule, and
   automatic promotion of the winning variant.
 - **Solo mode** — one binary + embedded SQLite, Argon2 password hashing,
-  session cookies, CSRF protection, rate-limited analytics API, and
-  `openpublish export` for backups.
+  session cookies, CSRF protection, rate-limited analytics API,
+  `openpublish export` for backups, and in-process HTTPS (Let's Encrypt
+  auto-renewal or bring-your-own certificates).
 
 ## Project layout
 
@@ -34,17 +35,22 @@ Version **0.1.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
 crates/content      Markdown → block tree → HTML, immutable block versions
 crates/analytics    Event ingestion, per-block and per-article aggregations
 crates/experiments  Pure Bayesian engine + traffic-split assignment (no I/O)
-crates/server       Axum app: routes, auth, repository (SQLite), auto-decider
-frontend            SvelteKit admin dashboard, editor, and article view
+crates/server       Axum app: page routes, API, auth, repository, TLS
+crates/server/templates   Askama templates (all pages server-rendered)
+crates/server/static      app.css, favicon, tracker.js (embedded in the binary)
+e2e                 Playwright end-to-end suite against the built binary
 migrations          SQLite schema (0001 … 0004)
 docs                MVP plan and milestones
 ```
 
+The whole app — public blog, admin dashboard, JSON API, RSS, static assets, and
+TLS — is one process. There is no Node.js server in production; Node is only
+used to drive the Playwright test suite.
+
 ## Requirements
 
 - **Rust** 1.85+ (edition 2024). Check with `rustc --version`.
-- **Node.js** 20+ and `npm` (for the admin dashboard frontend). Check with
-  `node --version`.
+- **Node.js** 20+ and `npm`, only for the end-to-end tests.
 - Nothing else — the database is embedded SQLite, so there is no separate
   database server to install.
 
@@ -103,92 +109,58 @@ curl -s http://127.0.0.1:8080/health
 # {"status":"ok"}
 ```
 
-## 3. Install and run the admin dashboard
+## 3. First-run setup
 
-The dashboard is a separate SvelteKit app. For development:
+Open http://127.0.0.1:8080. Because no user exists yet you are sent to
+**/setup**, where you create the admin account (email + password). From then on
+`/setup` is locked and you log in at `/login`.
 
-```sh
-cd frontend
-npm install
-npm run dev
-```
+## 4. Production deployment
 
-This starts Vite on http://127.0.0.1:5173. The dev server proxies `/api`
-requests to the Rust server (configurable via `OPENPUBLISH_API`, default
-`http://127.0.0.1:8080`), so cookies stay same-origin and auth works without
-any CORS setup.
+No reverse proxy required. The server can terminate HTTPS itself, either with
+certificates you supply or with automatic Let's Encrypt issuance and renewal.
 
-## 4. First-run setup
-
-With both processes running, open http://127.0.0.1:5173. Because no user
-exists yet you are sent to **/setup**, where you create the admin account
-(email + password). From then on `/setup` is locked and you log in at `/login`.
-
-## 5. Production deployment (reverse proxy)
-
-The Rust server is the API **and** the public blog; it does not serve the
-admin dashboard's static files. For a single hostname you run a reverse proxy
-(here: nginx) that forwards `/api`, `/articles`, `/rss`, `/health`, and
-`/setup` to the Rust server, and everything else to the dashboard. Because
-both origins share the hostname, the `SameSite=Lax` session cookie works
-without CORS.
-
-First give the dashboard a production adapter. The project ships with
-`adapter-auto`, which emits nothing unless a platform adapter is installed.
-For self-hosting, install the Node server adapter:
+### Automatic HTTPS (Let's Encrypt)
 
 ```sh
-cd frontend
-npm install -D @sveltejs/adapter-node
-npm run build
+./openpublish serve --tls-domain example.com --addr 0.0.0.0:443
 ```
 
-This writes a self-contained Node server to `frontend/build`. Run it
-(listens on 127.0.0.1:3000):
+The binary obtains and renews a certificate automatically (TLS-ALPN-01, so no
+port 80 is needed for issuance), and starts an HTTP listener on port 80 that
+redirects to HTTPS. Redirect port and ACME cache directory are configurable
+(see below).
+
+### Bring-your-own certificates
 
 ```sh
-node build
+./openpublish serve --tls-cert cert.pem --tls-key key.pem --addr 0.0.0.0:443
 ```
 
-If you don't want a second process, the Vite dev server (`npm run dev`) is
-fine behind nginx for a single-creator blog, but the built adapter is the
-supported production path.
+The certificate is watched and reloaded on change, so renewed certs are picked
+up without a restart. Under HTTPS, `Secure` is added to the session and visitor
+cookies.
 
-Example `/etc/nginx/sites-available/myblog`:
+### Plain HTTP behind a TLS front
+
+If you keep an existing nginx/Caddy as a TLS front (optional — the binary does
+not need it), run the server on loopback only:
+
+```sh
+./openpublish serve --addr 127.0.0.1:8080
+```
+
+and proxy everything to it:
 
 ```nginx
 server {
     listen 80;
     server_name example.com;
-
-    # Public blog + API + RSS go to the Rust server
-    location /api/        { proxy_pass http://127.0.0.1:8080; }
-    location /articles/   { proxy_pass http://127.0.0.1:8080; }
-    location /rss         { proxy_pass http://127.0.0.1:8080; }
-    location /health      { proxy_pass http://127.0.0.1:8080; }
-    location /setup       { proxy_pass http://127.0.0.1:8080; }  # setup status probe
-
-    # Dashboard (SvelteKit Node server)
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
+    location / { proxy_pass http://127.0.0.1:8080; }
 }
 ```
 
-Run the Rust server on loopback only — nginx is the public face:
-
-```sh
-./target/release/openpublish serve --addr 127.0.0.1:8080
-```
-
-Then `nginx -s reload`. Enable HTTPS with a free Let's Encrypt certificate
-before going public; the session cookie is `HttpOnly` and `SameSite=Lax`, but
-not `Secure`.
-
-The public blog and RSS are also served directly by the Rust server, so even
-without the dashboard you get:
+The public blog and RSS are served by the binary itself:
 
 - Public article: `http://127.0.0.1:8080/articles/your-slug`
 - RSS feed: `http://127.0.0.1:8080/rss`
@@ -196,11 +168,13 @@ without the dashboard you get:
 
 ## Workflow
 
-1. **Write** — from the dashboard, click *New document*. The editor stores
-   Markdown and renders a live block preview. The first block is the headline;
-   every paragraph, image, and CTA becomes its own block.
-2. **Publish** — give the post a slug and publish. It appears on the public
-   route and the RSS feed.
+1. **Write** — on the dashboard, click *New post*. The editor stores Markdown
+   and renders a live block preview. The first block is the headline; every
+   paragraph, image, and CTA becomes its own block. Saving sets the public URL
+   (slug) from the title while the post is still a draft; once published the
+   URL is stable.
+2. **Publish** — click *Publish*. The post appears on the public route and the
+   RSS feed, and the editor links to it.
 3. **Measure** — open *Stats* for a document. You see views, unique readers
    (estimated), average reading time, completion, a scroll-depth funnel, and a
    per-block drop-off table: where do readers leave?
@@ -226,11 +200,16 @@ The `openpublish` binary is configured with CLI flags or environment variables:
 | Flag / var | Default | Meaning |
 |---|---|---|
 | `--database-url` / `DATABASE_URL` | `sqlite://openpublish.db` | SQLite URL or file path |
-| `--addr` / `OPENPUBLISH_ADDR` | `127.0.0.1:8080` | Bind address |
+| `--addr` / `OPENPUBLISH_ADDR` | `127.0.0.1:8080` | Bind address (TLS listener when TLS is active) |
+| `--tls-domain` / `OPENPUBLISH_TLS_DOMAIN` | — | Enable automatic Let's Encrypt HTTPS for this domain |
+| `--tls-cert` / `OPENPUBLISH_TLS_CERT` | — | PEM certificate chain for bring-your-own HTTPS |
+| `--tls-key` / `OPENPUBLISH_TLS_KEY` | — | Matching PEM private key (must be given with `--tls-cert`) |
+| `--tls-cache-dir` / `OPENPUBLISH_TLS_CACHE_DIR` | `./tls` | ACME certificate cache directory |
+| `--http-redirect-port` / `OPENPUBLISH_HTTP_REDIRECT_PORT` | `80` | Port for the HTTP→HTTPS redirect listener |
+| `--no-http-redirect` | off | Do not start the redirect listener under TLS |
 | `RUST_LOG` | `info` | Log verbosity, e.g. `debug`, `openpublish=debug` |
 
-The frontend reads `OPENPUBLISH_API` (default `http://127.0.0.1:8080`) as the
-API origin for the dev proxy.
+TLS precedence: `--tls-domain` > `--tls-cert`/`--tls-key` > plain HTTP.
 
 ### Export
 
@@ -248,43 +227,31 @@ decisions, and is the intended backup/migration path.
 cargo test --workspace          # engine golden+property tests, unit, API integration
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
-cd frontend && npm run check    # svelte-check (type checks all routes)
-cd frontend && npm run build
-cd frontend && npm run test     # Vitest: unit (src/lib) + component (@testing-library/svelte)
 ```
 
-The `experiments` crate's correctness tests are golden (hand-computed beta
-probabilities) plus property tests (posterior sanity, sample-size
-concentration, no-winner/stop correctness, assignment honesty).
-
-The frontend test suite covers the tracker (`src/lib/tracker.test.ts`) and the
-API client (`src/lib/api.test.ts`) at the unit level, plus component tests for
-every route that talks to the API (editor, article, dashboard, stats, login,
-setup). Run a single suite with:
-
-```sh
-cd frontend && npx vitest run src/lib          # unit only
-cd frontend && npx vitest run src/routes       # component only
-```
+The Rust suite covers the repository, every `/api/*` endpoint, all
+server-rendered pages (`tests/pages.rs`), the full creator journey over a real
+socket (`tests/system.rs`), and TLS in the binary with a self-signed certificate
+(`tests/tls.rs`). The `experiments` crate's correctness tests are golden
+(hand-computed beta probabilities) plus property tests (posterior sanity,
+sample-size concentration, no-winner/stop correctness, assignment honesty).
 
 ### End-to-end tests
 
 `npm run test:e2e` drives a real headless browser through the full creator
-journey against a real server: first-run setup, write + publish, read + comment
+journey against the real binary: first-run setup, write + publish, read + comment
 as a visitor, moderation, analytics, an experiment lifecycle, and logout/login.
-Playwright spawns the `openpublish` binary and the Vite dev server on free ports
-with a throwaway SQLite database (a fresh server every run), so no setup is
-needed beyond building the binary:
+Playwright spawns `openpublish` on a free port with a throwaway SQLite database
+(a fresh server every run), so no setup is needed beyond building the binary:
 
 ```sh
 cargo build --bin openpublish
-cd frontend && npx playwright install chromium   # first time only
-cd frontend && npm run test:e2e
+cd e2e && npx playwright install chromium    # first time only
+cd e2e && npm run test:e2e
 ```
 
 To point Playwright at an already-built binary instead of compiling on the
-spot, set `OPENPUBLISH_BIN=/path/to/openpublish`. Specs live in
-`frontend/e2e/`.
+spot, set `OPENPUBLISH_BIN=/path/to/openpublish`. Specs live in `e2e/`.
 
 ## License
 

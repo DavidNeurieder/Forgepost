@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Admin · OpenPublish{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+<div class="muted" style="margin-bottom:1.5rem;">Signed in as {{ display_name }}</div>
+<div class="form-row">
+  <form method="post" action="/admin/new" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit">New post</button>
+  </form>
+  <a class="button secondary" href="/rss" target="_blank" rel="noreferrer">RSS feed</a>
+  <form method="post" action="/logout" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="secondary" type="submit">Log out</button>
+  </form>
+</div>
+
+<h2>Posts</h2>
+{% if docs.is_empty() %}
+<p class="muted">No posts yet. Create your first one.</p>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Title</th>
+      <th>Status</th>
+      <th>Updated</th>
+      <th>Analytics</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for d in docs %}
+    <tr>
+      <td><a href="/admin/editor/{{ d.id }}">{{ d.title }}</a></td>
+      <td><span class="badge {{ d.status }}">{{ d.status }}</span></td>
+      <td class="muted">{{ d.updated }}</td>
+      <td><a class="button small" href="/admin/stats/{{ d.id }}">Stats</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2 style="margin-top:2rem;">Pending comments</h2>
+{% if pending.is_empty() %}
+<p class="muted">Nothing awaiting moderation.</p>
+{% else %}
+{% for c in pending %}
+  <div class="notice">
+    <strong>{{ c.author_name }}</strong>
+    <span class="muted"> · on {{ c.short_id }}</span>
+    <p style="margin:0.4rem 0 0.6rem;">{{ c.body }}</p>
+    <form method="post" action="/admin/comments/{{ c.id }}/approve" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">Approve</button>
+    </form>
+  </div>
+{% endfor %}
+{% endif %}
+{% endblock %}

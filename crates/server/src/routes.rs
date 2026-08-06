@@ -158,7 +158,7 @@ fn doc_view(full: &FullDocument, tags: Vec<String>) -> DocumentView {
     }
 }
 
-fn article_view(full: &FullDocument, tags: Vec<String>) -> ArticleView {
+pub(crate) fn article_view(full: &FullDocument, tags: Vec<String>) -> ArticleView {
     let block_refs: Vec<_> = full
         .document
         .blocks
@@ -196,7 +196,7 @@ fn article_view(full: &FullDocument, tags: Vec<String>) -> ArticleView {
 /// Assignment is deterministic per (experiment, visitor), so a reader sees the
 /// same headline/CTA across reloads. Only the first running experiment per
 /// block participates (one experiment per block at a time).
-fn assigned_variants(
+pub(crate) fn assigned_variants(
     experiments: &[crate::model::ExperimentRecord],
     visitor_id: Uuid,
 ) -> std::collections::HashMap<Uuid, (ExperimentId, VariantId)> {
@@ -368,7 +368,7 @@ pub async fn setup(
         .create_first_user(&body.email, &body.display_name, &hash)
         .await?;
     let session = state.repo.create_session(user.id).await?;
-    let cookie = crate::auth::set_session_cookie(&session.token);
+    let cookie = crate::auth::set_session_cookie_secure(&session.token, state.secure_cookies);
     Ok((
         StatusCode::OK,
         [(header::SET_COOKIE, cookie)],
@@ -393,7 +393,7 @@ pub async fn login(
         return Err(ApiError::bad_request("invalid email or password"));
     }
     let session = state.repo.create_session(user.id).await?;
-    let cookie = crate::auth::set_session_cookie(&session.token);
+    let cookie = crate::auth::set_session_cookie_secure(&session.token, state.secure_cookies);
     Ok((
         [(header::SET_COOKIE, cookie)],
         Json(SessionResponse {
@@ -415,7 +415,10 @@ pub async fn logout(
         state.repo.delete_session(&token).await?;
     }
     Ok((
-        [(header::SET_COOKIE, crate::auth::clear_session_cookie())],
+        [(
+            header::SET_COOKIE,
+            crate::auth::clear_session_cookie_secure(state.secure_cookies),
+        )],
         StatusCode::NO_CONTENT,
     )
         .into_response())
@@ -581,28 +584,17 @@ pub async fn publish_document(
     Ok(Json(doc_view(&full, tags)))
 }
 
-pub async fn article(
-    State(state): State<AppState>,
-    Path(slug): Path<String>,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    let full = state
-        .repo
-        .get_published_by_slug(&slug)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("article not found"))?;
-    let tags = state.repo.document_tags(full.document.id).await?;
-
-    // Stable per-visitor assignment needs the anonymous visitor id, so mint the
-    // cookie here if the reader does not have one yet.
-    let (visitor_id, cookie) = visitor_identity(&headers);
-    let experiments = state
-        .repo
-        .running_experiments_for_document(full.document.id)
-        .await?;
-    let assigned = assigned_variants(&experiments, visitor_id);
-
-    let mut view = article_view(&full, tags);
+/// Overlay running experiments onto a rendered article view: swap each block
+/// that is the subject of a running experiment to its assigned variant's markup
+/// and attach the experiment/variant ids so the tracker can report impressions
+/// and conversions (§5.1 overlays).
+pub(crate) fn apply_assignments(
+    full: &FullDocument,
+    experiments: &[crate::model::ExperimentRecord],
+    visitor_id: Uuid,
+    view: &mut ArticleView,
+) {
+    let assigned = assigned_variants(experiments, visitor_id);
     for block in view.rendered_blocks.iter_mut() {
         let Some((exp_id, variant_id)) = assigned.get(&block.id) else {
             continue;
@@ -624,6 +616,30 @@ pub async fn article(
             block.variant_id = Some(*variant_id);
         }
     }
+}
+
+pub async fn article(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let full = state
+        .repo
+        .get_published_by_slug(&slug)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("article not found"))?;
+    let tags = state.repo.document_tags(full.document.id).await?;
+
+    // Stable per-visitor assignment needs the anonymous visitor id, so mint the
+    // cookie here if the reader does not have one yet.
+    let (visitor_id, cookie) = visitor_identity_with_secure(&headers, state.secure_cookies);
+    let experiments = state
+        .repo
+        .running_experiments_for_document(full.document.id)
+        .await?;
+
+    let mut view = article_view(&full, tags);
+    apply_assignments(&full, &experiments, visitor_id, &mut view);
 
     let mut resp_headers = HeaderMap::new();
     if let Some(c) = cookie {
@@ -763,7 +779,7 @@ pub async fn record_event(
         }
     }
 
-    let (visitor_id, cookie) = visitor_identity(&headers);
+    let (visitor_id, cookie) = visitor_identity_with_secure(&headers, state.secure_cookies);
     let event = AnalyticsEvent {
         id: Uuid::new_v4(),
         document_id,
@@ -1124,9 +1140,12 @@ fn client_ip(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-/// Read or mint the anonymous visitor id (`opv` cookie). Returns the visitor id
-/// and, when a new cookie was minted, its `Set-Cookie` header.
-fn visitor_identity(headers: &HeaderMap) -> (Uuid, Option<axum::http::HeaderValue>) {
+/// `visitor_identity`, with the option to set the `Secure` flag on the minted
+/// cookie (used once HTTPS is active).
+pub(crate) fn visitor_identity_with_secure(
+    headers: &HeaderMap,
+    secure: bool,
+) -> (Uuid, Option<axum::http::HeaderValue>) {
     if let Some(v) = headers
         .get(header::COOKIE)
         .and_then(|c| c.to_str().ok())
@@ -1136,8 +1155,9 @@ fn visitor_identity(headers: &HeaderMap) -> (Uuid, Option<axum::http::HeaderValu
         return (v, None);
     }
     let v = Uuid::new_v4();
+    let secure = if secure { "; Secure" } else { "" };
     let cookie = axum::http::HeaderValue::from_str(&format!(
-        "{VISITOR_COOKIE}={v}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+        "{VISITOR_COOKIE}={v}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}{secure}",
         365 * 24 * 60 * 60
     ))
     .expect("visitor cookie is valid");
@@ -1171,7 +1191,7 @@ fn comment_view(c: crate::model::Comment) -> CommentView {
     }
 }
 
-async fn apply_markdown(
+pub(crate) async fn apply_markdown(
     repo: &dyn Repository,
     doc: &mut Document,
     markdown: &str,

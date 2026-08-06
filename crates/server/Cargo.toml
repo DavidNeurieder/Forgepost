@@ -12,15 +12,20 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 argon2 = { workspace = true }
+askama = "0.14"
 async-trait = { workspace = true }
 axum = { workspace = true }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 clap = { workspace = true }
+futures = "0.3"
 hex = { workspace = true }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 openpublish-analytics = { path = "../analytics" }
 openpublish-content = { path = "../content" }
 openpublish-experiments = { path = "../experiments" }
 password-hash = { workspace = true }
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
+rustls-acme = { version = "0.15", features = ["axum"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -33,6 +38,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 http-body-util = "0.1"
+rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "cookies", "rustls-tls"] }
 tempfile = "3"
 tokio = { workspace = true }

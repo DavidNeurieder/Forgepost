@@ -5,6 +5,7 @@ pub mod auth;
 pub mod error;
 pub mod experiments;
 pub mod model;
+pub mod pages;
 pub mod repository;
 pub mod routes;
 
@@ -21,22 +22,68 @@ use crate::repository::Repository;
 pub struct AppState {
     pub repo: Arc<dyn Repository>,
     pub rate_limiter: RateLimiter,
+    /// Set once TLS is active so session/visitor cookies get the `Secure` flag.
+    pub secure_cookies: bool,
 }
 
 /// Build the Axum router with the default analytics rate limit. Storage is
 /// behind a `Repository` trait so a Postgres implementation can later be
 /// swapped in without touching routes (§5.4).
 pub fn app(repo: Arc<dyn Repository>) -> Router {
-    app_with(repo, RateLimiter::new(RateLimiter::DEFAULT_MAX))
+    app_with_config(repo, RateLimiter::new(RateLimiter::DEFAULT_MAX), false)
 }
 
 /// Build the router with an explicit analytics rate limiter (tests use a tight
 /// limit to exercise the 429 path).
 pub fn app_with(repo: Arc<dyn Repository>, rate_limiter: RateLimiter) -> Router {
-    let state = AppState { repo, rate_limiter };
+    app_with_config(repo, rate_limiter, false)
+}
+
+/// Build the router for HTTPS serving: cookies carry the `Secure` flag.
+pub fn app_secure(repo: Arc<dyn Repository>) -> Router {
+    app_with_config(repo, RateLimiter::new(RateLimiter::DEFAULT_MAX), true)
+}
+
+fn app_with_config(
+    repo: Arc<dyn Repository>,
+    rate_limiter: RateLimiter,
+    secure_cookies: bool,
+) -> Router {
+    let state = AppState {
+        repo,
+        rate_limiter,
+        secure_cookies,
+    };
     Router::new()
+        // Server-rendered pages (the whole blog UI lives in the binary now).
+        .route("/", get(pages::home_page))
+        .route("/setup", get(pages::setup_page).post(pages::setup_form))
+        .route("/login", get(pages::login_page).post(pages::login_form))
+        .route("/logout", post(pages::logout_form))
+        .route("/admin", get(pages::dashboard_page))
+        .route("/admin/new", post(pages::new_post))
+        .route(
+            "/admin/editor/{id}",
+            get(pages::editor_page).post(pages::editor_save),
+        )
+        .route("/admin/editor/{id}/publish", post(pages::editor_publish))
+        .route("/admin/stats/{id}", get(pages::stats_page))
+        .route(
+            "/admin/stats/{id}/experiments",
+            post(pages::create_experiment_page),
+        )
+        .route(
+            "/admin/experiments/{id}/{action}",
+            post(pages::experiment_action),
+        )
+        .route("/admin/comments/{id}/approve", post(pages::approve_comment))
+        .route("/articles/{slug}", get(pages::article_page))
+        .route("/articles/{slug}/comments", post(pages::comment_form))
+        .route("/static/{name}", get(pages::static_file))
+        .route("/rss", get(routes::rss))
+        // Headless JSON API (unchanged; consumed by the pages above and by
+        // external tools). Public read endpoints live under `/api/articles`.
         .route("/health", get(routes::health))
-        .route("/setup", get(routes::setup_status).post(routes::setup))
         .route("/api/setup", get(routes::setup_status).post(routes::setup))
         .route("/api/login", post(routes::login))
         .route("/api/logout", post(routes::logout))
@@ -86,12 +133,6 @@ pub fn app_with(repo: Arc<dyn Repository>, rate_limiter: RateLimiter) -> Router 
             "/api/experiments/{id}/no-winner",
             post(routes::conclude_no_winner),
         )
-        .route("/articles/{slug}", get(routes::article))
-        .route(
-            "/articles/{slug}/comments",
-            get(routes::list_comments).post(routes::create_comment),
-        )
-        .route("/rss", get(routes::rss))
         .route("/api/rss", get(routes::rss))
         .with_state(state)
 }

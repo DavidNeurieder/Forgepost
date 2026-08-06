@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}OpenPublish{% endblock %}
+{% block content %}
+<h1>OpenPublish</h1>
+{% if posts.is_empty() %}
+<p class="muted">No published posts yet.</p>
+{% else %}
+<ul class="posts">
+{% for p in posts %}
+  <li>
+    <a class="title" href="/articles/{{ p.slug }}">{{ p.title }}</a>
+    <div class="muted">{{ p.date }}</div>
+  </li>
+{% endfor %}
+</ul>
+{% endif %}
+{% endblock %}
