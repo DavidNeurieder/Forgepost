@@ -687,6 +687,26 @@ async fn rss_lists_published_articles_only() {
     assert!(!feed.contains("Draft Only"));
     assert!(feed.contains("published-one"));
     assert!(!feed.contains("draft-only"));
+    // Links derive from the Host (no site.url configured in tests) and the
+    // pubDate is an RFC-822 timestamp rather than a bare epoch.
+    assert!(feed.contains("<link>http://localhost/articles/published-one</link>"));
+    assert!(feed.contains("<pubDate>"));
+    assert!(!feed.contains("example.invalid"));
+
+    let (status, resp) = send(&app, json_req(Method::GET, "/robots.txt", None, None, None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+    let robots = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(robots.contains("User-agent: *"));
+    assert!(robots.contains("Sitemap: http://localhost/sitemap.xml"));
+
+    let (status, resp) = send(&app, json_req(Method::GET, "/sitemap.xml", None, None, None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+    let sitemap = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(sitemap.contains("<loc>http://localhost/</loc>"));
+    assert!(sitemap.contains("<loc>http://localhost/articles/published-one</loc>"));
+    assert!(!sitemap.contains("draft-only"));
 }
 
 #[tokio::test]

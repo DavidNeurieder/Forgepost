@@ -358,7 +358,9 @@ impl Repository for SqliteRepository {
             .get_setting("theme")
             .await?
             .unwrap_or_else(|| "system".into());
-        Ok(SiteSettings { name, theme })
+        let url = self.get_setting("site.url").await?.unwrap_or_default();
+        let tagline = self.get_setting("site.tagline").await?.unwrap_or_default();
+        Ok(SiteSettings { name, theme, url, tagline })
     }
 
     async fn create_first_user(
@@ -1598,18 +1600,21 @@ mod tests {
         let site = repo.site_settings().await.unwrap();
         assert_eq!(site.name, "OpenPublish");
         assert_eq!(site.theme, "system");
+        assert_eq!(site.url, "");
+        assert_eq!(site.tagline, "");
         assert!(repo.get_setting("site.name").await.unwrap().is_none());
 
         // Roundtrip an explicit value.
         repo.set_setting("site.name", "My Blog").await.unwrap();
         repo.set_setting("theme", "dark").await.unwrap();
-        assert_eq!(
-            repo.get_setting("site.name").await.unwrap().unwrap(),
-            "My Blog"
-        );
+        repo.set_setting("site.url", "https://example.com").await.unwrap();
+        repo.set_setting("site.tagline", "Notes on things.").await.unwrap();
+        assert_eq!(repo.get_setting("site.name").await.unwrap().unwrap(), "My Blog");
         let site = repo.site_settings().await.unwrap();
         assert_eq!(site.name, "My Blog");
         assert_eq!(site.theme, "dark");
+        assert_eq!(site.url, "https://example.com");
+        assert_eq!(site.tagline, "Notes on things.");
 
         // Overwrite and confirm only one row per key.
         repo.set_setting("theme", "sepia").await.unwrap();

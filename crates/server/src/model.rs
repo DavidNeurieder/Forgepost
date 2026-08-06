@@ -33,6 +33,11 @@ pub struct SiteSettings {
     pub name: String,
     /// `system` | `light` | `dark` | `sepia` | `solarized`.
     pub theme: String,
+    /// Public base URL (e.g. `https://example.com`) used for canonical links,
+    /// Open Graph, sitemap, robots, and RSS links. Empty until configured.
+    pub url: String,
+    /// One-line site description used as the home page meta description.
+    pub tagline: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

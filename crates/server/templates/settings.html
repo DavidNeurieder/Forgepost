@@ -16,6 +16,15 @@
       {% endfor %}
     </select>
   </field>
+  <field>
+    <label for="url">Site URL</label>
+    <input id="url" name="url" type="url" placeholder="https://example.com" value="{{ site_url }}">
+    <p class="muted" style="margin:0.25rem 0 0;">Used for canonical links, Open Graph, sitemap, robots, and RSS.</p>
+  </field>
+  <field>
+    <label for="tagline">Tagline</label>
+    <input id="tagline" name="tagline" type="text" maxlength="200" placeholder="A short description of this blog" value="{{ tagline }}">
+  </field>
   {% if !error.is_empty() %}<p class="error">{{ error }}</p>{% endif %}
   <button type="submit">Save settings</button>
 </form>

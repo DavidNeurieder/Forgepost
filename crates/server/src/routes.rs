@@ -701,28 +701,72 @@ pub async fn approve_comment(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn rss(State(state): State<AppState>) -> Result<Html<String>, ApiError> {
+pub async fn rss(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Html<String>, ApiError> {
     let site = state.repo.site_settings().await?;
+    let base = crate::pages::canonical_base(&state, &site, &headers);
     let published = state.repo.list_published().await?;
     let mut items = String::new();
     for summary in published {
         if let Some(full) = state.repo.get_document(summary.id).await? {
             let html = article_html(&full.document);
             let text: String = html.chars().filter(|c| !c.is_control()).take(500).collect();
+            let url = format!("{base}/articles/{}", xml_escape(&summary.slug));
+            let pub_date = summary
+                .published_at_ms
+                .map(crate::pages::format_rfc822)
+                .unwrap_or_default();
             items.push_str(&format!(
-                "<item><title>{}</title><link>https://example.invalid/{}</link><description>{}</description><pubDate>{}</pubDate></item>",
+                "<item><title>{}</title><link>{}</link><guid isPermaLink=\"true\">{}</guid><description>{}</description><pubDate>{}</pubDate></item>",
                 xml_escape(&full.document.title),
-                xml_escape(&summary.slug),
+                url,
+                url,
                 xml_escape(&text),
-                summary.published_at_ms.unwrap_or(0),
+                pub_date,
             ));
         }
     }
     let feed = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<rss version=\"2.0\"><channel><title>{}</title>{items}</channel></rss>",
-        xml_escape(&site.name)
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\"><channel><title>{}</title><link>{}</link><description>{}</description><atom:link href=\"{}/rss\" rel=\"self\" type=\"application/rss+xml\"/>{items}</channel></rss>",
+        xml_escape(&site.name),
+        base,
+        xml_escape(&site.tagline),
+        base,
     );
     Ok(Html(feed))
+}
+
+pub async fn robots_txt(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Html<String>, ApiError> {
+    let site = state.repo.site_settings().await?;
+    let base = crate::pages::canonical_base(&state, &site, &headers);
+    Ok(Html(format!(
+        "User-agent: *\nAllow: /\nSitemap: {base}/sitemap.xml\n"
+    )))
+}
+
+pub async fn sitemap_xml(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Html<String>, ApiError> {
+    let site = state.repo.site_settings().await?;
+    let base = crate::pages::canonical_base(&state, &site, &headers);
+    let published = state.repo.list_published().await?;
+    let mut urls = format!("<url><loc>{}/</loc></url>", base);
+    for summary in published {
+        urls.push_str(&format!(
+            "<url><loc>{base}/articles/{}</loc><lastmod>{}</lastmod></url>",
+            xml_escape(&summary.slug),
+            crate::pages::format_iso_utc(summary.published_at_ms.unwrap_or(0)),
+        ));
+    }
+    Ok(Html(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">{urls}</urlset>"
+    )))
 }
 
 // ---------------------------------------------------------------------------

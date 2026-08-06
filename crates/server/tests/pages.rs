@@ -569,6 +569,28 @@ async fn article_page_renders_html_tracker_and_visitor_cookie() {
     assert!(html.contains("Comments"));
     assert!(html.contains("No comments yet."));
 
+    // SEO head: canonical, meta description, Open Graph/Twitter, JSON-LD,
+    // and no `noindex` (it is replaced by the article head_meta block).
+    assert!(!html.contains("<meta name=\"robots\" content=\"noindex\">"));
+    assert!(html.contains(
+        "<meta name=\"description\" content=\"First paragraph.\">"
+    ));
+    assert!(html.contains(
+        "<link rel=\"canonical\" href=\"http://localhost/articles/hello-world\">"
+    ));
+    assert!(html.contains("<meta property=\"og:type\" content=\"article\">"));
+    assert!(html.contains("<meta property=\"og:site_name\" content=\"OpenPublish\">"));
+    assert!(html.contains("<meta property=\"og:title\" content=\"Hello World\">"));
+    assert!(html.contains(
+        "<meta property=\"og:url\" content=\"http://localhost/articles/hello-world\">"
+    ));
+    assert!(html.contains("<meta name=\"twitter:card\" content=\"summary\">"));
+    assert!(html.contains("application/ld+json"));
+    assert!(html.contains("\"@type\": \"BlogPosting\""));
+    assert!(html.contains("\"headline\": \"Hello World\""));
+    assert!(html.contains("\"author\": { \"@type\": \"Person\", \"name\": \"Alice\" }"));
+    assert!(html.contains("\"datePublished\": \""));
+
     // Repeated visits with the same visitor are stable.
     let (_, resp) = send(
         &app,
@@ -861,9 +883,12 @@ async fn settings_page_shows_current_values_and_default_theme() {
     assert!(html.contains("Save settings"));
     assert!(html.contains("id=\"name\""));
     assert!(html.contains("id=\"theme\""));
+    assert!(html.contains("id=\"url\""));
+    assert!(html.contains("id=\"tagline\""));
     assert!(html.contains("System (auto)"));
     assert!(html.contains("data-theme=\"system\""));
     assert!(html.contains("value=\"OpenPublish\""));
+    assert!(html.contains("canonical links, Open Graph, sitemap, robots, and RSS"));
 
     // Defaults also show up on the anonymous pages.
     let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;
@@ -877,7 +902,6 @@ async fn settings_form_updates_name_and_theme() {
     let app = test_app().await;
     let cookie = setup_owner(&app).await;
     let csrf = csrf_for(&app, &cookie).await;
-
     let (status, resp) = send(
         &app,
         form_req(
@@ -888,6 +912,8 @@ async fn settings_form_updates_name_and_theme() {
                 ("csrf_token", &csrf),
                 ("name", "My Journal"),
                 ("theme", "sepia"),
+                ("url", "https://journal.example.com"),
+                ("tagline", "Notes on software."),
             ],
         ),
     )
@@ -905,6 +931,7 @@ async fn settings_form_updates_name_and_theme() {
             Method::GET,
             "/admin/settings?flash=settings_saved",
             Some(&cookie),
+
             None,
         ),
     )
@@ -914,16 +941,35 @@ async fn settings_form_updates_name_and_theme() {
     assert!(html.contains("Settings saved."));
     assert!(html.contains("value=\"My Journal\""));
     assert!(html.contains("<option value=\"sepia\" selected>Sepia</option>"));
+    assert!(html.contains("value=\"https://journal.example.com\""));
+    assert!(html.contains("value=\"Notes on software.\""));
 
-    // The home page and RSS feed pick up the new name and theme.
+    // The home page and RSS feed pick up the new name, theme, URL, and tagline.
     let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;
     let html = body_text(resp).await;
     assert!(html.contains("<h1>My Journal</h1>"));
     assert!(html.contains("data-theme=\"sepia\""));
+    assert!(html.contains(
+        "<meta name=\"description\" content=\"Notes on software.\">"
+    ));
+    assert!(html.contains(
+        "<link rel=\"canonical\" href=\"https://journal.example.com\">"
+    ));
+    assert!(html.contains(
+        "<meta property=\"og:site_name\" content=\"My Journal\">"
+    ));
 
     let (_, resp) = send(&app, req(Method::GET, "/rss", None, None)).await;
     let body = body_text(resp).await;
     assert!(body.contains("<title>My Journal</title>"));
+    assert!(body.contains("<link>https://journal.example.com</link>"));
+    assert!(body.contains("<description>Notes on software.</description>"));
+
+    // The configured URL also drives robots.txt and the sitemap.
+    let (_, resp) = send(&app, req(Method::GET, "/robots.txt", None, None)).await;
+    assert!(body_text(resp)
+        .await
+        .contains("Sitemap: https://journal.example.com/sitemap.xml"));
 }
 
 #[tokio::test]
@@ -961,6 +1007,49 @@ async fn settings_form_validates_input() {
     assert_eq!(status, StatusCode::OK);
     let html = body_text(resp).await;
     assert!(html.contains("Unknown theme."));
+
+    // Malformed URL.
+    let (status, resp) = send(
+        &app,
+        form_req(
+            Method::POST,
+            "/admin/settings",
+            Some(&cookie),
+            &[
+                ("csrf_token", &csrf),
+                ("name", "Fine"),
+                ("theme", "dark"),
+                ("url", "not-a-url"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body_text(resp).await;
+    assert!(html.contains(
+        "Site URL must start with http:// or https://."
+    ));
+
+    // Oversized tagline.
+    let (status, resp) = send(
+        &app,
+        form_req(
+            Method::POST,
+            "/admin/settings",
+            Some(&cookie),
+            &[
+                ("csrf_token", &csrf),
+                ("name", "Fine"),
+                ("theme", "dark"),
+                ("url", "https://ok.example.com"),
+                ("tagline", &"x".repeat(201)),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body_text(resp).await;
+    assert!(html.contains("Tagline is too long (200 characters max)."));
 
     // Nothing was persisted.
     let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;

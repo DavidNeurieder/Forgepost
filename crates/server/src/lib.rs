@@ -85,6 +85,8 @@ fn app_with_config(
         .route("/articles/{slug}/comments", post(pages::comment_form))
         .route("/static/{name}", get(pages::static_file))
         .route("/rss", get(routes::rss))
+        .route("/robots.txt", get(routes::robots_txt))
+        .route("/sitemap.xml", get(routes::sitemap_xml))
         // Headless JSON API (unchanged; consumed by the pages above and by
         // external tools). Public read endpoints live under `/api/articles`.
         .route("/health", get(routes::health))

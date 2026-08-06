@@ -33,6 +33,7 @@ struct HomeTemplate {
     flash: String,
     site_name: String,
     theme: String,
+    seo: SeoMeta,
     posts: Vec<HomePost>,
 }
 
@@ -40,6 +41,18 @@ struct HomePost {
     title: String,
     slug: String,
     date: String,
+}
+
+/// SEO metadata rendered into `<head>` (canonical, Open Graph, Twitter,
+/// meta description, and JSON-LD).
+struct SeoMeta {
+    title: String,
+    description: String,
+    url: String,
+    image: String,
+    date_published: String,
+    date_modified: String,
+    author: String,
 }
 
 #[derive(Template)]
@@ -189,6 +202,7 @@ struct ArticleTemplate {
     flash: String,
     site_name: String,
     theme: String,
+    seo: SeoMeta,
     slug: String,
     title: String,
     date: String,
@@ -229,6 +243,8 @@ struct SettingsTemplate {
     flash: String,
     site_name: String,
     theme: String,
+    site_url: String,
+    tagline: String,
     csrf_token: String,
     themes: Vec<ThemeOption>,
     error: String,
@@ -295,6 +311,10 @@ pub(crate) struct SettingsForm {
     name: String,
     #[serde(default)]
     theme: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    tagline: String,
     #[serde(default)]
     csrf_token: Option<String>,
 }
@@ -447,6 +467,104 @@ fn format_pct(v: f64) -> String {
     format!("{:.0}%", v * 100.0)
 }
 
+/// Absolute base URL for canonical/OG/sitemap/RSS links: the configured
+/// `site.url` when set, otherwise derived from the request Host + scheme.
+pub(crate) fn canonical_base(state: &AppState, site: &SiteSettings, headers: &HeaderMap) -> String {
+    if !site.url.is_empty() {
+        return site.url.trim_end_matches('/').to_string();
+    }
+    let scheme = if state.secure_cookies { "https" } else { "http" };
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost");
+    format!("{scheme}://{host}")
+}
+
+/// Full UTC timestamp as ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`) for JSON-LD.
+pub(crate) fn format_iso_utc(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// RFC-822 date for RSS `<pubDate>` (e.g. `Thu, 06 Aug 2026 09:00:00 GMT`).
+pub(crate) fn format_rfc822(ms: i64) -> String {
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let days = ms.div_euclid(86_400_000);
+    let secs = ms.div_euclid(1000);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    let dow = (days + 4).rem_euclid(7) as usize; // 1970-01-01 was a Thursday
+    format!(
+        "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
+        WEEKDAYS[dow],
+        d,
+        MONTHS[(m as usize) - 1],
+        y,
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// Meta description for an article: the first body-text block, whitespace
+/// collapsed and truncated to ~155 characters.
+fn page_meta_description(full: &crate::model::FullDocument) -> String {
+    let text = full
+        .document
+        .blocks
+        .iter()
+        .find_map(|b| {
+            let c = full.document.current_content(b.id)?;
+            match b.kind {
+                BlockKind::Paragraph | BlockKind::Quote | BlockKind::CallToAction => {
+                    let t = text_of(c);
+                    if t.is_empty() { None } else { Some(t) }
+                }
+                _ => None,
+            }
+        })
+        .unwrap_or_default();
+    let clean: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.chars().count() <= 155 {
+        clean
+    } else {
+        clean.chars().take(152).collect::<String>() + "..."
+    }
+}
+
+/// Absolute URL of the article's first image block (relative paths get the
+/// site base prepended); empty when the article has no image.
+fn article_image(full: &crate::model::FullDocument, base: &str) -> String {
+    full.document
+        .blocks
+        .iter()
+        .find_map(|b| {
+            if b.kind != BlockKind::Image {
+                return None;
+            }
+            let c = full.document.current_content(b.id)?;
+            let src = c.get("src").and_then(|v| v.as_str())?;
+            if src.starts_with('/') {
+                Some(format!("{base}{src}"))
+            } else {
+                Some(src.to_string())
+            }
+        })
+        .unwrap_or_default()
+}
+
 fn format_duration(ms: i64) -> String {
     if ms < 1000 {
         format!("{ms} ms")
@@ -464,11 +582,20 @@ fn short(id: &Uuid) -> String {
 // Public pages
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn home_page(State(state): State<AppState>) -> Result<Response, PageError> {
+pub(crate) async fn home_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, PageError> {
     if !state.repo.is_setup_complete().await? {
         return Ok(Redirect::to("/setup").into_response());
     }
     let site = site(&state).await?;
+    let base = canonical_base(&state, &site, &headers);
+    let description = if site.tagline.is_empty() {
+        format!("Latest posts from {}.", site.name)
+    } else {
+        site.tagline.clone()
+    };
     let published = state.repo.list_published().await?;
     let posts = published
         .iter()
@@ -481,8 +608,17 @@ pub(crate) async fn home_page(State(state): State<AppState>) -> Result<Response,
     page(&HomeTemplate {
         authed: false,
         flash: String::new(),
-        site_name: site.name,
+        site_name: site.name.clone(),
         theme: site.theme,
+        seo: SeoMeta {
+            title: site.name,
+            description,
+            url: base,
+            image: String::new(),
+            date_published: String::new(),
+            date_modified: String::new(),
+            author: String::new(),
+        },
         posts,
     })
 }
@@ -830,6 +966,14 @@ pub(crate) async fn settings_form(
         .set_setting("site.name", body.name.trim())
         .await?;
     state.repo.set_setting("theme", &body.theme).await?;
+    state
+        .repo
+        .set_setting("site.url", body.url.trim())
+        .await?;
+    state
+        .repo
+        .set_setting("site.tagline", body.tagline.trim())
+        .await?;
     Ok(Redirect::to("/admin/settings?flash=settings_saved").into_response())
 }
 
@@ -845,6 +989,8 @@ fn settings_template(
         flash,
         site_name: site.name,
         theme: site.theme,
+        site_url: site.url,
+        tagline: site.tagline,
         csrf_token: auth.csrf_token,
         themes: THEMES
             .iter()
@@ -867,6 +1013,13 @@ fn validate_settings(body: &SettingsForm) -> String {
     }
     if !THEMES.iter().any(|(value, _)| *value == body.theme) {
         return "Unknown theme.".into();
+    }
+    let url = body.url.trim();
+    if !(url.is_empty() || url.starts_with("http://") || url.starts_with("https://")) {
+        return "Site URL must start with http:// or https://.".into();
+    }
+    if body.tagline.trim().len() > 200 {
+        return "Tagline is too long (200 characters max).".into();
     }
     String::new()
 }
@@ -1300,11 +1453,33 @@ async fn build_article_page(
         .comments_for_document(full.document.id, Some("approved"))
         .await?;
     let site = site(state).await?;
+    let base = canonical_base(state, &site, headers);
+    let description = {
+        let d = page_meta_description(&full);
+        if d.is_empty() { view.title.clone() } else { d }
+    };
+    let author = match state.repo.find_user_by_id(full.owner_id).await? {
+        Some(u) => u.display_name.clone(),
+        None => site.name.clone(),
+    };
+    let seo = SeoMeta {
+        title: view.title.clone(),
+        description,
+        url: format!("{base}/articles/{}", view.slug),
+        image: article_image(&full, &base),
+        date_published: full
+            .published_at_ms
+            .map(format_iso_utc)
+            .unwrap_or_default(),
+        date_modified: format_iso_utc(full.document.updated_at_ms),
+        author,
+    };
     let tpl = ArticleTemplate {
         authed: false,
         flash: flash_message(flash),
         site_name: site.name,
         theme: site.theme,
+        seo,
         slug: view.slug.clone(),
         title: view.title.clone(),
         date: format_date(view.published_at_ms),
