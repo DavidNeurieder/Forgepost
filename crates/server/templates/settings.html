@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Settings · {{ site_name }}{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+<form method="post" action="/admin/settings">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <field>
+    <label for="name">Blog name</label>
+    <input id="name" name="name" type="text" maxlength="80" value="{{ site_name }}">
+  </field>
+  <field>
+    <label for="theme">Theme</label>
+    <select id="theme" name="theme">
+      {% for t in themes %}
+      <option value="{{ t.value }}"{% if t.selected %} selected{% endif %}>{{ t.label }}</option>
+      {% endfor %}
+    </select>
+  </field>
+  {% if !error.is_empty() %}<p class="error">{{ error }}</p>{% endif %}
+  <button type="submit">Save settings</button>
+</form>
+{% endblock %}
