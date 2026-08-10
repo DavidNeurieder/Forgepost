@@ -20,3 +20,7 @@ tls/
 # Misc
 .env
 .env.*
+
+# docs
+
+old_docs/
