@@ -1,4 +1,4 @@
-//! OpenPublish CLI entrypoint. Solo mode: single binary + embedded SQLite.
+//! Forgepost CLI entrypoint. Solo mode: single binary + embedded SQLite.
 //!
 //! `serve` can run plain HTTP or HTTPS, either with a certificate you supply
 //! (`--tls-cert`/`--tls-key`) or with automatic Let's Encrypt issuance and
@@ -15,8 +15,8 @@ use axum::{
 };
 use axum_server::tls_rustls::RustlsConfig;
 use clap::{Args, Parser, Subcommand};
-use openpublish_server::experiments;
-use openpublish_server::repository::{Repository, SqliteRepository};
+use forgepost_server::experiments;
+use forgepost_server::repository::{Repository, SqliteRepository};
 use rustls_acme::AcmeConfig;
 use rustls_acme::caches::DirCache;
 use tokio::net::TcpListener;
@@ -25,7 +25,7 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(
-    name = "openpublish",
+    name = "forgepost",
     version,
     about = "Self-hosted block-level experimentation for creators"
 )]
@@ -36,7 +36,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Start the OpenPublish server (default).
+    /// Start the Forgepost server (default).
     Serve(ServeArgs),
     /// Export the entire database as JSON (backups / migration).
     Export(ExportArgs),
@@ -45,36 +45,36 @@ enum Command {
 #[derive(Args)]
 struct ServeArgs {
     /// SQLite database URL or file path.
-    #[arg(long, env = "DATABASE_URL", default_value = "sqlite://openpublish.db")]
+    #[arg(long, env = "DATABASE_URL", default_value = "sqlite://forgepost.db")]
     database_url: String,
     /// Address to bind (plain HTTP by default, TLS when --tls-* is given).
-    #[arg(long, env = "OPENPUBLISH_ADDR", default_value = "127.0.0.1:8080")]
+    #[arg(long, env = "FORGEPOST_ADDR", default_value = "127.0.0.1:8080")]
     addr: String,
     /// Automate HTTPS via Let's Encrypt (TLS-ALPN-01). Takes precedence over
     /// --tls-cert/--tls-key.
-    #[arg(long, env = "OPENPUBLISH_TLS_DOMAIN")]
+    #[arg(long, env = "FORGEPOST_TLS_DOMAIN")]
     tls_domain: Option<String>,
     /// Path to a TLS certificate chain (PEM), bring-your-own HTTPS.
-    #[arg(long, env = "OPENPUBLISH_TLS_CERT")]
+    #[arg(long, env = "FORGEPOST_TLS_CERT")]
     tls_cert: Option<PathBuf>,
     /// Path to the matching TLS private key (PEM).
-    #[arg(long, env = "OPENPUBLISH_TLS_KEY")]
+    #[arg(long, env = "FORGEPOST_TLS_KEY")]
     tls_key: Option<PathBuf>,
     /// Directory for the Let's Encrypt ACME cache (tier 2 only).
-    #[arg(long, env = "OPENPUBLISH_TLS_CACHE_DIR", default_value = "./tls")]
+    #[arg(long, env = "FORGEPOST_TLS_CACHE_DIR", default_value = "./tls")]
     tls_cache_dir: PathBuf,
     /// Do not start the HTTP→HTTPS redirect listener when TLS is active.
     #[arg(long)]
     no_http_redirect: bool,
     /// Port for the HTTP→HTTPS redirect listener (default 80).
-    #[arg(long, env = "OPENPUBLISH_HTTP_REDIRECT_PORT", default_value_t = 80)]
+    #[arg(long, env = "FORGEPOST_HTTP_REDIRECT_PORT", default_value_t = 80)]
     http_redirect_port: u16,
 }
 
 impl Default for ServeArgs {
     fn default() -> Self {
         Self {
-            database_url: "sqlite://openpublish.db".into(),
+            database_url: "sqlite://forgepost.db".into(),
             addr: "127.0.0.1:8080".into(),
             tls_domain: None,
             tls_cert: None,
@@ -89,7 +89,7 @@ impl Default for ServeArgs {
 #[derive(Args)]
 struct ExportArgs {
     /// SQLite database URL or file path.
-    #[arg(long, env = "DATABASE_URL", default_value = "sqlite://openpublish.db")]
+    #[arg(long, env = "DATABASE_URL", default_value = "sqlite://forgepost.db")]
     database_url: String,
     /// Write the export to this file instead of stdout.
     #[arg(long)]
@@ -137,9 +137,9 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let mode = tls_mode(&args)?;
     let secure = matches!(mode, TlsMode::Byo { .. } | TlsMode::Acme { .. });
     let app = if secure {
-        openpublish_server::app_secure(repo)
+        forgepost_server::app_secure(repo)
     } else {
-        openpublish_server::app(repo)
+        forgepost_server::app(repo)
     };
     let socket_addr: std::net::SocketAddr = args.addr.parse()?;
 
@@ -149,7 +149,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     match mode {
         TlsMode::None => {
             let listener = TcpListener::bind(socket_addr).await?;
-            tracing::info!(addr = %args.addr, "OpenPublish listening (http)");
+            tracing::info!(addr = %args.addr, "Forgepost listening (http)");
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
                     shutdown_rx.changed().await.ok();
@@ -161,7 +161,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             tracing::info!(
                 addr = %args.addr,
                 cert = %cert.display(),
-                "OpenPublish listening (https, custom certificate)"
+                "Forgepost listening (https, custom certificate)"
             );
             if !args.no_http_redirect {
                 spawn_redirect_listener(
@@ -198,7 +198,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             tracing::info!(
                 addr = %args.addr,
                 domain = %domain,
-                "OpenPublish listening (https, automatic Let's Encrypt)"
+                "Forgepost listening (https, automatic Let's Encrypt)"
             );
             if !args.no_http_redirect {
                 spawn_redirect_listener(

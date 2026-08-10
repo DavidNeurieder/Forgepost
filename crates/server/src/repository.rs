@@ -9,10 +9,10 @@ use crate::model::{
     AnalyticsEvent, Comment, DocumentSummary, FullDocument, Session, SiteSettings, User,
 };
 use async_trait::async_trait;
-use openpublish_content::{
+use forgepost_content::{
     Block, BlockContent, BlockId, BlockKind, BlockVersion, Document, DocumentId, VersionId, now_ms,
 };
-use openpublish_experiments::{ExperimentId, VariantId};
+use forgepost_experiments::{ExperimentId, VariantId};
 use serde_json::json;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::{Row, Transaction};
@@ -129,7 +129,7 @@ pub trait Repository: Send + Sync {
     ) -> Result<crate::model::ExperimentRecord, RepositoryError>;
     async fn experiment(
         &self,
-        id: openpublish_experiments::ExperimentId,
+        id: forgepost_experiments::ExperimentId,
     ) -> Result<Option<crate::model::ExperimentRecord>, RepositoryError>;
     async fn experiments_for_document(
         &self,
@@ -146,11 +146,11 @@ pub trait Repository: Send + Sync {
     ) -> Result<Vec<crate::model::ExperimentRecord>, RepositoryError>;
     async fn start_experiment(
         &self,
-        id: openpublish_experiments::ExperimentId,
+        id: forgepost_experiments::ExperimentId,
     ) -> Result<(), RepositoryError>;
     async fn stop_experiment(
         &self,
-        id: openpublish_experiments::ExperimentId,
+        id: forgepost_experiments::ExperimentId,
     ) -> Result<(), RepositoryError>;
     /// Repoint the block to `version_id` (promotion). Canonical content changes
     /// only here; the version pool itself is never mutated.
@@ -162,26 +162,26 @@ pub trait Repository: Send + Sync {
     /// Append a decision row and update the experiment status atomically.
     async fn conclude_experiment(
         &self,
-        id: openpublish_experiments::ExperimentId,
+        id: forgepost_experiments::ExperimentId,
         decision: &str,
-        winning_variant_id: Option<openpublish_experiments::VariantId>,
+        winning_variant_id: Option<forgepost_experiments::VariantId>,
         promoted_version_id: Option<VersionId>,
         stats: &crate::model::ExperimentDecision,
     ) -> Result<(), RepositoryError>;
     /// Per-variant sample counts for a running experiment (deduped by visitor).
     async fn experiment_counts(
         &self,
-        id: openpublish_experiments::ExperimentId,
+        id: forgepost_experiments::ExperimentId,
     ) -> Result<Vec<crate::model::ExperimentCounts>, RepositoryError>;
     async fn experiment_decisions(
         &self,
-        id: openpublish_experiments::ExperimentId,
+        id: forgepost_experiments::ExperimentId,
     ) -> Result<Vec<crate::model::ExperimentDecision>, RepositoryError>;
     /// Confirm an experiment is running and that `variant_id` belongs to it.
     async fn experiment_variant_belongs(
         &self,
-        id: openpublish_experiments::ExperimentId,
-        variant_id: openpublish_experiments::VariantId,
+        id: forgepost_experiments::ExperimentId,
+        variant_id: forgepost_experiments::VariantId,
     ) -> Result<bool, RepositoryError>;
 }
 
@@ -353,7 +353,7 @@ impl Repository for SqliteRepository {
         let name = self
             .get_setting("site.name")
             .await?
-            .unwrap_or_else(|| "OpenPublish".into());
+            .unwrap_or_else(|| "Forgepost".into());
         let theme = self
             .get_setting("theme")
             .await?
@@ -1133,7 +1133,7 @@ impl Repository for SqliteRepository {
             Uuid::from_str(&control_row.get::<String, _>("current_version_id"))
                 .map_err(|_| RepositoryError::InvalidInput("bad control version".into()))?;
 
-        let id = openpublish_experiments::ExperimentId::new_v4();
+        let id = forgepost_experiments::ExperimentId::new_v4();
         let now = now_ms();
         sqlx::query(
             "INSERT INTO experiments
@@ -1241,7 +1241,7 @@ impl Repository for SqliteRepository {
 
     async fn experiment(
         &self,
-        id: openpublish_experiments::ExperimentId,
+        id: forgepost_experiments::ExperimentId,
     ) -> Result<Option<crate::model::ExperimentRecord>, RepositoryError> {
         load_experiment(&self.pool, &id).await
     }
@@ -1305,7 +1305,7 @@ impl Repository for SqliteRepository {
 
     async fn start_experiment(
         &self,
-        id: openpublish_experiments::ExperimentId,
+        id: forgepost_experiments::ExperimentId,
     ) -> Result<(), RepositoryError> {
         let now = now_ms();
         let result = sqlx::query(
@@ -1326,7 +1326,7 @@ impl Repository for SqliteRepository {
 
     async fn stop_experiment(
         &self,
-        id: openpublish_experiments::ExperimentId,
+        id: forgepost_experiments::ExperimentId,
     ) -> Result<(), RepositoryError> {
         let result = sqlx::query(
             "UPDATE experiments SET status = 'stopped', decided_at_ms = ?, decision = 'stopped' WHERE id = ?",
@@ -1360,9 +1360,9 @@ impl Repository for SqliteRepository {
 
     async fn conclude_experiment(
         &self,
-        id: openpublish_experiments::ExperimentId,
+        id: forgepost_experiments::ExperimentId,
         decision: &str,
-        winning_variant_id: Option<openpublish_experiments::VariantId>,
+        winning_variant_id: Option<forgepost_experiments::VariantId>,
         promoted_version_id: Option<VersionId>,
         stats: &crate::model::ExperimentDecision,
     ) -> Result<(), RepositoryError> {
@@ -1415,7 +1415,7 @@ impl Repository for SqliteRepository {
 
     async fn experiment_counts(
         &self,
-        id: openpublish_experiments::ExperimentId,
+        id: forgepost_experiments::ExperimentId,
     ) -> Result<Vec<crate::model::ExperimentCounts>, RepositoryError> {
         let rows = sqlx::query(
             "SELECT variant_id,
@@ -1440,7 +1440,7 @@ impl Repository for SqliteRepository {
 
     async fn experiment_decisions(
         &self,
-        id: openpublish_experiments::ExperimentId,
+        id: forgepost_experiments::ExperimentId,
     ) -> Result<Vec<crate::model::ExperimentDecision>, RepositoryError> {
         let rows = sqlx::query(
             "SELECT id, experiment_id, decided_at_ms, decision, winner_variant_id, promoted_version_id,
@@ -1476,8 +1476,8 @@ impl Repository for SqliteRepository {
 
     async fn experiment_variant_belongs(
         &self,
-        id: openpublish_experiments::ExperimentId,
-        variant_id: openpublish_experiments::VariantId,
+        id: forgepost_experiments::ExperimentId,
+        variant_id: forgepost_experiments::VariantId,
     ) -> Result<bool, RepositoryError> {
         let row = sqlx::query(
             "SELECT 1 AS one FROM experiment_variants WHERE experiment_id = ? AND id = ? LIMIT 1",
@@ -1598,7 +1598,7 @@ mod tests {
 
         // Fresh database: defaults apply.
         let site = repo.site_settings().await.unwrap();
-        assert_eq!(site.name, "OpenPublish");
+        assert_eq!(site.name, "Forgepost");
         assert_eq!(site.theme, "system");
         assert_eq!(site.url, "");
         assert_eq!(site.tagline, "");
@@ -1658,8 +1658,8 @@ mod tests {
         assert_eq!(full.document.blocks.len(), 0);
         assert_eq!(full.slug, "hello-world");
 
-        let parsed = openpublish_content::parse_markdown("# Hello\n\nbody text");
-        let merged = openpublish_content::merge_blocks(&[], &[], parsed, now_ms());
+        let parsed = forgepost_content::parse_markdown("# Hello\n\nbody text");
+        let merged = forgepost_content::merge_blocks(&[], &[], parsed, now_ms());
         repo.save_document_blocks(doc_id, &merged.blocks, &merged.versions)
             .await
             .unwrap();
@@ -1731,8 +1731,8 @@ mod tests {
         let user = seed_user(&repo).await;
         let full = repo.create_document(user.id, "Exported").await.unwrap();
         let doc_id = full.document.id;
-        let parsed = openpublish_content::parse_markdown("Some text");
-        let merged = openpublish_content::merge_blocks(&[], &[], parsed, now_ms());
+        let parsed = forgepost_content::parse_markdown("Some text");
+        let merged = forgepost_content::merge_blocks(&[], &[], parsed, now_ms());
         repo.save_document_blocks(doc_id, &merged.blocks, &merged.versions)
             .await
             .unwrap();
@@ -1749,8 +1749,8 @@ mod tests {
         let user = seed_user(&repo).await;
         let full = repo.create_document(user.id, "Draft only").await.unwrap();
         let doc_id = full.document.id;
-        let parsed = openpublish_content::parse_markdown("unpublished body");
-        let merged = openpublish_content::merge_blocks(&[], &[], parsed, now_ms());
+        let parsed = forgepost_content::parse_markdown("unpublished body");
+        let merged = forgepost_content::merge_blocks(&[], &[], parsed, now_ms());
         repo.save_document_blocks(doc_id, &merged.blocks, &merged.versions)
             .await
             .unwrap();

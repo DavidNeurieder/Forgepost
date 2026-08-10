@@ -1,5 +1,5 @@
 [package]
-name = "openpublish-content"
+name = "forgepost-content"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

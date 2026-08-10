@@ -6,9 +6,9 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
-use openpublish_analytics::EventKind;
-use openpublish_content::{Document, now_ms, render_html};
-use openpublish_experiments::{ExperimentId, VariantId, assign_variant};
+use forgepost_analytics::EventKind;
+use forgepost_content::{Document, now_ms, render_html};
+use forgepost_experiments::{ExperimentId, VariantId, assign_variant};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -455,7 +455,7 @@ pub async fn render_markdown(
     _auth: AuthUser,
     Json(body): Json<RenderRequest>,
 ) -> Result<Json<RenderView>, ApiError> {
-    let parsed = openpublish_content::parse_markdown(&body.markdown);
+    let parsed = forgepost_content::parse_markdown(&body.markdown);
     let html = render_html(parsed.iter().map(|b| (b.kind, &b.content)));
     let blocks = parsed
         .into_iter()
@@ -884,7 +884,7 @@ pub async fn document_stats(
         .filter(|&completed| completed > 0)
         .map(|completed| completed as f64 / article.views.max(1) as f64);
 
-    let mut blocks_sorted: Vec<&openpublish_content::Block> = full.document.blocks.iter().collect();
+    let mut blocks_sorted: Vec<&forgepost_content::Block> = full.document.blocks.iter().collect();
     blocks_sorted.sort_by_key(|b| b.position);
     let layout: Vec<(Uuid, i64, String, String)> = blocks_sorted
         .iter()
@@ -1242,12 +1242,12 @@ pub(crate) async fn apply_markdown(
     doc: &mut Document,
     markdown: &str,
 ) -> Result<(), ApiError> {
-    let parsed = openpublish_content::parse_markdown(markdown);
-    let merged = openpublish_content::merge_blocks(
+    let parsed = forgepost_content::parse_markdown(markdown);
+    let merged = forgepost_content::merge_blocks(
         &doc.blocks,
         &doc.versions,
         parsed,
-        openpublish_content::now_ms(),
+        forgepost_content::now_ms(),
     );
     let versions = merged.versions.clone();
     repo.save_document_blocks(doc.id, &merged.blocks, &versions)

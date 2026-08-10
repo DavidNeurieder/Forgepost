@@ -1,7 +1,7 @@
-// Spawns the real `openpublish serve` process for the Playwright E2E suite.
+// Spawns the real `forgepost serve` process for the Playwright E2E suite.
 // Playwright's `webServer` waits for /health, so each run gets a fresh server
 // against a throwaway SQLite database. Prefer a prebuilt binary via
-// `OPENPUBLISH_BIN` (e.g. `../target/debug/openpublish`) and fall back to
+// `FORGEPOST_BIN` (e.g. `../target/debug/forgepost`) and fall back to
 // `cargo run` so `npm run test:e2e` works locally with no extra build step.
 
 import { spawn } from 'node:child_process';
@@ -11,17 +11,17 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
-const port = process.env.OPENPUBLISH_PORT ?? '18080';
-const dir = mkdtempSync(join(tmpdir(), 'openpublish-e2e-'));
+const port = process.env.FORGEPOST_PORT ?? '18080';
+const dir = mkdtempSync(join(tmpdir(), 'forgepost-e2e-'));
 const db = join(dir, 'e2e.db');
 
 const serveArgs = ['serve', '--database-url', `sqlite://${db}`, '--addr', `127.0.0.1:${port}`];
 
-const bin = process.env.OPENPUBLISH_BIN;
+const bin = process.env.FORGEPOST_BIN;
 const cmd = bin ?? 'cargo';
 const args = bin
 	? serveArgs
-	: ['run', '--quiet', '--manifest-path', join(repoRoot, 'Cargo.toml'), '--bin', 'openpublish', '--', ...serveArgs];
+	: ['run', '--quiet', '--manifest-path', join(repoRoot, 'Cargo.toml'), '--bin', 'forgepost', '--', ...serveArgs];
 
 const child = spawn(cmd, args, { stdio: 'inherit' });
 

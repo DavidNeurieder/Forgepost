@@ -1,6 +1,6 @@
 //! TLS system tests.
 //!
-//! Spawns the real `openpublish` binary over a real socket with
+//! Spawns the real `forgepost` binary over a real socket with
 //! bring-your-own certificates (`--tls-cert`/`--tls-key`), then verifies:
 //!   - HTTPS works with the self-signed cert trusted as a root,
 //!   - session cookies carry the `Secure` flag when TLS is active (and not
@@ -34,7 +34,7 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// A running `openpublish serve` process plus its scratch database.
+/// A running `forgepost serve` process plus its scratch database.
 struct Server {
     child: Child,
     _tmp: tempfile::TempDir,
@@ -73,7 +73,7 @@ fn start_server(
 ) -> Server {
     let tmp = tempfile::tempdir().expect("temp dir");
     let db_url = format!("sqlite://{}", tmp.path().join("tls.db").display());
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_openpublish"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_forgepost"));
     cmd.args([
         "serve",
         "--database-url",
@@ -90,7 +90,7 @@ fn start_server(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn openpublish serve");
+        .expect("spawn forgepost serve");
     let server = Server { child, _tmp: tmp };
     wait_ready(&client, &ready_url);
     server
@@ -119,7 +119,7 @@ fn make_cert() -> (String, String) {
     let mut params = CertificateParams::new(vec!["localhost".to_string()]).expect("params");
     params
         .distinguished_name
-        .push(DnType::CommonName, "openpublish tls test");
+        .push(DnType::CommonName, "forgepost tls test");
     params.subject_alt_names = vec![
         SanType::DnsName(Ia5String::try_from("localhost").expect("dns name")),
         SanType::IpAddress("127.0.0.1".parse().expect("ip")),
@@ -308,7 +308,7 @@ fn tls_cert_without_key_is_rejected() {
     let cert_path = tmp.path().join("cert.pem");
     std::fs::write(&cert_path, &cert_pem).expect("write cert");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_openpublish"))
+    let out = Command::new(env!("CARGO_BIN_EXE_forgepost"))
         .args([
             "serve",
             "--database-url",
@@ -335,7 +335,7 @@ fn tls_cert_without_key_is_rejected() {
     let (_, key_pem) = make_cert();
     let key_path = tmp.path().join("key.pem");
     std::fs::write(&key_path, &key_pem).expect("write key");
-    let out = Command::new(env!("CARGO_BIN_EXE_openpublish"))
+    let out = Command::new(env!("CARGO_BIN_EXE_forgepost"))
         .args([
             "serve",
             "--database-url",

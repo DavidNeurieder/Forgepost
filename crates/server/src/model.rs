@@ -1,7 +1,7 @@
 //! Server-side domain records (users, sessions, comments, documents).
 
-use openpublish_content::{BlockContent, BlockId, Document, VersionId};
-use openpublish_experiments::{ExperimentId, VariantId};
+use forgepost_content::{BlockContent, BlockId, Document, VersionId};
+use forgepost_experiments::{ExperimentId, VariantId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

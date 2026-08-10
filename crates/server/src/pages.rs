@@ -10,8 +10,8 @@ use askama::Template;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use openpublish_content::BlockKind;
-use openpublish_experiments::Recommendation;
+use forgepost_content::BlockKind;
+use forgepost_experiments::Recommendation;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -379,7 +379,7 @@ fn error_page(status: StatusCode, message: String) -> Response {
     let tpl = ErrorTemplate {
         authed: false,
         flash: String::new(),
-        site_name: "OpenPublish".into(),
+        site_name: "Forgepost".into(),
         theme: "system".into(),
         status: status.as_u16().to_string(),
         message,
@@ -1533,7 +1533,7 @@ pub(crate) async fn static_file(Path(name): Path<String>) -> Result<Response, Pa
 // ---------------------------------------------------------------------------
 
 /// Convert a document's blocks back into Markdown for the editor textarea.
-fn blocks_to_markdown(doc: &openpublish_content::Document) -> String {
+fn blocks_to_markdown(doc: &forgepost_content::Document) -> String {
     let mut parts = Vec::new();
     for b in &doc.blocks {
         let Some(c) = doc.current_content(b.id) else {

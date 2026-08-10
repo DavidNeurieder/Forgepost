@@ -1,8 +1,8 @@
-# OpenPublish
+# Forgepost
 
 Self-hosted block-level experimentation for creators.
 
-OpenPublish is a small blogging engine whose real product is the
+Forgepost is a small blogging engine whose real product is the
 **publish → measure → experiment → improve** loop. Every headline, paragraph,
 image, and call-to-action is a measurable, testable object. You write in
 Markdown, publish, watch where readers drop off, then A/B test alternative
@@ -26,7 +26,7 @@ Version **0.1.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
   automatic promotion of the winning variant.
 - **Solo mode** — one binary + embedded SQLite, Argon2 password hashing,
   session cookies, CSRF protection, rate-limited analytics API,
-  `openpublish export` for backups, and in-process HTTPS (Let's Encrypt
+  `forgepost export` for backups, and in-process HTTPS (Let's Encrypt
   auto-renewal or bring-your-own certificates).
 
 ## Project layout
@@ -56,25 +56,25 @@ used to drive the Playwright test suite.
 
 ## 1. Install the server binary
 
-Build from source (a release build of the single `openpublish` binary):
+Build from source (a release build of the single `forgepost` binary):
 
 ```sh
 git clone https://github.com/DavidNeurieder/my_blog.git
 cd my_blog
-cargo build --release --bin openpublish
+cargo build --release --bin forgepost
 ```
 
-The binary lands at `target/release/openpublish`. Verify it:
+The binary lands at `target/release/forgepost`. Verify it:
 
 ```sh
-./target/release/openpublish --help
+./target/release/forgepost --help
 ```
 
-> Optional: copy it somewhere on your `PATH` so you can run `openpublish`
+> Optional: copy it somewhere on your `PATH` so you can run `forgepost`
 > anywhere:
 >
 > ```sh
-> cp target/release/openpublish /usr/local/bin/
+> cp target/release/forgepost /usr/local/bin/
 > # or install directly:
 > cargo install --path crates/server
 > ```
@@ -82,12 +82,12 @@ The binary lands at `target/release/openpublish`. Verify it:
 ## 2. Start the server
 
 ```sh
-./target/release/openpublish serve
+./target/release/forgepost serve
 ```
 
 On first start this:
 
-1. creates `openpublish.db` in the current directory,
+1. creates `forgepost.db` in the current directory,
 2. runs the SQLite migrations (`migrations/0001 … 0004`),
 3. spawns the background experiment auto-decider,
 4. listens on `127.0.0.1:8080`.
@@ -95,10 +95,10 @@ On first start this:
 To use a different database file or port:
 
 ```sh
-./target/release/openpublish serve --database-url sqlite:///srv/openpublish/data.db --addr 0.0.0.0:8080
+./target/release/forgepost serve --database-url sqlite:///srv/forgepost/data.db --addr 0.0.0.0:8080
 ```
 
-Environment-variable equivalents: `DATABASE_URL` and `OPENPUBLISH_ADDR` (see
+Environment-variable equivalents: `DATABASE_URL` and `FORGEPOST_ADDR` (see
 the [Configuration](#configuration) table). Set `RUST_LOG=debug` for verbose
 logging.
 
@@ -123,7 +123,7 @@ certificates you supply or with automatic Let's Encrypt issuance and renewal.
 ### Automatic HTTPS (Let's Encrypt)
 
 ```sh
-./openpublish serve --tls-domain example.com --addr 0.0.0.0:443
+./forgepost serve --tls-domain example.com --addr 0.0.0.0:443
 ```
 
 The binary obtains and renews a certificate automatically (TLS-ALPN-01, so no
@@ -134,7 +134,7 @@ redirects to HTTPS. Redirect port and ACME cache directory are configurable
 ### Bring-your-own certificates
 
 ```sh
-./openpublish serve --tls-cert cert.pem --tls-key key.pem --addr 0.0.0.0:443
+./forgepost serve --tls-cert cert.pem --tls-key key.pem --addr 0.0.0.0:443
 ```
 
 The certificate is watched and reloaded on change, so renewed certs are picked
@@ -147,7 +147,7 @@ If you keep an existing nginx/Caddy as a TLS front (optional — the binary does
 not need it), run the server on loopback only:
 
 ```sh
-./openpublish serve --addr 127.0.0.1:8080
+./forgepost serve --addr 127.0.0.1:8080
 ```
 
 and proxy everything to it:
@@ -195,27 +195,27 @@ visitor who scrolled to the end of the article.
 
 ## Configuration
 
-The `openpublish` binary is configured with CLI flags or environment variables:
+The `forgepost` binary is configured with CLI flags or environment variables:
 
 | Flag / var | Default | Meaning |
 |---|---|---|
-| `--database-url` / `DATABASE_URL` | `sqlite://openpublish.db` | SQLite URL or file path |
-| `--addr` / `OPENPUBLISH_ADDR` | `127.0.0.1:8080` | Bind address (TLS listener when TLS is active) |
-| `--tls-domain` / `OPENPUBLISH_TLS_DOMAIN` | — | Enable automatic Let's Encrypt HTTPS for this domain |
-| `--tls-cert` / `OPENPUBLISH_TLS_CERT` | — | PEM certificate chain for bring-your-own HTTPS |
-| `--tls-key` / `OPENPUBLISH_TLS_KEY` | — | Matching PEM private key (must be given with `--tls-cert`) |
-| `--tls-cache-dir` / `OPENPUBLISH_TLS_CACHE_DIR` | `./tls` | ACME certificate cache directory |
-| `--http-redirect-port` / `OPENPUBLISH_HTTP_REDIRECT_PORT` | `80` | Port for the HTTP→HTTPS redirect listener |
+| `--database-url` / `DATABASE_URL` | `sqlite://forgepost.db` | SQLite URL or file path |
+| `--addr` / `FORGEPOST_ADDR` | `127.0.0.1:8080` | Bind address (TLS listener when TLS is active) |
+| `--tls-domain` / `FORGEPOST_TLS_DOMAIN` | — | Enable automatic Let's Encrypt HTTPS for this domain |
+| `--tls-cert` / `FORGEPOST_TLS_CERT` | — | PEM certificate chain for bring-your-own HTTPS |
+| `--tls-key` / `FORGEPOST_TLS_KEY` | — | Matching PEM private key (must be given with `--tls-cert`) |
+| `--tls-cache-dir` / `FORGEPOST_TLS_CACHE_DIR` | `./tls` | ACME certificate cache directory |
+| `--http-redirect-port` / `FORGEPOST_HTTP_REDIRECT_PORT` | `80` | Port for the HTTP→HTTPS redirect listener |
 | `--no-http-redirect` | off | Do not start the redirect listener under TLS |
-| `RUST_LOG` | `info` | Log verbosity, e.g. `debug`, `openpublish=debug` |
+| `RUST_LOG` | `info` | Log verbosity, e.g. `debug`, `forgepost=debug` |
 
 TLS precedence: `--tls-domain` > `--tls-cert`/`--tls-key` > plain HTTP.
 
 ### Export
 
 ```sh
-./target/release/openpublish export                 # dump JSON to stdout
-./target/release/openpublish export --output db.json
+./target/release/forgepost export                 # dump JSON to stdout
+./target/release/forgepost export --output db.json
 ```
 
 The export covers the full database, including experiments and their
@@ -241,17 +241,17 @@ sample-size concentration, no-winner/stop correctness, assignment honesty).
 `npm run test:e2e` drives a real headless browser through the full creator
 journey against the real binary: first-run setup, write + publish, read + comment
 as a visitor, moderation, analytics, an experiment lifecycle, and logout/login.
-Playwright spawns `openpublish` on a free port with a throwaway SQLite database
+Playwright spawns `forgepost` on a free port with a throwaway SQLite database
 (a fresh server every run), so no setup is needed beyond building the binary:
 
 ```sh
-cargo build --bin openpublish
+cargo build --bin forgepost
 cd e2e && npx playwright install chromium    # first time only
 cd e2e && npm run test:e2e
 ```
 
 To point Playwright at an already-built binary instead of compiling on the
-spot, set `OPENPUBLISH_BIN=/path/to/openpublish`. Specs live in `e2e/`.
+spot, set `FORGEPOST_BIN=/path/to/forgepost`. Specs live in `e2e/`.
 
 ## License
 

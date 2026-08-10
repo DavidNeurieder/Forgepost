@@ -1,6 +1,6 @@
 import { expect, test, type Browser } from '@playwright/test';
 
-// Full creator journey through the real UI against the real `openpublish`
+// Full creator journey through the real UI against the real `forgepost`
 // server: setup -> write/publish -> external read + comment -> moderation ->
 // analytics -> experiments -> logout/login. Runs serially because later steps
 // depend on earlier ones mutating shared state, and shares the owner session

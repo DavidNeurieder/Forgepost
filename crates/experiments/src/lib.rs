@@ -10,7 +10,7 @@
 //! use a sequential testing correction: the confidence threshold is tightened
 //! by the number of interim looks taken so far (spending-bound adjusted).
 
-use openpublish_content::{BlockId, DocumentId, VersionId};
+use forgepost_content::{BlockId, DocumentId, VersionId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;

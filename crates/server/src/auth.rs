@@ -9,7 +9,7 @@ use axum::{
     extract::FromRequestParts,
     http::{HeaderMap, HeaderValue, header, request::Parts},
 };
-use openpublish_content::now_ms;
+use forgepost_content::now_ms;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -17,7 +17,7 @@ use crate::AppState;
 use crate::error::ApiError;
 use crate::model::{Session, User};
 
-pub const SESSION_COOKIE: &str = "openpublish_session";
+pub const SESSION_COOKIE: &str = "forgepost_session";
 pub const CSRF_HEADER: &str = "x-csrf-token";
 pub const SESSION_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
 

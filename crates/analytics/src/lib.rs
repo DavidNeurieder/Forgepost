@@ -6,7 +6,7 @@
 //! per-block aggregations land in M2.
 
 use async_trait::async_trait;
-use openpublish_content::{BlockId, DocumentId};
+use forgepost_content::{BlockId, DocumentId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

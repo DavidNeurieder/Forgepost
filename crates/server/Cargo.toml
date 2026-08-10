@@ -1,12 +1,12 @@
 [package]
-name = "openpublish-server"
+name = "forgepost-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "OpenPublish server: Axum API + core engine"
+description = "Forgepost server: Axum API + core engine"
 
 [[bin]]
-name = "openpublish"
+name = "forgepost"
 path = "src/main.rs"
 
 [dependencies]
@@ -20,9 +20,9 @@ clap = { workspace = true }
 futures = "0.3"
 hex = { workspace = true }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
-openpublish-analytics = { path = "../analytics" }
-openpublish-content = { path = "../content" }
-openpublish-experiments = { path = "../experiments" }
+forgepost-analytics = { path = "../analytics" }
+forgepost-content = { path = "../content" }
+forgepost-experiments = { path = "../experiments" }
 password-hash = { workspace = true }
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
 rustls-acme = { version = "0.15", features = ["axum"] }

@@ -1,13 +1,13 @@
 //! M3: experiment decision engine wiring.
 //!
 //! Turns stored sample counts into a live Bayesian report (via the pure
-//! `openpublish-experiments` engine) and applies decisions: promote the winner
+//! `forgepost-experiments` engine) and applies decisions: promote the winner
 //! by repointing the block to the winning immutable version, or conclude
 //! "no improvement". Shared by the background auto-decider and the admin
 //! routes.
 
-use openpublish_content::now_ms;
-use openpublish_experiments::{
+use forgepost_content::now_ms;
+use forgepost_experiments::{
     EngineConfig, ExperimentReport, Recommendation, VariantStats, analyze,
 };
 use serde::{Deserialize, Serialize};

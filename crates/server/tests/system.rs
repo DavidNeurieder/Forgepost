@@ -1,11 +1,11 @@
 //! Full system tests.
 //!
 //! Unlike `api.rs` (which drives the router in-process), these tests spawn the
-//! real `openpublish` binary over a real TCP socket against a real on-disk
+//! real `forgepost` binary over a real TCP socket against a real on-disk
 //! SQLite database and walk through the entire creator journey: first-run
 //! setup, writing and publishing, reading the blog externally, RSS, analytics,
 //! comment moderation, block experiments (assign / measure / promote), logout,
-//! and backup via `openpublish export`.
+//! and backup via `forgepost export`.
 //!
 //! Each test picks a free port and a throwaway temp directory, so tests run in
 //! parallel with the rest of the workspace without interference.
@@ -36,7 +36,7 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// A running `openpublish serve` process plus its scratch database.
+/// A running `forgepost serve` process plus its scratch database.
 struct Server {
     child: Child,
     _tmp: tempfile::TempDir,
@@ -71,7 +71,7 @@ fn start_server() -> Server {
     let db_url = format!("sqlite://{}", db_path.display());
     let port = free_port();
     let base = format!("http://127.0.0.1:{port}");
-    let child = Command::new(env!("CARGO_BIN_EXE_openpublish"))
+    let child = Command::new(env!("CARGO_BIN_EXE_forgepost"))
         .args([
             "serve",
             "--database-url",
@@ -82,7 +82,7 @@ fn start_server() -> Server {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn openpublish serve");
+        .expect("spawn forgepost serve");
     let server = Server {
         child,
         _tmp: tmp,
@@ -246,16 +246,16 @@ impl Visitor {
     }
 }
 
-/// Run `openpublish export` against a database file and return the parsed JSON.
+/// Run `forgepost export` against a database file and return the parsed JSON.
 fn export_database(db_path: &Path) -> Value {
-    let out = Command::new(env!("CARGO_BIN_EXE_openpublish"))
+    let out = Command::new(env!("CARGO_BIN_EXE_forgepost"))
         .args([
             "export",
             "--database-url",
             &format!("sqlite://{}", db_path.display()),
         ])
         .output()
-        .expect("openpublish export runs");
+        .expect("forgepost export runs");
     assert!(
         out.status.success(),
         "export failed: {}",
@@ -709,7 +709,7 @@ fn fresh_setup_locks_and_second_serve_skips_setup() {
     let port = free_port();
     let base2 = format!("http://127.0.0.1:{port}");
     let db_url = format!("sqlite://{}", server.db_path.display());
-    let mut child = Command::new(env!("CARGO_BIN_EXE_openpublish"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_forgepost"))
         .args([
             "serve",
             "--database-url",

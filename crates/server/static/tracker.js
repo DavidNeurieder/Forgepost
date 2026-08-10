@@ -187,5 +187,5 @@
 		};
 	}
 
-	window.OpenPublishTracker = { trackArticle: trackArticle };
+	window.ForgepostTracker = { trackArticle: trackArticle };
 })();

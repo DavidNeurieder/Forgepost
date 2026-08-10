@@ -35,9 +35,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
-      - run: cargo build --bin openpublish
+      - run: cargo build --bin forgepost
         working-directory: ..
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
         env:
-          OPENPUBLISH_BIN: ../target/debug/openpublish
+          FORGEPOST_BIN: ../target/debug/forgepost

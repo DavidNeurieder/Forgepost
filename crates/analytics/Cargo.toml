@@ -1,5 +1,5 @@
 [package]
-name = "openpublish-analytics"
+name = "forgepost-analytics"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ description = "Event collection and per-block metrics"
 
 [dependencies]
 async-trait = { workspace = true }
-openpublish-content = { path = "../content" }
+forgepost-content = { path = "../content" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -1,12 +1,12 @@
 [package]
-name = "openpublish-experiments"
+name = "forgepost-experiments"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "A/B experiment overlay engine (Bayesian + sequential)"
 
 [dependencies]
-openpublish-content = { path = "../content" }
+forgepost-content = { path = "../content" }
 serde = { workspace = true }
 sha2 = { workspace = true }
 uuid = { workspace = true }

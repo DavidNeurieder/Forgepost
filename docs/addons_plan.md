@@ -61,7 +61,7 @@ their own server); no sandboxing beyond path validation is required.
 ## 3. Architecture
 
 ```
-openpublish serve
+forgepost serve
 ├── /static/themes/{name}.css   GET  theme CSS (built-in or add-on) [new]
 ├── /                            home page (runtime-rendered) [changed]
 ├── /admin/settings              theme + home layout selects [changed]
@@ -226,7 +226,7 @@ down.
 `crates/server/src/main.rs`: `ServeArgs` gains
 
 ```
---addons-dir <PATH>   default ./addons   (env OPENPUBLISH_ADDONS_DIR)
+--addons-dir <PATH>   default ./addons   (env FORGEPOST_ADDONS_DIR)
 ```
 
 ## 8. Settings UI

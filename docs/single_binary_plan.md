@@ -19,9 +19,9 @@ The current setup serves the app as **two stacked applications**:
   serves the Rust copy, so the SvelteKit reader page is dead weight.
 
 This contradicts the plan's own promise of "solo = downloaded binary,
-`./openpublish serve` handles everything" (`docs/mvp_plan_v6.md` §5.3).
+`./forgepost serve` handles everything" (`docs/mvp_plan_v6.md` §5.3).
 
-**Goal:** `./openpublish serve` serves the public blog, admin dashboard,
+**Goal:** `./forgepost serve` serves the public blog, admin dashboard,
 setup/login, JSON API, RSS, static assets, and (optionally) HTTPS — one process,
 no nginx, no npm, no config files. The JSON `/api/*` surface is preserved: the
 engine must stay reachable headless (`docs/mvp_plan_v6.md` §5.4).
@@ -50,7 +50,7 @@ engine must stay reachable headless (`docs/mvp_plan_v6.md` §5.4).
 ## 3. Architecture
 
 ```
-openpublish serve
+forgepost serve
 ├── /api/*           JSON (unchanged, headless contract)
 ├── /                home page (redirects to /setup when no owner)
 ├── /setup           setup wizard (GET form / POST action)
@@ -133,7 +133,7 @@ Note: install the crypto provider once via
 
 - `GET /articles/{slug}` renders a full HTML page:
   - Header/brand/nav from `base.html`.
-  - Article HTML from `openpublish_content::render_html`, preserving the
+  - Article HTML from `forgepost_content::render_html`, preserving the
     experiment-variant overlay and the `data-block-id` / `data-experiment-id` /
     `data-variant-id` attributes the tracker depends on.
   - Approved comments + comment form.
@@ -148,9 +148,9 @@ Note: install the crypto provider once via
 ## 9. Phase 5 — TLS (tiers 1 + 2)
 
 - CLI/env args on `serve`:
-  - `--tls-domain example.com` / `OPENPUBLISH_TLS_DOMAIN` (tier 2).
-  - `--tls-cert path` + `--tls-key path` / `OPENPUBLISH_TLS_CERT` /
-    `OPENPUBLISH_TLS_KEY` (tier 1).
+  - `--tls-domain example.com` / `FORGEPOST_TLS_DOMAIN` (tier 2).
+  - `--tls-cert path` + `--tls-key path` / `FORGEPOST_TLS_CERT` /
+    `FORGEPOST_TLS_KEY` (tier 1).
   - `--tls-cache-dir path` (default `./tls`, tier 2 ACME cache).
   - `--no-http-redirect` (skip the `:80` → HTTPS redirect listener).
   - Precedence: `--tls-domain` > `--tls-cert/--tls-key` > plain HTTP.
@@ -161,7 +161,7 @@ Note: install the crypto provider once via
 - When TLS is active:
   - `--addr` binds the TLS listener; optionally spawn a second `:80` listener that
     301s to `https://{host}` (opt out via `--no-http-redirect`).
-  - Add `Secure` to `openpublish_session` and `opv` cookies (thread a
+  - Add `Secure` to `forgepost_session` and `opv` cookies (thread a
     `tls_active` flag into the cookie builders; `SameSite=Lax` already set).
 
 ## 10. Phase 6 — Tests
@@ -201,14 +201,14 @@ cargo build --release
 cargo run -- serve
 
 # prod — automatic HTTPS (Let's Encrypt, auto-renew)
-./openpublish serve --tls-domain example.com --addr 0.0.0.0:443
+./forgepost serve --tls-domain example.com --addr 0.0.0.0:443
 
 # prod — bring-your-own certs
-./openpublish serve --tls-cert cert.pem --tls-key key.pem --addr 0.0.0.0:443
+./forgepost serve --tls-cert cert.pem --tls-key key.pem --addr 0.0.0.0:443
 ```
 
 One file, one process, auto-renewing HTTPS, no nginx, no npm. The SQLite DB is
-created/migrated on first boot (`--database-url`, default `sqlite://openpublish.db`).
+created/migrated on first boot (`--database-url`, default `sqlite://forgepost.db`).
 
 ## 13. What stays identical
 

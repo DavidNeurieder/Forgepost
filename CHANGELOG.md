@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to OpenPublish are documented here.
+All notable changes to Forgepost are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
@@ -47,7 +47,7 @@ solo-mode single binary.
   live preview.
 - Documents with tags, publish/unpublish, public article rendering, comments
   with moderation, and an RSS feed.
-- `openpublish export` for JSON backups of the full database.
+- `forgepost export` for JSON backups of the full database.
 - AGPL-3.0 license and workspace scaffolding.
 
 **M2 — Per-block analytics**
@@ -61,7 +61,7 @@ solo-mode single binary.
 
 **M3 — Block experiments**
 
-- `openpublish-experiments` crate: a pure Bayesian engine with exact
+- `forgepost-experiments` crate: a pure Bayesian engine with exact
   `P(beats control)` (beta posteriors), equal-tailed credible intervals, a
   spending-bound-corrected sequential-test confidence threshold, a no-winner
   stopping rule, and a control-bias-free traffic-split assignment.

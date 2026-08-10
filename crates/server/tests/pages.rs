@@ -8,8 +8,8 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, Response, StatusCode, header};
 use http_body_util::BodyExt;
-use openpublish_server::app;
-use openpublish_server::repository::SqliteRepository;
+use forgepost_server::app;
+use forgepost_server::repository::SqliteRepository;
 use serde_json::Value;
 use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::Arc;
@@ -579,7 +579,7 @@ async fn article_page_renders_html_tracker_and_visitor_cookie() {
         "<link rel=\"canonical\" href=\"http://localhost/articles/hello-world\">"
     ));
     assert!(html.contains("<meta property=\"og:type\" content=\"article\">"));
-    assert!(html.contains("<meta property=\"og:site_name\" content=\"OpenPublish\">"));
+    assert!(html.contains("<meta property=\"og:site_name\" content=\"Forgepost\">"));
     assert!(html.contains("<meta property=\"og:title\" content=\"Hello World\">"));
     assert!(html.contains(
         "<meta property=\"og:url\" content=\"http://localhost/articles/hello-world\">"
@@ -887,13 +887,13 @@ async fn settings_page_shows_current_values_and_default_theme() {
     assert!(html.contains("id=\"tagline\""));
     assert!(html.contains("System (auto)"));
     assert!(html.contains("data-theme=\"system\""));
-    assert!(html.contains("value=\"OpenPublish\""));
+    assert!(html.contains("value=\"Forgepost\""));
     assert!(html.contains("canonical links, Open Graph, sitemap, robots, and RSS"));
 
     // Defaults also show up on the anonymous pages.
     let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;
     let html = body_text(resp).await;
-    assert!(html.contains("<h1>OpenPublish</h1>"));
+    assert!(html.contains("<h1>Forgepost</h1>"));
     assert!(html.contains("data-theme=\"system\""));
 }
 
@@ -1054,6 +1054,6 @@ async fn settings_form_validates_input() {
     // Nothing was persisted.
     let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;
     let html = body_text(resp).await;
-    assert!(html.contains("<h1>OpenPublish</h1>"));
+    assert!(html.contains("<h1>Forgepost</h1>"));
     assert!(html.contains("data-theme=\"system\""));
 }

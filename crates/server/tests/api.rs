@@ -6,9 +6,9 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, Response, StatusCode, header};
 use http_body_util::BodyExt;
-use openpublish_experiments::assign_variant;
-use openpublish_server::app;
-use openpublish_server::repository::SqliteRepository;
+use forgepost_experiments::assign_variant;
+use forgepost_server::app;
+use forgepost_server::repository::SqliteRepository;
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use std::str::FromStr;
@@ -114,7 +114,7 @@ async fn setup_creates_owner_session_and_locks_setup() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let cookie = session_cookie(&resp);
-    assert!(cookie.starts_with("openpublish_session="));
+    assert!(cookie.starts_with("forgepost_session="));
     let body = body_json(resp).await;
     assert_eq!(body["user"]["email"], "a@b.com");
     assert_eq!(body["user"]["role"], "owner");
@@ -1475,8 +1475,8 @@ async fn analytics_multi_visitor_dropoff() {
 
 #[tokio::test]
 async fn analytics_events_are_rate_limited() {
-    use openpublish_server::analytics::RateLimiter;
-    use openpublish_server::app_with;
+    use forgepost_server::analytics::RateLimiter;
+    use forgepost_server::app_with;
 
     let pool = pool().await;
     let repo = SqliteRepository::from_pool(pool);

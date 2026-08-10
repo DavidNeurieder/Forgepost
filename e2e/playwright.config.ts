@@ -23,9 +23,9 @@ function freePort(): number {
 	return port;
 }
 
-const lockFile = join(tmpdir(), 'openpublish-e2e-port.json');
+const lockFile = join(tmpdir(), 'forgepost-e2e-port.json');
 
-// The whole app (pages + JSON API) is served by one `openpublish` process now,
+// The whole app (pages + JSON API) is served by one `forgepost` process now,
 // so there is a single port. Playwright loads this config once to start the
 // webServer and again in each worker process; allocate once and reuse so the
 // baseURL matches the running server.
@@ -61,7 +61,7 @@ export default defineConfig({
 		command: 'node start-backend.mjs',
 		url: `http://127.0.0.1:${port}/health`,
 		reuseExistingServer: !process.env.CI,
-		env: { OPENPUBLISH_PORT: String(port) }
+		env: { FORGEPOST_PORT: String(port) }
 	},
 	projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }]
 });
