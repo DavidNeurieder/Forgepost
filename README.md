@@ -40,7 +40,7 @@ crates/server/templates   Askama templates (all pages server-rendered)
 crates/server/static      app.css, favicon, tracker.js (embedded in the binary)
 e2e                 Playwright end-to-end suite against the built binary
 migrations          SQLite schema (0001 … 0004)
-docs                MVP plan and milestones
+docs                Website (GitHub Pages, static)
 ```
 
 The whole app — public blog, admin dashboard, JSON API, RSS, static assets, and
@@ -258,5 +258,5 @@ spot, set `FORGEPOST_BIN=/path/to/forgepost`. Specs live in `e2e/`.
 AGPL-3.0-only. See [LICENSE](LICENSE).
 
 See [CHANGELOG.md](CHANGELOG.md) for release history and
-[docs/mvp_plan_v6.md](docs/mvp_plan_v6.md) for the product plan and the
+[old_docs/mvp_plan_v6.md](old_docs/mvp_plan_v6.md) for the product plan and the
 pivot/persevere gates.
