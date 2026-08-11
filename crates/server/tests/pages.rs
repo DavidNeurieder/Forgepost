@@ -7,9 +7,9 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, Response, StatusCode, header};
-use http_body_util::BodyExt;
 use forgepost_server::app;
 use forgepost_server::repository::SqliteRepository;
+use http_body_util::BodyExt;
 use serde_json::Value;
 use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::Arc;
@@ -572,18 +572,18 @@ async fn article_page_renders_html_tracker_and_visitor_cookie() {
     // SEO head: canonical, meta description, Open Graph/Twitter, JSON-LD,
     // and no `noindex` (it is replaced by the article head_meta block).
     assert!(!html.contains("<meta name=\"robots\" content=\"noindex\">"));
-    assert!(html.contains(
-        "<meta name=\"description\" content=\"First paragraph.\">"
-    ));
-    assert!(html.contains(
-        "<link rel=\"canonical\" href=\"http://localhost/articles/hello-world\">"
-    ));
+    assert!(html.contains("<meta name=\"description\" content=\"First paragraph.\">"));
+    assert!(
+        html.contains("<link rel=\"canonical\" href=\"http://localhost/articles/hello-world\">")
+    );
     assert!(html.contains("<meta property=\"og:type\" content=\"article\">"));
     assert!(html.contains("<meta property=\"og:site_name\" content=\"Forgepost\">"));
     assert!(html.contains("<meta property=\"og:title\" content=\"Hello World\">"));
-    assert!(html.contains(
-        "<meta property=\"og:url\" content=\"http://localhost/articles/hello-world\">"
-    ));
+    assert!(
+        html.contains(
+            "<meta property=\"og:url\" content=\"http://localhost/articles/hello-world\">"
+        )
+    );
     assert!(html.contains("<meta name=\"twitter:card\" content=\"summary\">"));
     assert!(html.contains("application/ld+json"));
     assert!(html.contains("\"@type\": \"BlogPosting\""));
@@ -931,7 +931,6 @@ async fn settings_form_updates_name_and_theme() {
             Method::GET,
             "/admin/settings?flash=settings_saved",
             Some(&cookie),
-
             None,
         ),
     )
@@ -949,15 +948,9 @@ async fn settings_form_updates_name_and_theme() {
     let html = body_text(resp).await;
     assert!(html.contains("<h1>My Journal</h1>"));
     assert!(html.contains("data-theme=\"sepia\""));
-    assert!(html.contains(
-        "<meta name=\"description\" content=\"Notes on software.\">"
-    ));
-    assert!(html.contains(
-        "<link rel=\"canonical\" href=\"https://journal.example.com\">"
-    ));
-    assert!(html.contains(
-        "<meta property=\"og:site_name\" content=\"My Journal\">"
-    ));
+    assert!(html.contains("<meta name=\"description\" content=\"Notes on software.\">"));
+    assert!(html.contains("<link rel=\"canonical\" href=\"https://journal.example.com\">"));
+    assert!(html.contains("<meta property=\"og:site_name\" content=\"My Journal\">"));
 
     let (_, resp) = send(&app, req(Method::GET, "/rss", None, None)).await;
     let body = body_text(resp).await;
@@ -967,9 +960,11 @@ async fn settings_form_updates_name_and_theme() {
 
     // The configured URL also drives robots.txt and the sitemap.
     let (_, resp) = send(&app, req(Method::GET, "/robots.txt", None, None)).await;
-    assert!(body_text(resp)
-        .await
-        .contains("Sitemap: https://journal.example.com/sitemap.xml"));
+    assert!(
+        body_text(resp)
+            .await
+            .contains("Sitemap: https://journal.example.com/sitemap.xml")
+    );
 }
 
 #[tokio::test]
@@ -1026,9 +1021,7 @@ async fn settings_form_validates_input() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let html = body_text(resp).await;
-    assert!(html.contains(
-        "Site URL must start with http:// or https://."
-    ));
+    assert!(html.contains("Site URL must start with http:// or https://."));
 
     // Oversized tagline.
     let (status, resp) = send(

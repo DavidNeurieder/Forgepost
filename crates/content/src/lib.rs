@@ -114,6 +114,21 @@ impl Document {
         let block = self.block(id)?;
         self.version(block.version_id).map(|v| &v.content)
     }
+
+    /// Searchable plain text of the current block tree, in document order.
+    /// Empty for image/divider blocks without alt text; used by full-text search.
+    pub fn searchable_text(&self) -> String {
+        let mut parts = Vec::with_capacity(self.blocks.len());
+        for block in &self.blocks {
+            if let Some(content) = self.current_content(block.id) {
+                let text = markdown::block_search_text(&block.kind, content);
+                if !text.trim().is_empty() {
+                    parts.push(text);
+                }
+            }
+        }
+        parts.join("\n")
+    }
 }
 
 pub fn now_ms() -> i64 {
@@ -174,5 +189,56 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         let html = render_html(blocks.iter().map(|b| (b.kind, &b.content)));
         assert!(html.contains("<h1>Title</h1>"));
+    }
+
+    #[test]
+    fn searchable_text_joins_current_block_text() {
+        let mut doc = Document::empty("Searchable");
+        let add = |doc: &mut Document, kind: BlockKind, content: serde_json::Value| {
+            let id = BlockId::new_v4();
+            let version = BlockVersion {
+                id: VersionId::new_v4(),
+                block_id: id,
+                content,
+                created_at_ms: 0,
+            };
+            doc.blocks.push(Block {
+                id,
+                kind,
+                version_id: version.id,
+                position: doc.blocks.len() as i64,
+                created_at_ms: 0,
+                updated_at_ms: 0,
+            });
+            doc.versions.push(version);
+        };
+        add(
+            &mut doc,
+            BlockKind::Heading { level: 1 },
+            serde_json::json!({ "text": "A heading" }),
+        );
+        add(
+            &mut doc,
+            BlockKind::Paragraph,
+            serde_json::json!({ "text": "Body text" }),
+        );
+        add(
+            &mut doc,
+            BlockKind::Code,
+            serde_json::json!({ "language": "rust", "code": "fn main() {}" }),
+        );
+        add(
+            &mut doc,
+            BlockKind::Image,
+            serde_json::json!({ "src": "/img.png", "alt": "diagram alt" }),
+        );
+        add(&mut doc, BlockKind::Divider, serde_json::json!({}));
+
+        let text = doc.searchable_text();
+        assert!(text.contains("A heading"));
+        assert!(text.contains("Body text"));
+        assert!(text.contains("fn main() {}"));
+        assert!(text.contains("diagram alt"));
+        assert_eq!(text.matches("fn main() {}").count(), 1);
     }
 }

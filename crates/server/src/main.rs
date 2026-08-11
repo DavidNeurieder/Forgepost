@@ -130,6 +130,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let repo = SqliteRepository::connect(&args.database_url).await?;
     repo.migrate().await?;
     tracing::info!(database_url = %args.database_url, "database ready");
+    forgepost_server::repository::backfill_search_index(&repo).await?;
 
     let repo = Arc::new(repo);
     spawn_auto_decider(repo.clone());

@@ -223,6 +223,28 @@ pub fn render_html<'a>(blocks: impl IntoIterator<Item = (BlockKind, &'a BlockCon
     out
 }
 
+/// The plain text that a block contributes to search indexing. Mirrors
+/// `render_html` so the searchable text always matches what is displayed.
+pub fn block_search_text(kind: &BlockKind, content: &BlockContent) -> String {
+    match kind {
+        BlockKind::Heading { .. }
+        | BlockKind::Paragraph
+        | BlockKind::Quote
+        | BlockKind::CallToAction => text_of(content),
+        BlockKind::Code => content
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        BlockKind::Image => content
+            .get("alt")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        BlockKind::Divider => String::new(),
+    }
+}
+
 fn text_of(content: &BlockContent) -> String {
     content
         .get("text")

@@ -103,6 +103,23 @@ test('external readers can view the article and leave a comment', async ({ brows
 	await context.close();
 });
 
+test('readers can search and open a result', async ({ browser }) => {
+	expect(slug).not.toBe('');
+	const context = await browser.newContext();
+	const page = await context.newPage();
+
+	await page.goto('/');
+	await page.getByRole('searchbox', { name: 'Search posts' }).fill('paragraph');
+	await page.getByRole('searchbox', { name: 'Search posts' }).press('Enter');
+	await expect(page).toHaveURL(/\/search\?q=paragraph/);
+	await expect(page.getByRole('link', { name: TITLE })).toBeVisible();
+	await expect(page.locator('.search-hit .snippet')).toContainText('first paragraph');
+
+	await page.getByRole('link', { name: TITLE }).click();
+	await expect(page.locator('h1').first()).toHaveText(TITLE);
+	await context.close();
+});
+
 test('the owner approves the comment', async ({ browser }) => {
 	const page = await adminPage(browser);
 	await gotoDashboard(page);

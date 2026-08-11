@@ -5,10 +5,10 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, Response, StatusCode, header};
-use http_body_util::BodyExt;
 use forgepost_experiments::assign_variant;
 use forgepost_server::app;
 use forgepost_server::repository::SqliteRepository;
+use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use std::str::FromStr;
@@ -700,7 +700,11 @@ async fn rss_lists_published_articles_only() {
     assert!(robots.contains("User-agent: *"));
     assert!(robots.contains("Sitemap: http://localhost/sitemap.xml"));
 
-    let (status, resp) = send(&app, json_req(Method::GET, "/sitemap.xml", None, None, None)).await;
+    let (status, resp) = send(
+        &app,
+        json_req(Method::GET, "/sitemap.xml", None, None, None),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let bytes = resp.into_body().collect().await.expect("body").to_bytes();
     let sitemap = String::from_utf8(bytes.to_vec()).unwrap();

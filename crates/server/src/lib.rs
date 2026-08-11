@@ -57,6 +57,7 @@ fn app_with_config(
     Router::new()
         // Server-rendered pages (the whole blog UI lives in the binary now).
         .route("/", get(pages::home_page))
+        .route("/search", get(pages::search_page))
         .route("/setup", get(pages::setup_page).post(pages::setup_form))
         .route("/login", get(pages::login_page).post(pages::login_form))
         .route("/logout", post(pages::logout_form))

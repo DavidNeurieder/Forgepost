@@ -1,0 +1,10 @@
+[Unit]
+Description=Forgepost nightly database export
+Documentation=https://github.com/DavidNeurieder/my_blog
+
+[Service]
+Type=oneshot
+User=forgepost
+Group=forgepost
+WorkingDirectory=/var/lib/forgepost
+ExecStart=/usr/local/sbin/forgepost-backup.sh

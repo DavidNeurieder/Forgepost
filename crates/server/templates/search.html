@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Search · {{ site_name }}{% endblock %}
+{% block head_meta %}
+<meta name="description" content="{{ seo.description }}">
+<meta name="robots" content="noindex, follow">
+{% endblock %}
+{% block content %}
+<h1>Search</h1>
+{% if query.is_empty() %}
+<p class="muted">Type a query above to search published posts.</p>
+{% else if results.is_empty() %}
+<p class="muted">No posts match “{{ query }}”.</p>
+{% else %}
+<p class="muted">{{ results.len() }} result{% if results.len() != 1 %}s{% endif %} for “{{ query }}”.</p>
+<ul class="search-results">
+{% for r in results %}
+  <li class="search-hit">
+    <a class="title" href="/articles/{{ r.slug }}">{{ r.title }}</a>
+    <div class="muted">{{ r.date }}</div>
+    {% if !r.tags.is_empty() %}<p>{% for t in r.tags %}<span class="badge">{{ t }}</span> {% endfor %}</p>{% endif %}
+    <p class="snippet">{{ r.snippet|safe }}</p>
+  </li>
+{% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

@@ -10,7 +10,8 @@ use crate::model::{
 };
 use async_trait::async_trait;
 use forgepost_content::{
-    Block, BlockContent, BlockId, BlockKind, BlockVersion, Document, DocumentId, VersionId, now_ms,
+    Block, BlockContent, BlockId, BlockKind, BlockVersion, Document, DocumentId, VersionId,
+    html_escape, now_ms,
 };
 use forgepost_experiments::{ExperimentId, VariantId};
 use serde_json::json;
@@ -183,6 +184,20 @@ pub trait Repository: Send + Sync {
         id: forgepost_experiments::ExperimentId,
         variant_id: forgepost_experiments::VariantId,
     ) -> Result<bool, RepositoryError>;
+
+    // Full-text search (M5)
+    /// Search published documents, ranked by BM25. `query` is a plain string;
+    /// the last token is treated as a prefix (as-you-type matching).
+    async fn search_documents(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<crate::model::SearchHit>, RepositoryError>;
+    /// Re-index a single document (published only; drafts drop out of search).
+    /// Safe to call any time; no-ops for missing documents.
+    async fn refresh_search_index(&self, document_id: DocumentId) -> Result<(), RepositoryError>;
+    /// Rebuild the index from scratch for every published document.
+    async fn rebuild_search_index_all(&self) -> Result<(), RepositoryError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -360,7 +375,12 @@ impl Repository for SqliteRepository {
             .unwrap_or_else(|| "system".into());
         let url = self.get_setting("site.url").await?.unwrap_or_default();
         let tagline = self.get_setting("site.tagline").await?.unwrap_or_default();
-        Ok(SiteSettings { name, theme, url, tagline })
+        Ok(SiteSettings {
+            name,
+            theme,
+            url,
+            tagline,
+        })
     }
 
     async fn create_first_user(
@@ -642,6 +662,7 @@ impl Repository for SqliteRepository {
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
+        self.refresh_search_index(id).await?;
         Ok(())
     }
 
@@ -735,6 +756,7 @@ impl Repository for SqliteRepository {
             .await?;
         }
         tx.commit().await?;
+        self.refresh_search_index(id).await?;
         Ok(())
     }
 
@@ -745,6 +767,7 @@ impl Repository for SqliteRepository {
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
+        self.refresh_search_index(id).await?;
         Ok(())
     }
 
@@ -780,6 +803,7 @@ impl Repository for SqliteRepository {
                 .await?;
         }
         tx.commit().await?;
+        self.refresh_search_index(id).await?;
         Ok(())
     }
 
@@ -1355,6 +1379,17 @@ impl Repository for SqliteRepository {
         .bind(block_id.to_string())
         .execute(&self.pool)
         .await?;
+        // Promotion changes the canonical content, so the search index follows.
+        let row = sqlx::query("SELECT document_id FROM blocks WHERE id = ?")
+            .bind(block_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        if let Some(row) = row {
+            let document_id: String = row.get("document_id");
+            if let Ok(id) = Uuid::from_str(&document_id) {
+                self.refresh_search_index(id).await?;
+            }
+        }
         Ok(())
     }
 
@@ -1488,6 +1523,241 @@ impl Repository for SqliteRepository {
         .await?;
         Ok(row.is_some())
     }
+
+    // Full-text search (M5)
+
+    async fn search_documents(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<crate::model::SearchHit>, RepositoryError> {
+        let match_expr = fts_match_expr(query);
+        if match_expr.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT d.id AS document_id, d.slug, d.title, d.published_at_ms,
+                    (SELECT group_concat(t.slug, ',') FROM document_tags dt
+                       JOIN tags t ON t.id = dt.tag_id
+                      WHERE dt.document_id = d.id) AS tag_csv,
+                    snippet(document_search, 2, '<mark>', '</mark>', '…', 30) AS snippet
+             FROM document_search
+             JOIN search_rows r ON r.fts_rowid = document_search.rowid
+             JOIN documents d ON d.id = r.document_id
+             WHERE document_search MATCH ?
+               AND d.status = 'published'
+               AND d.deleted_at_ms IS NULL
+             ORDER BY bm25(document_search, 6.0, 1.0, 2.0)
+             LIMIT ?",
+        )
+        .bind(match_expr)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| crate::model::SearchHit {
+                document_id: Uuid::from_str(&r.get::<String, _>("document_id")).unwrap_or_default(),
+                slug: r.get("slug"),
+                title: r.get("title"),
+                published_at_ms: r.get("published_at_ms"),
+                tags: r
+                    .get::<Option<String>, _>("tag_csv")
+                    .map(|csv| csv.split(',').map(|s| s.to_string()).collect())
+                    .unwrap_or_default(),
+                snippet: r
+                    .get::<Option<String>, _>("snippet")
+                    .map(|s| escape_snippet(&s))
+                    .unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    async fn refresh_search_index(&self, document_id: DocumentId) -> Result<(), RepositoryError> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query("SELECT title, status, deleted_at_ms FROM documents WHERE id = ?")
+            .bind(document_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(row) = row else {
+            tx.commit().await?;
+            return Ok(());
+        };
+        let title: String = row.get("title");
+        let status: String = row.get("status");
+        let deleted_at_ms: Option<i64> = row.get("deleted_at_ms");
+        remove_search_row(&mut tx, document_id).await?;
+        if status != "published" || deleted_at_ms.is_some() {
+            tx.commit().await?;
+            return Ok(());
+        }
+
+        let block_rows = sqlx::query(
+            "SELECT b.kind, v.content_json
+             FROM blocks b JOIN block_versions v ON v.id = b.current_version_id
+             WHERE b.document_id = ? AND b.position >= 0 ORDER BY b.position",
+        )
+        .bind(document_id.to_string())
+        .fetch_all(&mut *tx)
+        .await?;
+        let body = block_rows
+            .iter()
+            .filter_map(|r| {
+                let kind: BlockKind = serde_json::from_str(&r.get::<String, _>("kind"))
+                    .unwrap_or(BlockKind::Paragraph);
+                let content: BlockContent =
+                    serde_json::from_str(&r.get::<String, _>("content_json"))
+                        .unwrap_or(serde_json::Value::Null);
+                let text = forgepost_content::markdown::block_search_text(&kind, &content);
+                (!text.trim().is_empty()).then_some(text)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let tag_rows = sqlx::query(
+            "SELECT t.slug FROM tags t JOIN document_tags dt ON dt.tag_id = t.id
+             WHERE dt.document_id = ? ORDER BY t.slug",
+        )
+        .bind(document_id.to_string())
+        .fetch_all(&mut *tx)
+        .await?;
+        let tags = tag_rows
+            .iter()
+            .map(|r| r.get::<String, _>("slug"))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        sqlx::query(
+            "INSERT INTO document_search (document_id, title, body, tags) VALUES (?, ?, ?, ?)",
+        )
+        .bind(document_id.to_string())
+        .bind(title)
+        .bind(body)
+        .bind(tags)
+        .execute(&mut *tx)
+        .await?;
+        let rid_row = sqlx::query("SELECT last_insert_rowid() AS rid")
+            .fetch_one(&mut *tx)
+            .await?;
+        let rid: i64 = rid_row.get("rid");
+        sqlx::query("INSERT OR REPLACE INTO search_rows (document_id, fts_rowid) VALUES (?, ?)")
+            .bind(document_id.to_string())
+            .bind(rid)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn rebuild_search_index_all(&self) -> Result<(), RepositoryError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM search_rows")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM document_search")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        let published = self.list_published().await?;
+        for doc in published {
+            self.refresh_search_index(doc.id).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Populate the search index once after migrations (existing databases get
+/// indexed at startup). No-op when the index is already populated.
+pub async fn backfill_search_index(repo: &SqliteRepository) -> Result<(), RepositoryError> {
+    let row = sqlx::query("SELECT COUNT(*) AS n FROM search_rows")
+        .fetch_one(repo.pool())
+        .await?;
+    let n: i64 = row.get("n");
+    if n == 0 {
+        repo.rebuild_search_index_all().await?;
+    }
+    Ok(())
+}
+
+/// Delete a document from the FTS5 index and its rowid mapping (idempotent).
+async fn remove_search_row(
+    conn: &mut sqlx::sqlite::SqliteConnection,
+    document_id: DocumentId,
+) -> Result<(), RepositoryError> {
+    sqlx::query(
+        "DELETE FROM document_search WHERE rowid IN
+            (SELECT fts_rowid FROM search_rows WHERE document_id = ?)",
+    )
+    .bind(document_id.to_string())
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("DELETE FROM search_rows WHERE document_id = ?")
+        .bind(document_id.to_string())
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Escape a raw FTS5 `snippet()` string for safe HTML output while keeping the
+/// `<mark>…</mark>` highlight markers. The FTS index stores un-escaped body
+/// text, so without this the snippet would render author content as markup.
+fn escape_snippet(snippet: &str) -> String {
+    const MARK_OPEN: &str = "<mark>";
+    const MARK_CLOSE: &str = "</mark>";
+    let mut out = String::with_capacity(snippet.len() + 32);
+    let mut rest = snippet;
+    loop {
+        let Some(open) = rest.find(MARK_OPEN) else {
+            out.push_str(&html_escape(rest));
+            break;
+        };
+        out.push_str(&html_escape(&rest[..open]));
+        out.push_str(MARK_OPEN);
+        rest = &rest[open + MARK_OPEN.len()..];
+        let Some(close) = rest.find(MARK_CLOSE) else {
+            out.push_str(&html_escape(rest));
+            break;
+        };
+        out.push_str(&html_escape(&rest[..close]));
+        out.push_str(MARK_CLOSE);
+        rest = &rest[close + MARK_CLOSE.len()..];
+    }
+    out
+}
+
+/// Build a safe FTS5 match expression from a plain query string. Tokens are
+/// double-quoted (literal) and the last token gets a prefix star so typing
+/// "hello wor" matches "hello world". Returns empty for a blank query.
+fn fts_match_expr(query: &str) -> String {
+    let mut tokens: Vec<String> = Vec::new();
+    for raw in query.split_whitespace() {
+        let token: String = raw
+            .chars()
+            .filter(|c| !c.is_control() && *c != '"')
+            .collect();
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        tokens.push(token.to_string());
+    }
+    if tokens.is_empty() {
+        return String::new();
+    }
+    let last = tokens.len() - 1;
+    let mut out = String::new();
+    for (i, token) in tokens.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push('"');
+        out.push_str(token);
+        out.push('"');
+        if i == last {
+            out.push('*');
+        }
+    }
+    out
 }
 
 /// Load an experiment with its variants (read path: fresh snapshot).
@@ -1607,9 +1877,16 @@ mod tests {
         // Roundtrip an explicit value.
         repo.set_setting("site.name", "My Blog").await.unwrap();
         repo.set_setting("theme", "dark").await.unwrap();
-        repo.set_setting("site.url", "https://example.com").await.unwrap();
-        repo.set_setting("site.tagline", "Notes on things.").await.unwrap();
-        assert_eq!(repo.get_setting("site.name").await.unwrap().unwrap(), "My Blog");
+        repo.set_setting("site.url", "https://example.com")
+            .await
+            .unwrap();
+        repo.set_setting("site.tagline", "Notes on things.")
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.get_setting("site.name").await.unwrap().unwrap(),
+            "My Blog"
+        );
         let site = repo.site_settings().await.unwrap();
         assert_eq!(site.name, "My Blog");
         assert_eq!(site.theme, "dark");
@@ -1760,5 +2037,190 @@ mod tests {
         assert_eq!(docs.len(), 1, "drafts must be part of backups");
         assert_eq!(docs[0]["title"], "Draft only");
         assert_eq!(docs[0]["status"], "draft");
+    }
+
+    #[tokio::test]
+    async fn search_indexes_published_content_and_tracks_edits() {
+        let repo = repo().await;
+        let user = seed_user(&repo).await;
+        let full = repo
+            .create_document(user.id, "Rust Async Notes")
+            .await
+            .unwrap();
+        let doc_id = full.document.id;
+
+        // Drafts are not searchable.
+        let parsed = forgepost_content::parse_markdown("explains tokio channels");
+        let merged = forgepost_content::merge_blocks(&[], &[], parsed, now_ms());
+        repo.save_document_blocks(doc_id, &merged.blocks, &merged.versions)
+            .await
+            .unwrap();
+        assert!(
+            repo.search_documents("tokio", 10).await.unwrap().is_empty(),
+            "drafts must not be indexed"
+        );
+
+        // Published content is searchable, with prefix (as-you-type) matching.
+        repo.publish_document(doc_id).await.unwrap();
+        let hits = repo.search_documents("tok", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].slug, "rust-async-notes");
+        assert!(
+            hits[0].snippet.contains("tokio"),
+            "snippet should surface the matched text"
+        );
+
+        // Editing a published post re-indexes (deleted blocks drop out too).
+        let parsed = forgepost_content::parse_markdown("now about actix actors");
+        let merged = forgepost_content::merge_blocks(&[], &[], parsed, now_ms());
+        repo.save_document_blocks(doc_id, &merged.blocks, &merged.versions)
+            .await
+            .unwrap();
+        assert!(repo.search_documents("tokio", 10).await.unwrap().is_empty());
+        assert_eq!(repo.search_documents("actix", 10).await.unwrap().len(), 1);
+
+        // Title edits are reflected.
+        repo.update_document_title(doc_id, "Async in Rust")
+            .await
+            .unwrap();
+        let hits = repo.search_documents("async", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Async in Rust");
+    }
+
+    #[tokio::test]
+    async fn search_matches_tags_and_returns_them_on_hits() {
+        let repo = repo().await;
+        let user = seed_user(&repo).await;
+        let full = repo.create_document(user.id, "Some Post").await.unwrap();
+        let doc_id = full.document.id;
+        repo.set_document_tags(doc_id, &["rust".into(), "async".into()])
+            .await
+            .unwrap();
+        repo.publish_document(doc_id).await.unwrap();
+
+        let hits = repo.search_documents("async", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].tags.contains(&"rust".to_string()));
+        assert!(hits[0].tags.contains(&"async".to_string()));
+    }
+
+    #[tokio::test]
+    async fn search_snippet_escapes_body_markup() {
+        let repo = repo().await;
+        let user = seed_user(&repo).await;
+        let full = repo.create_document(user.id, "Escaped").await.unwrap();
+        let doc_id = full.document.id;
+        let parsed = forgepost_content::parse_markdown(
+            "needle <script>alert(1)</script> and <mark>more</mark> text",
+        );
+        let merged = forgepost_content::merge_blocks(&[], &[], parsed, now_ms());
+        repo.save_document_blocks(doc_id, &merged.blocks, &merged.versions)
+            .await
+            .unwrap();
+        repo.publish_document(doc_id).await.unwrap();
+
+        let hits = repo.search_documents("needle", 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(
+            !hits[0].snippet.contains("<script"),
+            "raw markup must not reach the page: {}",
+            hits[0].snippet
+        );
+        assert!(
+            hits[0].snippet.contains("&lt;script&gt;"),
+            "markup should be HTML-escaped: {}",
+            hits[0].snippet
+        );
+        assert!(
+            hits[0].snippet.contains("<mark>needle</mark>"),
+            "match highlighting must survive escaping: {}",
+            hits[0].snippet
+        );
+    }
+
+    #[tokio::test]
+    async fn search_handles_edge_queries() {
+        let repo = repo().await;
+        let user = seed_user(&repo).await;
+        let full = repo.create_document(user.id, "Edge Cases").await.unwrap();
+        let doc_id = full.document.id;
+        let parsed = forgepost_content::parse_markdown("needle in a haystack");
+        let merged = forgepost_content::merge_blocks(&[], &[], parsed, now_ms());
+        repo.save_document_blocks(doc_id, &merged.blocks, &merged.versions)
+            .await
+            .unwrap();
+        repo.publish_document(doc_id).await.unwrap();
+
+        // Empty / whitespace-only queries never error and return nothing.
+        assert!(repo.search_documents("", 10).await.unwrap().is_empty());
+        assert!(repo.search_documents("   ", 10).await.unwrap().is_empty());
+        // Quotes are neutralized rather than fatal.
+        assert_eq!(
+            repo.search_documents("needle\"", 10).await.unwrap().len(),
+            1
+        );
+        // A bare asterisk must not break the MATCH parser.
+        assert!(repo.search_documents("*", 10).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rebuild_search_index_all_is_idempotent() {
+        let repo = repo().await;
+        let user = seed_user(&repo).await;
+        let full = repo.create_document(user.id, "Rebuild Me").await.unwrap();
+        let doc_id = full.document.id;
+        let parsed = forgepost_content::parse_markdown("rebuildable body");
+        let merged = forgepost_content::merge_blocks(&[], &[], parsed, now_ms());
+        repo.save_document_blocks(doc_id, &merged.blocks, &merged.versions)
+            .await
+            .unwrap();
+        repo.publish_document(doc_id).await.unwrap();
+
+        repo.rebuild_search_index_all().await.unwrap();
+        assert_eq!(
+            repo.search_documents("rebuildable", 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // Rebuilding again must not duplicate rows.
+        repo.rebuild_search_index_all().await.unwrap();
+        assert_eq!(
+            repo.search_documents("rebuildable", 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn fts_match_expr_builds_safe_expressions() {
+        assert_eq!(fts_match_expr("hello world"), "\"hello\" \"world\"*");
+        assert_eq!(fts_match_expr("async"), "\"async\"*");
+        assert_eq!(fts_match_expr(""), "");
+        assert_eq!(fts_match_expr("   "), "");
+        assert_eq!(fts_match_expr("foo\"bar"), "\"foobar\"*");
+    }
+
+    #[test]
+    fn escape_snippet_keeps_marks_but_escapes_body_text() {
+        assert_eq!(
+            escape_snippet("hello <mark>payload</mark> world"),
+            "hello <mark>payload</mark> world"
+        );
+        assert_eq!(
+            escape_snippet("hello <script>alert(1)</script> here"),
+            "hello &lt;script&gt;alert(1)&lt;/script&gt; here"
+        );
+        // Highlight markers inserted next to markup must survive escaping.
+        assert_eq!(
+            escape_snippet("see <mark>script</mark> <script>bad</script>"),
+            "see <mark>script</mark> &lt;script&gt;bad&lt;/script&gt;"
+        );
+        // An unmatched marker that is really body text gets escaped.
+        assert_eq!(escape_snippet("a </mark> b"), "a &lt;/mark&gt; b");
     }
 }

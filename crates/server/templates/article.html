@@ -17,15 +17,15 @@
 {
   "@context": "https://schema.org",
   "@type": "BlogPosting",
-  "headline": {{ seo.title|json|safe }},
-  "description": {{ seo.description|json|safe }},
+  "headline": {{ seo_ld.headline|safe }},
+  "description": {{ seo_ld.description|safe }},
   "datePublished": "{{ seo.date_published }}",
   "dateModified": "{{ seo.date_modified }}",
-  "author": { "@type": "Person", "name": {{ seo.author|json|safe }} },
-  "publisher": { "@type": "Organization", "name": {{ site_name|json|safe }} },
+  "author": { "@type": "Person", "name": {{ seo_ld.author|safe }} },
+  "publisher": { "@type": "Organization", "name": {{ seo_ld.publisher|safe }} },
   "url": "{{ seo.url }}",
   "mainEntityOfPage": { "@type": "WebPage", "@id": "{{ seo.url }}" }
-  {% if !seo.image.is_empty() %}, "image": {{ seo.image|json|safe }}{% endif %}
+  {% if !seo.image.is_empty() %}, "image": {{ seo_ld.image|safe }}{% endif %}
 }
 </script>
 {% endblock %}

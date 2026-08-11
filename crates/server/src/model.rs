@@ -169,3 +169,15 @@ pub struct ExperimentDecision {
     pub variant_impressions: Option<i64>,
     pub variant_conversions: Option<i64>,
 }
+
+/// A full-text search hit against the FTS5 index.
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub document_id: Uuid,
+    pub slug: String,
+    pub title: String,
+    pub published_at_ms: Option<i64>,
+    pub tags: Vec<String>,
+    /// HTML fragment from `snippet()` with `<mark>` around matching terms.
+    pub snippet: String,
+}

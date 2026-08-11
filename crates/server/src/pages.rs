@@ -203,6 +203,7 @@ struct ArticleTemplate {
     site_name: String,
     theme: String,
     seo: SeoMeta,
+    seo_ld: JsonLd,
     slug: String,
     title: String,
     date: String,
@@ -210,6 +211,17 @@ struct ArticleTemplate {
     rendered_blocks: Vec<ArticleBlock>,
     comments: Vec<ArticleComment>,
     comment_error: String,
+}
+
+/// Pre-serialized, script-safe JSON strings for the JSON-LD block. The values
+/// are JSON-encoded and then additionally escaped so `<`, `>`, `&`, and the
+/// line/paragraph separators can never terminate the `<script>` element.
+struct JsonLd {
+    headline: String,
+    description: String,
+    author: String,
+    publisher: String,
+    image: String,
 }
 
 struct ArticleBlock {
@@ -223,6 +235,26 @@ struct ArticleComment {
     author_name: String,
     date: String,
     body: String,
+}
+
+#[derive(Template)]
+#[template(path = "search.html")]
+struct SearchTemplate {
+    authed: bool,
+    flash: String,
+    site_name: String,
+    theme: String,
+    seo: SeoMeta,
+    query: String,
+    results: Vec<SearchResult>,
+}
+
+struct SearchResult {
+    title: String,
+    slug: String,
+    date: String,
+    tags: Vec<String>,
+    snippet: String,
 }
 
 #[derive(Template)]
@@ -273,6 +305,12 @@ pub(crate) const THEMES: &[(&str, &str)] = &[
 pub(crate) struct FlashQuery {
     #[serde(default)]
     flash: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SearchQuery {
+    #[serde(default)]
+    q: String,
 }
 
 #[derive(Deserialize)]
@@ -473,7 +511,11 @@ pub(crate) fn canonical_base(state: &AppState, site: &SiteSettings, headers: &He
     if !site.url.is_empty() {
         return site.url.trim_end_matches('/').to_string();
     }
-    let scheme = if state.secure_cookies { "https" } else { "http" };
+    let scheme = if state.secure_cookies {
+        "https"
+    } else {
+        "http"
+    };
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -565,6 +607,19 @@ fn article_image(full: &crate::model::FullDocument, base: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Serialize a string as JSON, then additionally escape the characters that
+/// are unsafe inside an HTML `<script>` element (`<`, `>`, `&`, and U+2028 /
+/// U+2029) so the value can never terminate the script block.
+fn script_json(s: &str) -> String {
+    serde_json::to_string(s)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
 fn format_duration(ms: i64) -> String {
     if ms < 1000 {
         format!("{ms} ms")
@@ -620,6 +675,56 @@ pub(crate) async fn home_page(
             author: String::new(),
         },
         posts,
+    })
+}
+
+pub(crate) async fn search_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<SearchQuery>,
+) -> Result<Response, PageError> {
+    if !state.repo.is_setup_complete().await? {
+        return Ok(Redirect::to("/setup").into_response());
+    }
+    let site = site(&state).await?;
+    let base = canonical_base(&state, &site, &headers);
+    let q = query.q.trim().to_string();
+    let hits = if q.is_empty() {
+        Vec::new()
+    } else {
+        state.repo.search_documents(&q, 50).await?
+    };
+    let results = hits
+        .iter()
+        .map(|h| SearchResult {
+            title: h.title.clone(),
+            slug: h.slug.clone(),
+            date: format_date(h.published_at_ms),
+            tags: h.tags.clone(),
+            snippet: h.snippet.clone(),
+        })
+        .collect();
+    let seo_title = if q.is_empty() {
+        format!("Search · {}", site.name)
+    } else {
+        format!("Search for \"{q}\" · {}", site.name)
+    };
+    page(&SearchTemplate {
+        authed: false,
+        flash: String::new(),
+        site_name: site.name.clone(),
+        theme: site.theme,
+        seo: SeoMeta {
+            title: seo_title,
+            description: format!("Search results for \"{q}\" on {}.", site.name),
+            url: base,
+            image: String::new(),
+            date_published: String::new(),
+            date_modified: String::new(),
+            author: String::new(),
+        },
+        query: q,
+        results,
     })
 }
 
@@ -966,10 +1071,7 @@ pub(crate) async fn settings_form(
         .set_setting("site.name", body.name.trim())
         .await?;
     state.repo.set_setting("theme", &body.theme).await?;
-    state
-        .repo
-        .set_setting("site.url", body.url.trim())
-        .await?;
+    state.repo.set_setting("site.url", body.url.trim()).await?;
     state
         .repo
         .set_setting("site.tagline", body.tagline.trim())
@@ -1467,19 +1569,24 @@ async fn build_article_page(
         description,
         url: format!("{base}/articles/{}", view.slug),
         image: article_image(&full, &base),
-        date_published: full
-            .published_at_ms
-            .map(format_iso_utc)
-            .unwrap_or_default(),
+        date_published: full.published_at_ms.map(format_iso_utc).unwrap_or_default(),
         date_modified: format_iso_utc(full.document.updated_at_ms),
         author,
+    };
+    let seo_ld = JsonLd {
+        headline: script_json(&view.title),
+        description: script_json(&seo.description),
+        author: script_json(&seo.author),
+        publisher: script_json(&site.name),
+        image: script_json(&seo.image),
     };
     let tpl = ArticleTemplate {
         authed: false,
         flash: flash_message(flash),
-        site_name: site.name,
+        site_name: site.name.clone(),
         theme: site.theme,
         seo,
+        seo_ld,
         slug: view.slug.clone(),
         title: view.title.clone(),
         date: format_date(view.published_at_ms),

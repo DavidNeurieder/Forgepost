@@ -12,6 +12,9 @@
 <header class="site">
   <div class="container">
     <a class="brand" href="/">{{ site_name }}</a>
+    <form class="search" action="/search" method="get" role="search">
+      <input type="search" name="q" placeholder="Search posts…" aria-label="Search posts">
+    </form>
     {% if authed %}
     <nav class="site">
       <a href="/admin">Dashboard</a>
