@@ -208,6 +208,7 @@ struct ArticleTemplate {
     title: String,
     date: String,
     tags: Vec<String>,
+    comments_enabled: bool,
     rendered_blocks: Vec<ArticleBlock>,
     comments: Vec<ArticleComment>,
     comment_error: String,
@@ -277,6 +278,7 @@ struct SettingsTemplate {
     theme: String,
     site_url: String,
     tagline: String,
+    comments_enabled: bool,
     csrf_token: String,
     themes: Vec<ThemeOption>,
     error: String,
@@ -353,6 +355,8 @@ pub(crate) struct SettingsForm {
     url: String,
     #[serde(default)]
     tagline: String,
+    #[serde(default)]
+    comments_enabled: bool,
     #[serde(default)]
     csrf_token: Option<String>,
 }
@@ -450,6 +454,7 @@ fn flash_message(key: Option<&str>) -> String {
         Some("published") => "Published".into(),
         Some("comment_pending") => "Thanks! Your comment is awaiting moderation.".into(),
         Some("comment_approved") => "Comment approved.".into(),
+        Some("comments_disabled") => "Comments are closed on this site.".into(),
         Some("settings_saved") => "Settings saved.".into(),
         Some("logged_out") => "You have been logged out.".into(),
         Some("not_authorized") => "You need to be signed in to do that.".into(),
@@ -1076,6 +1081,13 @@ pub(crate) async fn settings_form(
         .repo
         .set_setting("site.tagline", body.tagline.trim())
         .await?;
+    state
+        .repo
+        .set_setting(
+            "comments.enabled",
+            if body.comments_enabled { "1" } else { "0" },
+        )
+        .await?;
     Ok(Redirect::to("/admin/settings?flash=settings_saved").into_response())
 }
 
@@ -1093,6 +1105,7 @@ fn settings_template(
         theme: site.theme,
         site_url: site.url,
         tagline: site.tagline,
+        comments_enabled: site.comments_enabled,
         csrf_token: auth.csrf_token,
         themes: THEMES
             .iter()
@@ -1497,6 +1510,10 @@ pub(crate) async fn comment_form(
     Path(slug): Path<String>,
     Form(body): Form<CommentForm>,
 ) -> Result<Response, PageError> {
+    if !state.repo.site_settings().await?.comments_enabled {
+        let uri = format!("/articles/{slug}?flash=comments_disabled");
+        return Ok(Redirect::to(&uri).into_response());
+    }
     let author = body.author.trim().to_string();
     let comment_body = body.body.trim().to_string();
     if author.is_empty() || comment_body.is_empty() {
@@ -1550,11 +1567,15 @@ async fn build_article_page(
     let mut view = crate::routes::article_view(&full, tags.clone());
     crate::routes::apply_assignments(&full, &experiments, visitor_id, &mut view);
 
-    let comments = state
-        .repo
-        .comments_for_document(full.document.id, Some("approved"))
-        .await?;
     let site = site(state).await?;
+    let comments = if site.comments_enabled {
+        state
+            .repo
+            .comments_for_document(full.document.id, Some("approved"))
+            .await?
+    } else {
+        Vec::new()
+    };
     let base = canonical_base(state, &site, headers);
     let description = {
         let d = page_meta_description(&full);
@@ -1591,6 +1612,7 @@ async fn build_article_page(
         title: view.title.clone(),
         date: format_date(view.published_at_ms),
         tags: view.tags.clone(),
+        comments_enabled: site.comments_enabled,
         rendered_blocks: view
             .rendered_blocks
             .iter()

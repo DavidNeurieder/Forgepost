@@ -14,9 +14,9 @@ Version **0.1.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
 ## Features
 
 - **Thin blog host** — Markdown editor that parses to a block tree, publish /
-  unpublish, tags, comments with moderation, RSS, full-text search (SQLite
-  FTS5, with as-you-type prefix matching and snippet highlighting), and one
-  clean theme.
+  unpublish, tags, opt-in comments (disabled by default) with moderation, RSS,
+  full-text search (SQLite FTS5, with as-you-type prefix matching and snippet
+  highlighting), and one clean theme.
 - **Per-block analytics** — privacy-lean browser tracking (banded scroll depth,
   completion, read time, block impressions), estimated reach and drop-off per
   block, honestly labeled ("estimated") because blockers and JS-disabled

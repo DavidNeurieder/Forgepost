@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, Response, StatusCode, header};
 use forgepost_experiments::assign_variant;
 use forgepost_server::app;
-use forgepost_server::repository::SqliteRepository;
+use forgepost_server::repository::{Repository, SqliteRepository};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
@@ -22,6 +22,17 @@ async fn test_app() -> Router {
     let pool = pool().await;
     let repo = SqliteRepository::from_pool(pool);
     repo.migrate().await.expect("migrations apply");
+    app(Arc::new(repo))
+}
+
+/// Like `test_app()` but with comments enabled (they default to disabled).
+async fn test_app_with_comments() -> Router {
+    let pool = pool().await;
+    let repo = SqliteRepository::from_pool(pool);
+    repo.migrate().await.expect("migrations apply");
+    repo.set_setting("comments.enabled", "1")
+        .await
+        .expect("enable comments");
     app(Arc::new(repo))
 }
 
@@ -472,7 +483,7 @@ async fn create_update_publish_and_read_article() {
 
 #[tokio::test]
 async fn comments_require_moderation() {
-    let app = test_app().await;
+    let app = test_app_with_comments().await;
     let (_, resp) = send(
         &app,
         json_req(
@@ -611,6 +622,39 @@ async fn comments_require_moderation() {
     let comments = body_json(resp).await;
     assert_eq!(comments.as_array().unwrap().len(), 1);
     assert_eq!(comments[0]["body"], "Nice post!");
+}
+
+#[tokio::test]
+async fn comments_are_disabled_by_default() {
+    let app = test_app().await;
+    let (_, _, _, slug, _) = seed_published_article(&app).await;
+
+    // New comments are rejected and none are listed.
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/articles/{slug}/comments"),
+            None,
+            None,
+            Some(json!({ "author_name": "Reader", "body": "Nice post!" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/articles/{slug}/comments"),
+            None,
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(body_json(resp).await.as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -848,7 +892,7 @@ async fn articles_list_is_public_and_lists_published_only() {
 
 #[tokio::test]
 async fn pending_comments_are_listed_and_approvable() {
-    let app = test_app().await;
+    let app = test_app_with_comments().await;
     let (_, resp) = send(
         &app,
         json_req(

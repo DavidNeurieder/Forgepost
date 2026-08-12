@@ -8,7 +8,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, Response, StatusCode, header};
 use forgepost_server::app;
-use forgepost_server::repository::SqliteRepository;
+use forgepost_server::repository::{Repository, SqliteRepository};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use sqlx::sqlite::SqlitePoolOptions;
@@ -25,6 +25,21 @@ async fn test_app() -> Router {
         .expect("memory pool");
     let repo = SqliteRepository::from_pool(pool);
     repo.migrate().await.expect("migrations apply");
+    app(Arc::new(repo))
+}
+
+/// Like `test_app()` but with comments enabled (they default to disabled).
+async fn test_app_with_comments() -> Router {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("memory pool");
+    let repo = SqliteRepository::from_pool(pool);
+    repo.migrate().await.expect("migrations apply");
+    repo.set_setting("comments.enabled", "1")
+        .await
+        .expect("enable comments");
     app(Arc::new(repo))
 }
 
@@ -546,7 +561,7 @@ async fn seed_published(app: &Router) -> String {
 
 #[tokio::test]
 async fn article_page_renders_html_tracker_and_visitor_cookie() {
-    let app = test_app().await;
+    let app = test_app_with_comments().await;
     let _ = seed_published(&app).await;
 
     let (status, resp) = send(&app, req(Method::GET, "/articles/hello-world", None, None)).await;
@@ -626,8 +641,37 @@ async fn article_page_404_is_html() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn comment_flow_from_public_to_approved() {
+async fn comments_section_hidden_when_disabled() {
     let app = test_app().await;
+    let _ = seed_published(&app).await;
+
+    let (_, resp) = send(&app, req(Method::GET, "/articles/hello-world", None, None)).await;
+    let html = body_text(resp).await;
+    assert!(!html.contains("<h2>Comments</h2>"));
+    assert!(!html.contains("No comments yet."));
+    assert!(!html.contains("Post comment"));
+
+    // Posting still works but just bounces the reader back with a notice.
+    let (status, resp) = send(
+        &app,
+        form_req(
+            Method::POST,
+            "/articles/hello-world/comments",
+            None,
+            &[("author", "Reader"), ("body", "Nice post!")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers().get(header::LOCATION).unwrap(),
+        "/articles/hello-world?flash=comments_disabled"
+    );
+}
+
+#[tokio::test]
+async fn comment_flow_from_public_to_approved() {
+    let app = test_app_with_comments().await;
     let cookie = seed_published(&app).await;
     let csrf = csrf_for(&app, &cookie).await;
 

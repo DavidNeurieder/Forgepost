@@ -652,6 +652,9 @@ pub async fn list_comments(
     State(state): State<AppState>,
     Path(slug): Path<String>,
 ) -> Result<Json<Vec<CommentView>>, ApiError> {
+    if !state.repo.site_settings().await?.comments_enabled {
+        return Ok(Json(Vec::new()));
+    }
     let full = state
         .repo
         .get_published_by_slug(&slug)
@@ -669,6 +672,9 @@ pub async fn create_comment(
     Path(slug): Path<String>,
     Json(body): Json<CommentRequest>,
 ) -> Result<(StatusCode, Json<CommentView>), ApiError> {
+    if !state.repo.site_settings().await?.comments_enabled {
+        return Err(ApiError::bad_request("comments are disabled"));
+    }
     let full = state
         .repo
         .get_published_by_slug(&slug)

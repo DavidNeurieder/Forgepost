@@ -54,6 +54,19 @@ test('first-run setup creates the owner account', async ({ page }) => {
 	await page.context().storageState({ path: AUTH_FILE });
 });
 
+test('the owner enables comments in settings', async ({ browser }) => {
+	const page = await adminPage(browser);
+	await gotoDashboard(page);
+
+	await page.goto('/admin/settings');
+	await page.locator('#comments_enabled').check();
+	await page.getByRole('button', { name: 'Save settings' }).click();
+	await expect(page.getByText('Settings saved.')).toBeVisible();
+	await expect(page.locator('#comments_enabled')).toBeChecked();
+
+	await page.context().close();
+});
+
 test('the owner creates, saves, and publishes a post', async ({ browser }) => {
 	const page = await adminPage(browser);
 	await gotoDashboard(page);

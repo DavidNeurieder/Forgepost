@@ -375,11 +375,17 @@ impl Repository for SqliteRepository {
             .unwrap_or_else(|| "system".into());
         let url = self.get_setting("site.url").await?.unwrap_or_default();
         let tagline = self.get_setting("site.tagline").await?.unwrap_or_default();
+        let comments_enabled = self
+            .get_setting("comments.enabled")
+            .await?
+            .map(|v| v == "1")
+            .unwrap_or(false);
         Ok(SiteSettings {
             name,
             theme,
             url,
             tagline,
+            comments_enabled,
         })
     }
 
@@ -1872,6 +1878,7 @@ mod tests {
         assert_eq!(site.theme, "system");
         assert_eq!(site.url, "");
         assert_eq!(site.tagline, "");
+        assert!(!site.comments_enabled, "comments must default to disabled");
         assert!(repo.get_setting("site.name").await.unwrap().is_none());
 
         // Roundtrip an explicit value.
@@ -1892,6 +1899,12 @@ mod tests {
         assert_eq!(site.theme, "dark");
         assert_eq!(site.url, "https://example.com");
         assert_eq!(site.tagline, "Notes on things.");
+
+        // Comments are opt-in: explicitly enabling flips the default.
+        repo.set_setting("comments.enabled", "1").await.unwrap();
+        assert!(repo.site_settings().await.unwrap().comments_enabled);
+        repo.set_setting("comments.enabled", "0").await.unwrap();
+        assert!(!repo.site_settings().await.unwrap().comments_enabled);
 
         // Overwrite and confirm only one row per key.
         repo.set_setting("theme", "sepia").await.unwrap();

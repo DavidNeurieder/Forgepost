@@ -25,6 +25,13 @@
     <label for="tagline">Tagline</label>
     <input id="tagline" name="tagline" type="text" maxlength="200" placeholder="A short description of this blog" value="{{ tagline }}">
   </field>
+  <field>
+    <label for="comments_enabled" class="checkbox">
+      <input id="comments_enabled" name="comments_enabled" type="checkbox" value="true"{% if comments_enabled %} checked{% endif %}>
+      Allow comments on posts
+    </label>
+    <p class="muted" style="margin:0.25rem 0 0;">When off, the comment form is hidden and new comments are rejected. Approved comments are kept and reappear if you re-enable comments.</p>
+  </field>
   {% if !error.is_empty() %}<p class="error">{{ error }}</p>{% endif %}
   <button type="submit">Save settings</button>
 </form>

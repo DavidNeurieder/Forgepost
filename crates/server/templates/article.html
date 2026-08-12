@@ -48,6 +48,7 @@
   </div>
 </article>
 
+{% if comments_enabled %}
 <hr class="sep">
 
 <section>
@@ -77,6 +78,7 @@
     <button type="submit">Post comment</button>
   </form>
 </section>
+{% endif %}
 
 <script src="/static/tracker.js" defer></script>
 <script>

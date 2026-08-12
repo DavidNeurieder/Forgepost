@@ -159,6 +159,38 @@ impl Creator {
         assert!(self.csrf.is_some(), "setup returns a CSRF token");
     }
 
+    /// Flip the "Allow comments" setting on via the admin settings form
+    /// (comments default to disabled, but this journey needs them).
+    fn enable_comments(&mut self) {
+        let resp = self
+            .http
+            .get(format!("{}/admin/settings", self.base))
+            .send()
+            .expect("GET /admin/settings");
+        assert_eq!(resp.status().as_u16(), 200, "settings page renders");
+        let html = resp.text().expect("settings HTML");
+        let form_csrf = csrf_from(&html);
+        let resp = self
+            .http
+            .post(format!("{}/admin/settings", self.base))
+            .header(CSRF_HEADER, form_csrf.clone())
+            .form(&[
+                ("name", "Forgepost"),
+                ("theme", "system"),
+                ("url", ""),
+                ("tagline", ""),
+                ("comments_enabled", "true"),
+                ("csrf_token", &form_csrf),
+            ])
+            .send()
+            .expect("POST /admin/settings");
+        let final_url = resp.url().to_string();
+        assert!(
+            final_url.contains("flash=settings_saved"),
+            "settings save redirects with flash, got {final_url}"
+        );
+    }
+
     fn login(&mut self, email: &str) {
         let (status, body) = self.json(
             Method::POST,
@@ -353,6 +385,7 @@ fn creator_journey_end_to_end() {
     // 2. First-run setup creates the creator account and starts a session.
     let mut creator = Creator::new(base);
     creator.setup("alice@example.com", "Alice");
+    creator.enable_comments();
     let (status, me) = creator.me();
     assert_eq!(status, 200);
     assert_eq!(me["user"]["email"], "alice@example.com");
