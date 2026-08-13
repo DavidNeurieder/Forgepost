@@ -52,6 +52,16 @@ pub struct DocumentSummary {
     pub updated_at_ms: i64,
 }
 
+/// A published document plus its tags, as listed on the blog home page.
+#[derive(Debug, Clone)]
+pub struct PublishedPost {
+    pub id: Uuid,
+    pub title: String,
+    pub slug: String,
+    pub published_at_ms: Option<i64>,
+    pub tags: Vec<String>,
+}
+
 /// A document plus its row-level metadata (owner, slug, status, publish time).
 #[derive(Debug, Clone)]
 pub struct FullDocument {

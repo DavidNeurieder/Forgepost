@@ -11,7 +11,7 @@ use axum::Json;
 use axum::extract::{Form, Multipart, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use forgepost_content::{BlockKind, now_ms};
+use forgepost_content::{now_ms, BlockKind, Document};
 use forgepost_experiments::Recommendation;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -35,6 +35,8 @@ struct HomeTemplate {
     flash: String,
     site_name: String,
     theme: String,
+    tagline: String,
+    year: u32,
     seo: SeoMeta,
     posts: Vec<HomePost>,
 }
@@ -43,6 +45,9 @@ struct HomePost {
     title: String,
     slug: String,
     date: String,
+    tags: Vec<String>,
+    excerpt: String,
+    read_minutes: u64,
 }
 
 /// SEO metadata rendered into `<head>` (canonical, Open Graph, Twitter,
@@ -64,6 +69,7 @@ struct SetupTemplate {
     flash: String,
     site_name: String,
     theme: String,
+    year: u32,
     error: String,
 }
 
@@ -74,6 +80,7 @@ struct LoginTemplate {
     flash: String,
     site_name: String,
     theme: String,
+    year: u32,
     error: String,
 }
 
@@ -84,6 +91,7 @@ struct DashboardTemplate {
     flash: String,
     site_name: String,
     theme: String,
+    year: u32,
     display_name: String,
     csrf_token: String,
     docs: Vec<DashboardDoc>,
@@ -111,6 +119,7 @@ struct EditorTemplate {
     flash: String,
     site_name: String,
     theme: String,
+    year: u32,
     id: String,
     slug: String,
     title: String,
@@ -127,6 +136,7 @@ struct StatsTemplate {
     flash: String,
     site_name: String,
     theme: String,
+    year: u32,
     doc_id: String,
     csrf_token: String,
     views: i64,
@@ -204,6 +214,7 @@ struct ArticleTemplate {
     flash: String,
     site_name: String,
     theme: String,
+    year: u32,
     seo: SeoMeta,
     seo_ld: JsonLd,
     slug: String,
@@ -247,6 +258,7 @@ struct SearchTemplate {
     flash: String,
     site_name: String,
     theme: String,
+    year: u32,
     seo: SeoMeta,
     query: String,
     results: Vec<SearchResult>,
@@ -267,6 +279,7 @@ struct ErrorTemplate {
     flash: String,
     site_name: String,
     theme: String,
+    year: u32,
     status: String,
     message: String,
 }
@@ -278,6 +291,7 @@ struct SettingsTemplate {
     flash: String,
     site_name: String,
     theme: String,
+    year: u32,
     site_url: String,
     tagline: String,
     comments_enabled: bool,
@@ -425,6 +439,7 @@ fn error_page(status: StatusCode, message: String) -> Response {
         flash: String::new(),
         site_name: "Forgepost".into(),
         theme: "system".into(),
+        year: current_year(),
         status: status.as_u16().to_string(),
         message,
     };
@@ -485,6 +500,17 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
+}
+
+/// Current calendar year (for the site footer).
+fn current_year() -> u32 {
+    civil_from_days(now_ms().div_euclid(86_400_000)).0 as u32
+}
+
+/// Rough read time at 200 words/minute, minimum one minute.
+fn read_minutes(doc: &Document) -> u64 {
+    let words = doc.searchable_text().split_whitespace().count();
+    (words.max(1) as u64).div_ceil(200)
 }
 
 fn format_date(ms: Option<i64>) -> String {
@@ -673,24 +699,36 @@ pub(crate) async fn home_page(
     } else {
         site.tagline.clone()
     };
-    let published = state.repo.list_published().await?;
-    let posts = published
-        .iter()
-        .map(|p| HomePost {
+    let published = state.repo.list_published_with_tags().await?;
+    let mut posts = Vec::with_capacity(published.len());
+    for p in &published {
+        let (excerpt, read_mins) = match state.repo.get_document(p.id).await? {
+            Some(full) => (
+                page_meta_description(&full),
+                read_minutes(&full.document),
+            ),
+            None => (String::new(), 1),
+        };
+        posts.push(HomePost {
             title: p.title.clone(),
             slug: p.slug.clone(),
             date: format_date(p.published_at_ms),
-        })
-        .collect();
+            tags: p.tags.clone(),
+            excerpt,
+            read_minutes: read_mins,
+        });
+    }
     page(&HomeTemplate {
         authed: false,
         flash: String::new(),
         site_name: site.name.clone(),
         theme: site.theme,
+        tagline: site.tagline.clone(),
+        year: current_year(),
         seo: SeoMeta {
             title: site.name,
             description,
-            url: base,
+            url: base.clone(),
             image: String::new(),
             date_published: String::new(),
             date_modified: String::new(),
@@ -736,6 +774,7 @@ pub(crate) async fn search_page(
         flash: String::new(),
         site_name: site.name.clone(),
         theme: site.theme,
+        year: current_year(),
         seo: SeoMeta {
             title: seo_title,
             description: format!("Search results for \"{q}\" on {}.", site.name),
@@ -760,6 +799,7 @@ pub(crate) async fn setup_page(State(state): State<AppState>) -> Result<Response
         flash: String::new(),
         site_name: site.name,
         theme: site.theme,
+        year: current_year(),
         error: String::new(),
     })
 }
@@ -776,6 +816,7 @@ pub(crate) async fn setup_form(
             flash: String::new(),
             site_name: site.name,
             theme: site.theme,
+            year: current_year(),
             error,
         });
     }
@@ -825,6 +866,7 @@ pub(crate) async fn login_page(
         flash: flash_message(flash.flash.as_deref()),
         site_name: site.name,
         theme: site.theme,
+        year: current_year(),
         error: String::new(),
     })
 }
@@ -847,6 +889,7 @@ pub(crate) async fn login_form(
         flash: String::new(),
         site_name: site.name,
         theme: site.theme,
+        year: current_year(),
         error,
     })
 }
@@ -907,6 +950,7 @@ pub(crate) async fn dashboard_page(
         flash: flash_message(flash.flash.as_deref()),
         site_name: site.name,
         theme: site.theme,
+        year: current_year(),
         display_name: auth.user.display_name.clone(),
         csrf_token: auth.csrf_token.clone(),
         docs: docs
@@ -969,6 +1013,7 @@ pub(crate) async fn editor_page(
         flash: flash_message(flash.flash.as_deref()),
         site_name: site.name,
         theme: site.theme,
+        year: current_year(),
         id: id.to_string(),
         slug: full.slug.clone(),
         title: full.document.title.clone(),
@@ -1143,6 +1188,7 @@ fn settings_template(
         flash,
         site_name: site.name,
         theme: site.theme,
+        year: current_year(),
         site_url: site.url,
         tagline: site.tagline,
         comments_enabled: site.comments_enabled,
@@ -1259,6 +1305,7 @@ pub(crate) async fn stats_page(
         flash: flash_message(flash.flash.as_deref()),
         site_name: site.name,
         theme: site.theme,
+        year: current_year(),
         doc_id: doc_id.to_string(),
         csrf_token: auth.csrf_token.clone(),
         views,
@@ -1646,6 +1693,7 @@ async fn build_article_page(
         flash: flash_message(flash),
         site_name: site.name.clone(),
         theme: site.theme,
+        year: current_year(),
         seo,
         seo_ld,
         slug: view.slug.clone(),

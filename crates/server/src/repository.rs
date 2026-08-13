@@ -82,6 +82,10 @@ pub trait Repository: Send + Sync {
         slug: &str,
     ) -> Result<Option<FullDocument>, RepositoryError>;
     async fn list_published(&self) -> Result<Vec<DocumentSummary>, RepositoryError>;
+    /// Published documents with their tags, newest first (blog home page).
+    async fn list_published_with_tags(
+        &self,
+    ) -> Result<Vec<crate::model::PublishedPost>, RepositoryError>;
     /// All non-deleted documents regardless of status (used by `export`).
     async fn list_all_documents(&self) -> Result<Vec<DocumentSummary>, RepositoryError>;
     // Tags
@@ -526,6 +530,33 @@ impl Repository for SqliteRepository {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(row_to_document_summary).collect())
+    }
+
+    async fn list_published_with_tags(&self) -> Result<Vec<crate::model::PublishedPost>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT d.id, d.title, d.slug, d.published_at_ms,
+                    (SELECT json_group_array(t.slug) FROM tags t
+                       JOIN document_tags dt ON dt.tag_id = t.id
+                      WHERE dt.document_id = d.id) AS tags
+             FROM documents d
+             WHERE d.status = 'published' AND d.deleted_at_ms IS NULL
+             ORDER BY d.published_at_ms DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| crate::model::PublishedPost {
+                id: Uuid::from_str(&row.get::<String, _>("id")).unwrap_or_default(),
+                title: row.get("title"),
+                slug: row.get("slug"),
+                published_at_ms: row.get("published_at_ms"),
+                tags: row
+                    .get::<Option<String>, _>("tags")
+                    .map(|s| serde_json::from_str(&s).unwrap_or_default())
+                    .unwrap_or_default(),
+            })
+            .collect())
     }
 
     async fn list_all_documents(&self) -> Result<Vec<DocumentSummary>, RepositoryError> {

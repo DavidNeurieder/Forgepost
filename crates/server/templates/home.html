@@ -13,17 +13,26 @@
 <meta name="twitter:title" content="{{ seo.title }}">
 <meta name="twitter:description" content="{{ seo.description }}">
 {% if !seo.image.is_empty() %}<meta name="twitter:image" content="{{ seo.image }}">{% endif %}
+<link rel="alternate" type="application/rss+xml" title="{{ site_name }} RSS" href="/rss">
 {% endblock %}
 {% block content %}
-<h1>{{ site_name }}</h1>
+<section class="hero">
+  <h1>{{ site_name }}</h1>
+  {% if !tagline.is_empty() %}<p class="tagline">{{ tagline }}</p>{% endif %}
+  <a class="rss-link" href="/rss">Subscribe via RSS</a>
+</section>
 {% if posts.is_empty() %}
 <p class="muted">No published posts yet.</p>
 {% else %}
-<ul class="posts">
+<ul class="post-cards">
 {% for p in posts %}
   <li>
-    <a class="title" href="/articles/{{ p.slug }}">{{ p.title }}</a>
-    <div class="muted">{{ p.date }}</div>
+    <h2><a href="/articles/{{ p.slug }}">{{ p.title }}</a></h2>
+    <p class="meta">{{ p.date }}{% if p.read_minutes > 0 %} · {{ p.read_minutes }} min read{% endif %}</p>
+    {% if !p.excerpt.is_empty() %}<p class="excerpt">{{ p.excerpt }}</p>{% endif %}
+    {% if !p.tags.is_empty() %}
+    <p class="tags">{% for t in p.tags %}<a class="tag" href="/search?q={{ t }}">{{ t }}</a> {% endfor %}</p>
+    {% endif %}
   </li>
 {% endfor %}
 </ul>

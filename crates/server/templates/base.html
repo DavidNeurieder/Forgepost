@@ -32,5 +32,11 @@
   {% if !flash.is_empty() %}<p class="notice">{{ flash }}</p>{% endif %}
   {% block content %}{% endblock %}
 </main>
+<footer class="site">
+  <div class="container">
+    <span>© {{ year }} {{ site_name }}</span>
+    <a href="/rss">RSS</a>
+  </div>
+</footer>
 </body>
 </html>
