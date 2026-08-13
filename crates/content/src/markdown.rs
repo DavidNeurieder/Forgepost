@@ -2,9 +2,11 @@
 //!
 //! Supports the MVP block kinds: headings, paragraphs, blockquotes, fenced
 //! code, horizontal rules, image-only blocks, and flat lists (unordered `-`,
-//! `*`, `+` and ordered `N.`). Parsing is deliberately simple and lossless
-//! enough for the semantic-document model. Inline formatting (`**bold**`,
-//! `*italic*`, `` `code` ``, `[links](url)`) is rendered at display time by
+//! `*`, `+` and ordered `N.`). Images accept an optional `=H` or `=WxH` size
+//! suffix after the URL (`![alt](src =80)`) that renders as `width`/`height`
+//! attributes. Parsing is deliberately simple and lossless enough for the
+//! semantic-document model. Inline formatting (`**bold**`, `*italic*`,
+//! `` `code` ``, `[links](url)`) is rendered at display time by
 //! [`render_inline`]; source text keeps the raw markers.
 
 use serde_json::json;
@@ -81,10 +83,14 @@ pub fn parse_markdown(source: &str) -> Vec<ParsedBlock> {
             continue;
         }
 
-        if let Some((alt, src)) = parse_image_line(trimmed) {
+        if let Some((alt, src, size)) = parse_image_line(trimmed) {
+            let mut content = json!({ "src": src, "alt": alt });
+            if !size.is_empty() {
+                content["size"] = json!(size);
+            }
             blocks.push(ParsedBlock {
                 kind: BlockKind::Image,
-                content: json!({ "src": src, "alt": alt }),
+                content,
             });
             i += 1;
             continue;
@@ -155,7 +161,7 @@ fn is_horizontal_rule(line: &str) -> bool {
     chars.len() >= 3 && chars.iter().all(|&c| c == '-' || c == '_' || c == '*')
 }
 
-fn parse_image_line(line: &str) -> Option<(String, String)> {
+fn parse_image_line(line: &str) -> Option<(String, String, String)> {
     let line = line.trim();
     let rest = line.strip_prefix('!')?;
     let open = rest.find('[')?;
@@ -164,11 +170,63 @@ fn parse_image_line(line: &str) -> Option<(String, String)> {
     let after = rest[open + 1 + close + 1..].trim_start();
     let paren_open = after.strip_prefix('(')?;
     let paren_close = paren_open.find(')')?;
-    let src = paren_open[..paren_close].trim().to_string();
+    let src = paren_open[..paren_close].trim();
     if src.is_empty() {
         return None;
     }
-    Some((alt, src))
+    let (src, size) = split_image_size(src);
+    if src.is_empty() {
+        return None;
+    }
+    Some((alt, src, size))
+}
+
+/// Split a trailing ` =SIZE` suffix off an image URL, where SIZE is `H`,
+/// `WxH`, `Wx`, or `xH` (digits only). Returns `(url, size)`; anything that
+/// doesn't match is left in the URL, preserving the previous behavior.
+fn split_image_size(src: &str) -> (String, String) {
+    if let Some(eq) = src.rfind('=') {
+        let before = &src[..eq];
+        let after = &src[eq + 1..];
+        if (before.ends_with(' ') || before.ends_with('\t')) && is_valid_size(after) {
+            return (before.trim_end().to_string(), after.to_string());
+        }
+    }
+    (src.to_string(), String::new())
+}
+
+/// Whether `s` is a valid size: `H`, `WxH`, `Wx`, or `xH` with digits only.
+fn is_valid_size(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    if let Some((w, h)) = s.split_once('x') {
+        let digits = |part: &str| part.chars().all(|c| c.is_ascii_digit());
+        (w.is_empty() || digits(w)) && (h.is_empty() || digits(h)) && !(w.is_empty() && h.is_empty())
+    } else {
+        s.chars().all(|c| c.is_ascii_digit())
+    }
+}
+
+/// The `width`/`height` attributes (including the leading space) for an image
+/// size suffix, or an empty string when there is none. The value is
+/// re-validated so a hand-crafted block can never inject extra attributes.
+fn image_size_attrs(size: &str) -> String {
+    let digits = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
+    if let Some((w, h)) = size.split_once('x') {
+        let mut attrs = String::new();
+        if digits(w) {
+            attrs.push_str(&format!(" width=\"{w}\""));
+        }
+        if digits(h) {
+            attrs.push_str(&format!(" height=\"{h}\""));
+        }
+        attrs
+    } else if digits(size) {
+        format!(" height=\"{size}\"")
+    } else {
+        String::new()
+    }
 }
 
 /// Parse a list item line. Returns `(ordered, item_text)` for unordered
@@ -262,10 +320,12 @@ pub fn render_html<'a>(blocks: impl IntoIterator<Item = (BlockKind, &'a BlockCon
             BlockKind::Image => {
                 let src = content.get("src").and_then(|v| v.as_str()).unwrap_or("");
                 let alt = content.get("alt").and_then(|v| v.as_str()).unwrap_or("");
+                let size = content.get("size").and_then(|v| v.as_str()).unwrap_or("");
                 out.push_str(&format!(
-                    "<p><img src=\"{}\" alt=\"{}\" /></p>\n",
+                    "<p><img src=\"{}\" alt=\"{}\"{} /></p>\n",
                     html_escape(src),
-                    html_escape(alt)
+                    html_escape(alt),
+                    image_size_attrs(size)
                 ));
             }
             BlockKind::Divider => out.push_str("<hr />\n"),
@@ -464,6 +524,69 @@ mod tests {
             blocks[1].content.get("src").unwrap(),
             "https://example.com/x.png"
         );
+    }
+
+    #[test]
+    fn parses_image_size_suffix() {
+        let blocks = parse_markdown(
+            "![Get it on F-Droid](https://fdroid.gitlab.io/artwork/badge/get-it-on.png =80)",
+        );
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, BlockKind::Image);
+        assert_eq!(
+            blocks[0].content.get("src").unwrap(),
+            "https://fdroid.gitlab.io/artwork/badge/get-it-on.png"
+        );
+        assert_eq!(blocks[0].content.get("size").unwrap(), "80");
+    }
+
+    #[test]
+    fn renders_image_with_size_attributes() {
+        for (suffix, attrs) in [
+            ("=80", "height=\"80\""),
+            ("=640x360", "width=\"640\" height=\"360\""),
+            ("=640x", "width=\"640\""),
+            ("=x360", "height=\"360\""),
+        ] {
+            let md = format!("![a](https://e.com/x.png {suffix})");
+            let blocks = parse_markdown(&md);
+            let html = render_html(vec![(blocks[0].kind, &blocks[0].content)]);
+            assert!(html.contains(attrs), "for {suffix}: {html}");
+        }
+
+        // The exact badge case from the feature request.
+        let blocks = parse_markdown(
+            "![Get it on F-Droid](https://fdroid.gitlab.io/artwork/badge/get-it-on.png =80)",
+        );
+        let html = render_html(vec![(blocks[0].kind, &blocks[0].content)]);
+        assert_eq!(
+            html,
+            "<p><img src=\"https://fdroid.gitlab.io/artwork/badge/get-it-on.png\" alt=\"Get it on F-Droid\" height=\"80\" /></p>\n"
+        );
+    }
+
+    #[test]
+    fn malformed_size_stays_in_src() {
+        let blocks = parse_markdown("![a](https://e.com/x.png =8.5)");
+        assert_eq!(
+            blocks[0].content.get("src").unwrap(),
+            "https://e.com/x.png =8.5"
+        );
+        assert!(blocks[0].content.get("size").is_none());
+        let html = render_html(vec![(blocks[0].kind, &blocks[0].content)]);
+        assert_eq!(
+            html,
+            "<p><img src=\"https://e.com/x.png =8.5\" alt=\"a\" /></p>\n"
+        );
+    }
+
+    #[test]
+    fn forged_size_cannot_inject_attributes() {
+        let html = render_html(vec![(
+            BlockKind::Image,
+            &json!({ "src": "/x.png", "alt": "x", "size": "\" onerror=\"alert(1)" }),
+        )]);
+        assert_eq!(html, "<p><img src=\"/x.png\" alt=\"x\" /></p>\n");
     }
 
     #[test]

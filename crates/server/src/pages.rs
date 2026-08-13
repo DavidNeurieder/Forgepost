@@ -2058,7 +2058,12 @@ fn blocks_to_markdown(doc: &forgepost_content::Document) -> String {
             BlockKind::Image => {
                 let alt = c.get("alt").and_then(|v| v.as_str()).unwrap_or_default();
                 let src = c.get("src").and_then(|v| v.as_str()).unwrap_or_default();
-                format!("![{alt}]({src})")
+                let size = c.get("size").and_then(|v| v.as_str()).unwrap_or_default();
+                if size.is_empty() {
+                    format!("![{alt}]({src})")
+                } else {
+                    format!("![{alt}]({src} ={size})")
+                }
             }
             BlockKind::List { ordered } => {
                 let items = c
