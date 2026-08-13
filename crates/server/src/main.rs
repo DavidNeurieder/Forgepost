@@ -15,6 +15,7 @@ use axum::{
 };
 use axum_server::tls_rustls::RustlsConfig;
 use clap::{Args, Parser, Subcommand};
+use forgepost_server::analytics::RateLimiter;
 use forgepost_server::experiments;
 use forgepost_server::repository::{Repository, SqliteRepository};
 use rustls_acme::AcmeConfig;
@@ -69,6 +70,9 @@ struct ServeArgs {
     /// Port for the HTTP→HTTPS redirect listener (default 80).
     #[arg(long, env = "FORGEPOST_HTTP_REDIRECT_PORT", default_value_t = 80)]
     http_redirect_port: u16,
+    /// Directory where uploaded media bytes are stored (served at /media).
+    #[arg(long, env = "FORGEPOST_MEDIA_DIR")]
+    media_dir: Option<PathBuf>,
 }
 
 impl Default for ServeArgs {
@@ -82,6 +86,7 @@ impl Default for ServeArgs {
             tls_cache_dir: "./tls".into(),
             no_http_redirect: false,
             http_redirect_port: 80,
+            media_dir: None,
         }
     }
 }
@@ -137,11 +142,18 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     let mode = tls_mode(&args)?;
     let secure = matches!(mode, TlsMode::Byo { .. } | TlsMode::Acme { .. });
-    let app = if secure {
-        forgepost_server::app_secure(repo)
-    } else {
-        forgepost_server::app(repo)
+    let media_dir = match &args.media_dir {
+        Some(dir) => dir.clone(),
+        None => default_media_dir(&args.database_url),
     };
+    tokio::fs::create_dir_all(&media_dir).await?;
+    tracing::info!(media_dir = %media_dir.display(), "media directory ready");
+    let app = forgepost_server::app_with_media(
+        repo,
+        RateLimiter::new(RateLimiter::DEFAULT_MAX),
+        secure,
+        media_dir,
+    );
     let socket_addr: std::net::SocketAddr = args.addr.parse()?;
 
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
@@ -237,6 +249,17 @@ fn tls_mode(args: &ServeArgs) -> anyhow::Result<TlsMode> {
         (None, None) => Ok(TlsMode::None),
         _ => anyhow::bail!("--tls-cert and --tls-key must be provided together"),
     }
+}
+
+/// Default media directory: a `media/` folder next to the SQLite database.
+fn default_media_dir(database_url: &str) -> PathBuf {
+    let db_path = database_url
+        .strip_prefix("sqlite://")
+        .unwrap_or(database_url);
+    let parent = Path::new(db_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    parent.join("media")
 }
 
 /// Host that HTTPS redirects should point at: the configured domain in ACME

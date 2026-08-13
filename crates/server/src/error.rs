@@ -21,6 +21,18 @@ impl From<RepositoryError> for PageError {
     }
 }
 
+impl From<std::io::Error> for ApiError {
+    fn from(err: std::io::Error) -> Self {
+        Self(RepositoryError::from(err))
+    }
+}
+
+impl From<std::io::Error> for PageError {
+    fn from(err: std::io::Error) -> Self {
+        Self(ApiError::from(err))
+    }
+}
+
 impl From<ApiError> for PageError {
     fn from(err: ApiError) -> Self {
         Self(err)
@@ -60,6 +72,7 @@ impl ApiError {
             RepositoryError::InvalidInput(m) => (StatusCode::BAD_REQUEST, m.clone()),
             RepositoryError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
             RepositoryError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate limited".into()),
+            RepositoryError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "io error".into()),
             RepositoryError::Uuid(_) => (StatusCode::BAD_REQUEST, "invalid id".into()),
             RepositoryError::Database(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             RepositoryError::Migration(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),

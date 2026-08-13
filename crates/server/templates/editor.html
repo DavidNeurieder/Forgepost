@@ -18,6 +18,8 @@
     <textarea id="markdown" name="markdown" rows="16">{{ markdown }}</textarea>
   </field>
   <div class="form-row">
+    <button type="button" id="upload-image" class="secondary">Upload image</button>
+    <input type="file" id="media-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
     <button type="submit">Save</button>
     {% if status != "published" %}
     <button type="submit" formaction="/admin/editor/{{ id }}/publish" name="publish" value="1">Publish</button>
@@ -58,6 +60,50 @@
 				})
 				.catch(function () { status.textContent = 'Preview failed.'; });
 		}, 400);
+	});
+
+	var uploadBtn = document.getElementById('upload-image');
+	var mediaInput = document.getElementById('media-input');
+	var csrf = document.querySelector('input[name="csrf_token"]').value;
+
+	uploadBtn.addEventListener('click', function (e) {
+		e.preventDefault();
+		mediaInput.click();
+	});
+
+	function insertAtCursor(text) {
+		var before = textarea.value.slice(0, textarea.selectionStart);
+		var after = textarea.value.slice(textarea.selectionEnd);
+		var prefix = before && before.charAt(before.length - 1) !== '\n' ? '\n' : '';
+		var suffix = after && after.charAt(0) !== '\n' ? '\n' : '';
+		var pos = textarea.selectionStart + prefix.length;
+		textarea.value = before + prefix + text + suffix + after;
+		textarea.setSelectionRange(pos, pos + text.length);
+		textarea.focus();
+	}
+
+	mediaInput.addEventListener('change', function () {
+		var file = mediaInput.files && mediaInput.files[0];
+		if (!file) { return; }
+		var formData = new FormData();
+		formData.append('data', file);
+		status.textContent = 'Uploading image…';
+		fetch('/admin/media', {
+			method: 'POST',
+			headers: { 'x-csrf-token': csrf },
+			body: formData
+		})
+			.then(function (r) {
+				if (!r.ok) { throw new Error('upload failed'); }
+				return r.json();
+			})
+			.then(function (data) {
+				insertAtCursor('![alt](' + data.url + ')');
+				status.textContent = 'Image uploaded.';
+				textarea.dispatchEvent(new Event('input'));
+			})
+			.catch(function () { status.textContent = 'Upload failed.'; })
+			.finally(function () { mediaInput.value = ''; });
 	});
 })();
 </script>

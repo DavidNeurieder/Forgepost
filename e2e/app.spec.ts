@@ -99,6 +99,46 @@ test('the owner creates, saves, and publishes a post', async ({ browser }) => {
 	await page.context().close();
 });
 
+test('the owner uploads an image and it renders in the article', async ({ browser }) => {
+	expect(docId).not.toBe('');
+	const fs = await import('fs');
+	const os = await import('os');
+	const path = await import('path');
+
+	// A real PNG on disk (magic bytes only; the server never decodes it).
+	const pngPath = path.join(os.tmpdir(), 'e2e-upload.png');
+	fs.writeFileSync(pngPath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+
+	const page = await adminPage(browser);
+	await gotoDashboard(page);
+	await page.goto(`/admin/editor/${docId}`);
+	await expect(page.locator('#markdown')).toBeVisible();
+
+	await page.locator('#media-input').setInputFiles(pngPath);
+
+	// The upload inserts `![alt](/media/<uuid>.png)` at the cursor.
+	await expect.poll(() => page.locator('#markdown').inputValue()).toContain('![alt](/media/');
+	const markdown = await page.locator('#markdown').inputValue();
+	const match = markdown.match(/!\[alt\]\((\/media\/[a-f0-9-]+\.png)\)/);
+	expect(match).not.toBeNull();
+	const mediaUrl = match![1];
+
+	// The media endpoint serves the uploaded bytes as a PNG, without auth.
+	const resp = await page.request.get(mediaUrl);
+	expect(resp.status()).toBe(200);
+	expect(resp.headers()['content-type']).toBe('image/png');
+
+	// The live preview renders the image block.
+	await expect(page.locator('#preview-body img')).toHaveAttribute('src', mediaUrl);
+
+	// Save, then the published article shows the image too.
+	await page.getByRole('button', { name: 'Save', exact: true }).click();
+	await expect(page.getByText('Saved')).toBeVisible();
+	await page.goto(`/articles/${slug}`);
+	await expect(page.locator('.article-body img')).toHaveAttribute('src', mediaUrl);
+	await page.context().close();
+});
+
 test('external readers can view the article and leave a comment', async ({ browser }) => {
 	expect(slug).not.toBe('');
 	const context = await browser.newContext();

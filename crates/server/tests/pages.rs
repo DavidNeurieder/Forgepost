@@ -7,7 +7,9 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, Response, StatusCode, header};
+use forgepost_server::analytics::RateLimiter;
 use forgepost_server::app;
+use forgepost_server::app_with_media;
 use forgepost_server::repository::{Repository, SqliteRepository};
 use http_body_util::BodyExt;
 use serde_json::Value;
@@ -892,6 +894,192 @@ async fn static_assets_are_served() {
     }
 
     let (status, _) = send(&app, req(Method::GET, "/static/missing.txt", None, None)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// Media uploads (M6)
+// ---------------------------------------------------------------------------
+
+/// Like `test_app()` but with an isolated media directory for uploads.
+async fn media_app(dir: &tempfile::TempDir) -> Router {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("memory pool");
+    let repo = SqliteRepository::from_pool(pool);
+    repo.migrate().await.expect("migrations apply");
+    app_with_media(
+        Arc::new(repo),
+        RateLimiter::new(RateLimiter::DEFAULT_MAX),
+        false,
+        dir.path().to_path_buf(),
+    )
+}
+
+/// A PNG whose first 8 bytes are the real magic (enough for the sniffer; the
+/// tests never decode the image).
+fn tiny_png() -> Vec<u8> {
+    let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    png.extend_from_slice(&[0x00, 0x00, 0x00, 0x0D, b'I', b'H', b'D', b'R']);
+    png
+}
+
+/// A multipart/form-data request with a single `data` file part.
+fn multipart_req(
+    cookie: &str,
+    csrf: &str,
+    filename: &str,
+    content_type: &str,
+    bytes: &[u8],
+) -> Request<Body> {
+    let boundary = "test-boundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"data\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    Request::builder()
+        .method(Method::POST)
+        .uri("/admin/media")
+        .header(header::COOKIE, cookie)
+        .header(CSRF_HEADER, csrf)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn media_upload_requires_login_and_csrf() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = media_app(&dir).await;
+    let png = tiny_png();
+
+    // No session: 401, nothing written.
+    let (status, _resp) = send(&app, multipart_req("", "", "a.png", "image/png", &png)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let cookie = setup_owner(&app).await;
+
+    // Authenticated but wrong CSRF: 403, nothing written.
+    let (status, _) = send(
+        &app,
+        multipart_req(&cookie, "nope", "a.png", "image/png", &png),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn media_upload_and_serve_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = media_app(&dir).await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+    let png = tiny_png();
+
+    let (status, resp) = send(
+        &app,
+        multipart_req(&cookie, &csrf, "cat.png", "image/png", &png),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let url = body_json(resp).await["url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("/media/"));
+    assert!(url.ends_with(".png"));
+
+    // Exactly one file, stored under the generated name (client filename never
+    // used: the file on disk is not "cat.png").
+    let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+    assert_eq!(entries.len(), 1);
+    let disk_name = entries[0].as_ref().unwrap().file_name();
+    assert_eq!(format!("/media/{}", disk_name.to_string_lossy()), url);
+
+    // Serve: original bytes, sniffed content type, hardened headers, and it
+    // works without a session cookie.
+    let (status, resp) = send(&app, req(Method::GET, &url, None, None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/png"
+    );
+    assert_eq!(
+        resp.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=31536000, immutable"
+    );
+    let served = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(served.as_ref(), png.as_slice());
+}
+
+#[tokio::test]
+async fn media_upload_rejects_svg_oversize_and_serves_unknown_as_404() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = media_app(&dir).await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+
+    // SVG is rejected outright (scriptable if served from the same origin).
+    let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>".to_vec();
+    let (status, resp) = send(
+        &app,
+        multipart_req(&cookie, &csrf, "x.svg", "image/svg+xml", &svg),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let html = body_text(resp).await;
+    assert!(html.contains("unsupported image type"));
+
+    // Empty upload is rejected.
+    let (status, _) = send(
+        &app,
+        multipart_req(&cookie, &csrf, "x.png", "image/png", &[]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Oversize upload is rejected and nothing lands on disk.
+    let mut big = tiny_png();
+    big.extend(std::iter::repeat_n(0u8, 10 * 1024 * 1024 + 1));
+    let (status, _) = send(
+        &app,
+        multipart_req(&cookie, &csrf, "big.png", "image/png", &big),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+    // Traversal-shaped names never reach the filesystem.
+    let (status, _) = send(
+        &app,
+        req(Method::GET, "/media/..%2Fforgepost.db", None, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Unknown (but well-formed) names are 404.
+    let (status, _) = send(
+        &app,
+        req(
+            Method::GET,
+            "/media/00000000-0000-0000-0000-000000000000.png",
+            None,
+            None,
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 

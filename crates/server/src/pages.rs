@@ -7,19 +7,21 @@
 //! admin forms carry a hidden `csrf_token` field verified against the session.
 
 use askama::Template;
-use axum::extract::{Form, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::Json;
+use axum::extract::{Form, Multipart, Path, Query, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use forgepost_content::BlockKind;
+use forgepost_content::{BlockKind, now_ms};
 use forgepost_experiments::Recommendation;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::{self, AuthUser};
 use crate::error::{ApiError, PageError};
 use crate::experiments::ExperimentView;
-use crate::model::SiteSettings;
+use crate::model::{Media, SiteSettings};
 use crate::repository::RepositoryError;
 
 // ---------------------------------------------------------------------------
@@ -1655,6 +1657,128 @@ pub(crate) async fn static_file(Path(name): Path<String>) -> Result<Response, Pa
         _ => return Err(not_found("static file not found").into()),
     };
     Ok(([(header::CONTENT_TYPE, content_type)], body).into_response())
+}
+
+/// Maximum accepted upload size (10 MiB), enough for photos; the MVP stores
+/// original bytes only, so huge files would otherwise bloat disk usage.
+const MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
+
+/// Upload an image to the media directory. Owner-only; the CSRF token travels
+/// in the `x-csrf-token` header. The client's filename is never used: files
+/// are stored under `<uuid>.<ext>` where `<ext>` comes from a magic-byte sniff
+/// (PNG/JPEG/GIF/WebP only — SVG and anything else is rejected).
+pub(crate) async fn media_upload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Response, PageError> {
+    let Some(auth) = require_admin(&state, &headers).await? else {
+        return Ok((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response());
+    };
+    auth::verify_csrf(&headers, &auth.csrf_token)?;
+
+    let mut data: Vec<u8> = Vec::new();
+    let mut saw_data = false;
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::bad_request(format!("multipart error: {e}")))?
+    {
+        if field.name() != Some("data") {
+            continue;
+        }
+        saw_data = true;
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|e| ApiError::bad_request(format!("upload error: {e}")))?
+        {
+            data.extend_from_slice(&chunk);
+            if data.len() > MAX_MEDIA_BYTES {
+                return Err(ApiError::bad_request("image too large (max 10 MiB)").into());
+            }
+        }
+    }
+    if !saw_data {
+        return Err(ApiError::bad_request("missing `data` field").into());
+    }
+    let Some((content_type, ext)) = sniff_image(&data) else {
+        return Err(ApiError::bad_request(
+            "unsupported image type (only PNG, JPEG, GIF, and WebP are accepted)",
+        )
+        .into());
+    };
+    let sha256 = hex::encode(Sha256::digest(&data));
+    let disk_name = format!("{}.{ext}", Uuid::new_v4());
+    tokio::fs::create_dir_all(&state.media_dir).await?;
+    tokio::fs::write(state.media_dir.join(&disk_name), &data).await?;
+    state
+        .repo
+        .insert_media(&Media {
+            id: Uuid::new_v4(),
+            disk_name: disk_name.clone(),
+            content_type: content_type.to_string(),
+            size_bytes: data.len() as i64,
+            sha256,
+            created_at_ms: now_ms(),
+        })
+        .await?;
+    Ok(Json(serde_json::json!({ "url": format!("/media/{disk_name}") })).into_response())
+}
+
+/// Serve an uploaded file. Content type comes from the media table (the sniffed
+/// value stored at upload), so browsers render images rather than downloading
+/// them; `nosniff` prevents the browser from sniffing a different type. Names
+/// are plain `<uuid>.<ext>` so path traversal is impossible by construction,
+/// but the name is still validated before touching the filesystem.
+pub(crate) async fn media_file(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Response, PageError> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(not_found("media not found").into());
+    }
+    let Some(media) = state.repo.media_by_disk_name(&name).await? else {
+        return Err(not_found("media not found").into());
+    };
+    let bytes = tokio::fs::read(state.media_dir.join(&media.disk_name)).await?;
+    let mut response =
+        ([(header::CONTENT_TYPE, media.content_type.as_str())], bytes).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&media.size_bytes.to_string()).expect("valid header value"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    Ok(response)
+}
+
+/// Sniff the real image type from leading magic bytes. Returns the canonical
+/// MIME type and file extension. Deliberately does NOT accept SVG: serving an
+/// attacker-controlled SVG would let them ship script-bearing documents.
+fn sniff_image(data: &[u8]) -> Option<(&'static str, &'static str)> {
+    if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some(("image/png", "png"))
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(("image/jpeg", "jpg"))
+    } else if data.starts_with(b"GIF8") {
+        Some(("image/gif", "gif"))
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        Some(("image/webp", "webp"))
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@
 use crate::analytics::{ArticleStats, BandReach};
 use crate::auth::{SESSION_TTL_MS, sha256_hex};
 use crate::model::{
-    AnalyticsEvent, Comment, DocumentSummary, FullDocument, Session, SiteSettings, User,
+    AnalyticsEvent, Comment, DocumentSummary, FullDocument, Media, Session, SiteSettings, User,
 };
 use async_trait::async_trait;
 use forgepost_content::{
@@ -198,12 +198,21 @@ pub trait Repository: Send + Sync {
     async fn refresh_search_index(&self, document_id: DocumentId) -> Result<(), RepositoryError>;
     /// Rebuild the index from scratch for every published document.
     async fn rebuild_search_index_all(&self) -> Result<(), RepositoryError>;
+
+    // Media (M6)
+    /// Record an uploaded file. The caller writes the bytes to the media
+    /// directory itself; this only persists the metadata row.
+    async fn insert_media(&self, media: &Media) -> Result<(), RepositoryError>;
+    /// Fetch media metadata by the on-disk name (e.g. `<uuid>.png`).
+    async fn media_by_disk_name(&self, disk_name: &str) -> Result<Option<Media>, RepositoryError>;
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum RepositoryError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error("not found: {0}")]
@@ -1670,6 +1679,40 @@ impl Repository for SqliteRepository {
         }
         Ok(())
     }
+
+    async fn insert_media(&self, media: &Media) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "INSERT INTO media (id, disk_name, content_type, size_bytes, sha256, created_at_ms)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(media.id.to_string())
+        .bind(&media.disk_name)
+        .bind(&media.content_type)
+        .bind(media.size_bytes)
+        .bind(&media.sha256)
+        .bind(media.created_at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn media_by_disk_name(&self, disk_name: &str) -> Result<Option<Media>, RepositoryError> {
+        let row = sqlx::query(
+            "SELECT id, disk_name, content_type, size_bytes, sha256, created_at_ms FROM media
+             WHERE disk_name = ?",
+        )
+        .bind(disk_name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| Media {
+            id: Uuid::from_str(&r.get::<String, _>("id")).unwrap_or_default(),
+            disk_name: r.get("disk_name"),
+            content_type: r.get("content_type"),
+            size_bytes: r.get("size_bytes"),
+            sha256: r.get("sha256"),
+            created_at_ms: r.get("created_at_ms"),
+        }))
+    }
 }
 
 /// Populate the search index once after migrations (existing databases get
@@ -1916,6 +1959,37 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn media_roundtrip() {
+        let repo = repo().await;
+        let media = Media {
+            id: Uuid::new_v4(),
+            disk_name: "abc123.png".into(),
+            content_type: "image/png".into(),
+            size_bytes: 42,
+            sha256: "deadbeef".into(),
+            created_at_ms: now_ms(),
+        };
+        assert!(
+            repo.media_by_disk_name(&media.disk_name)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        repo.insert_media(&media).await.unwrap();
+        let got = repo
+            .media_by_disk_name(&media.disk_name)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.id, media.id);
+        assert_eq!(got.disk_name, "abc123.png");
+        assert_eq!(got.content_type, "image/png");
+        assert_eq!(got.size_bytes, 42);
+        assert_eq!(got.sha256, "deadbeef");
+        assert_eq!(got.created_at_ms, media.created_at_ms);
     }
 
     #[tokio::test]

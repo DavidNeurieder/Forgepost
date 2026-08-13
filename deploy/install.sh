@@ -60,7 +60,7 @@ echo "==> Creating runtime user and data dirs"
 if ! id -u forgepost &>/dev/null; then
   useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin forgepost
 fi
-mkdir -p "$DATA_DIR/tls" "$DATA_DIR/backups" "$CONF_DIR"
+mkdir -p "$DATA_DIR/tls" "$DATA_DIR/backups" "$DATA_DIR/media" "$CONF_DIR"
 chown -R forgepost:forgepost "$DATA_DIR"
 
 echo "==> Writing $CONF_DIR/forgepost.env"
@@ -69,6 +69,7 @@ cat > "$CONF_DIR/forgepost.env" <<EOF
 FORGEPOST_ADDR=0.0.0.0:443
 FORGEPOST_TLS_DOMAIN=$DOMAIN
 DATABASE_URL=sqlite://$DATA_DIR/forgepost.db
+FORGEPOST_MEDIA_DIR=$DATA_DIR/media
 RUST_LOG=info
 EOF
 chmod 600 "$CONF_DIR/forgepost.env"

@@ -24,35 +24,59 @@ pub struct AppState {
     pub rate_limiter: RateLimiter,
     /// Set once TLS is active so session/visitor cookies get the `Secure` flag.
     pub secure_cookies: bool,
+    /// Directory where uploaded media bytes live (`/media/*` serves them).
+    pub media_dir: std::path::PathBuf,
 }
 
 /// Build the Axum router with the default analytics rate limit. Storage is
 /// behind a `Repository` trait so a Postgres implementation can later be
-/// swapped in without touching routes (§5.4).
+/// swapped in without touching routes (§5.4). Uploads use a temp media dir.
 pub fn app(repo: Arc<dyn Repository>) -> Router {
-    app_with_config(repo, RateLimiter::new(RateLimiter::DEFAULT_MAX), false)
+    app_with_config(
+        repo,
+        RateLimiter::new(RateLimiter::DEFAULT_MAX),
+        false,
+        None,
+    )
 }
 
 /// Build the router with an explicit analytics rate limiter (tests use a tight
 /// limit to exercise the 429 path).
 pub fn app_with(repo: Arc<dyn Repository>, rate_limiter: RateLimiter) -> Router {
-    app_with_config(repo, rate_limiter, false)
+    app_with_config(repo, rate_limiter, false, None)
 }
 
 /// Build the router for HTTPS serving: cookies carry the `Secure` flag.
 pub fn app_secure(repo: Arc<dyn Repository>) -> Router {
-    app_with_config(repo, RateLimiter::new(RateLimiter::DEFAULT_MAX), true)
+    app_with_config(repo, RateLimiter::new(RateLimiter::DEFAULT_MAX), true, None)
+}
+
+/// Build the router with an explicit media directory (upload handler writes
+/// here; the serve handler reads from here).
+pub fn app_with_media(
+    repo: Arc<dyn Repository>,
+    rate_limiter: RateLimiter,
+    secure_cookies: bool,
+    media_dir: std::path::PathBuf,
+) -> Router {
+    app_with_config(repo, rate_limiter, secure_cookies, Some(media_dir))
 }
 
 fn app_with_config(
     repo: Arc<dyn Repository>,
     rate_limiter: RateLimiter,
     secure_cookies: bool,
+    media_dir: Option<std::path::PathBuf>,
 ) -> Router {
+    let media_dir = match media_dir {
+        Some(dir) => dir,
+        None => std::env::temp_dir().join("forgepost-media"),
+    };
     let state = AppState {
         repo,
         rate_limiter,
         secure_cookies,
+        media_dir,
     };
     Router::new()
         // Server-rendered pages (the whole blog UI lives in the binary now).
@@ -85,6 +109,8 @@ fn app_with_config(
         .route("/articles/{slug}", get(pages::article_page))
         .route("/articles/{slug}/comments", post(pages::comment_form))
         .route("/static/{name}", get(pages::static_file))
+        .route("/media/{name}", get(pages::media_file))
+        .route("/admin/media", post(pages::media_upload))
         .route("/rss", get(routes::rss))
         .route("/robots.txt", get(routes::robots_txt))
         .route("/sitemap.xml", get(routes::sitemap_xml))

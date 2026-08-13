@@ -172,6 +172,19 @@ pub struct ExperimentDecision {
     pub variant_conversions: Option<i64>,
 }
 
+/// One uploaded media file. The bytes live on disk in the media directory;
+/// `disk_name` is always the generated UUID plus a canonical extension, never
+/// the client's original filename.
+#[derive(Debug, Clone)]
+pub struct Media {
+    pub id: Uuid,
+    pub disk_name: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub sha256: String,
+    pub created_at_ms: i64,
+}
+
 /// A full-text search hit against the FTS5 index.
 #[derive(Debug, Clone)]
 pub struct SearchHit {
