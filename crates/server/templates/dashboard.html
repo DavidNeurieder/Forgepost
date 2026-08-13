@@ -70,6 +70,7 @@
       <th>Status</th>
       <th>Updated</th>
       <th>Analytics</th>
+      <th>Delete</th>
     </tr>
   </thead>
   <tbody>
@@ -78,15 +79,13 @@
       <td><a href="/admin/editor/{{ d.id }}">{{ d.title }}</a></td>
       <td><span class="badge {{ d.status }}">{{ d.status }}</span></td>
       <td class="muted">{{ d.updated }}</td>
+      <td><a class="button small" href="/admin/stats/{{ d.id }}">Stats</a></td>
       <td>
-        <div class="form-row" style="gap:0.4rem;">
-          <a class="button small" href="/admin/stats/{{ d.id }}">Stats</a>
-          <form method="post" action="/admin/editor/{{ d.id }}/delete"
-            onsubmit="return confirm('Delete this post permanently? This cannot be undone.');">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="danger small">Delete</button>
-          </form>
-        </div>
+        <form method="post" action="/admin/editor/{{ d.id }}/delete"
+          onsubmit="return confirm('Delete this post permanently? This cannot be undone.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="danger small">Delete</button>
+        </form>
       </td>
     </tr>
   {% endfor %}
