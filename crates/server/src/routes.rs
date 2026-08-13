@@ -710,7 +710,7 @@ pub async fn approve_comment(
 pub async fn rss(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Html<String>, ApiError> {
+) -> Result<Response, ApiError> {
     let site = state.repo.site_settings().await?;
     let base = crate::pages::canonical_base(&state, &site, &headers);
     let published = state.repo.list_published().await?;
@@ -727,13 +727,14 @@ pub async fn rss(
             items.push_str(&format!(
                 "<item><title>{}</title><link>{}</link><guid isPermaLink=\"true\">{}</guid><description>{}</description><pubDate>{}</pubDate></item>",
                 xml_escape(&full.document.title),
-                url,
-                url,
+                xml_escape(&url),
+                xml_escape(&url),
                 xml_escape(&text),
                 pub_date,
             ));
         }
     }
+    let base = xml_escape(&base);
     let feed = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\"><channel><title>{}</title><link>{}</link><description>{}</description><atom:link href=\"{}/rss\" rel=\"self\" type=\"application/rss+xml\"/>{items}</channel></rss>",
         xml_escape(&site.name),
@@ -741,7 +742,11 @@ pub async fn rss(
         xml_escape(&site.tagline),
         base,
     );
-    Ok(Html(feed))
+    Ok((
+        [(header::CONTENT_TYPE, "application/rss+xml; charset=utf-8")],
+        feed,
+    )
+        .into_response())
 }
 
 pub async fn robots_txt(

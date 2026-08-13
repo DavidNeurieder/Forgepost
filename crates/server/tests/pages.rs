@@ -1595,6 +1595,10 @@ async fn settings_form_updates_name_and_theme() {
     assert!(html.contains("<meta property=\"og:site_name\" content=\"My Journal\">"));
 
     let (_, resp) = send(&app, req(Method::GET, "/rss", None, None)).await;
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/rss+xml; charset=utf-8"
+    );
     let body = body_text(resp).await;
     assert!(body.contains("<title>My Journal</title>"));
     assert!(body.contains("<link>https://journal.example.com</link>"));
