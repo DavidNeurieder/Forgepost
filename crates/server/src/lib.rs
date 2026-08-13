@@ -4,6 +4,7 @@ pub mod analytics;
 pub mod auth;
 pub mod error;
 pub mod experiments;
+pub mod import;
 pub mod model;
 pub mod pages;
 pub mod repository;
@@ -111,6 +112,7 @@ fn app_with_config(
         .route("/static/{name}", get(pages::static_file))
         .route("/media/{name}", get(pages::media_file))
         .route("/admin/media", post(pages::media_upload))
+        .route("/admin/import", post(pages::import_post))
         .route("/rss", get(routes::rss))
         .route("/robots.txt", get(routes::robots_txt))
         .route("/sitemap.xml", get(routes::sitemap_xml))

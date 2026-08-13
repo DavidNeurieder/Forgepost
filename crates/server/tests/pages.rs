@@ -1092,6 +1092,193 @@ async fn media_upload_rejects_svg_oversize_and_serves_unknown_as_404() {
 }
 
 // ---------------------------------------------------------------------------
+// Markdown import (single .md or .zip with images)
+// ---------------------------------------------------------------------------
+
+/// A multipart/form-data request for `/admin/import` with one `data` part.
+fn import_req(cookie: &str, csrf: &str, filename: &str, bytes: &[u8]) -> Request<Body> {
+    let boundary = "import-boundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"data\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    Request::builder()
+        .method(Method::POST)
+        .uri("/admin/import")
+        .header(header::COOKIE, cookie)
+        .header(CSRF_HEADER, csrf)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap()
+}
+
+/// Build an in-memory zip archive from `(path, bytes)` entries.
+fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write;
+    let mut buf = Vec::new();
+    {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let opts = zip::write::SimpleFileOptions::default();
+        for (name, data) in entries {
+            writer.start_file(*name, opts).unwrap();
+            writer.write_all(data).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+    buf
+}
+
+/// Follow an import's redirect to the editor page and return its HTML.
+async fn editor_after_import(app: &Router, cookie: &str, resp: Response<Body>) -> String {
+    let editor_uri = resp
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(editor_uri.starts_with("/admin/editor/"), "got {editor_uri}");
+    let (status, resp) = send(app, req(Method::GET, &editor_uri, Some(cookie), None)).await;
+    assert_eq!(status, StatusCode::OK);
+    body_text(resp).await
+}
+
+#[tokio::test]
+async fn import_requires_login_and_csrf() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = media_app(&dir).await;
+    let md = b"# Hello";
+
+    let (status, _resp) = send(&app, import_req("", "", "post.md", md)).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    let cookie = setup_owner(&app).await;
+    let (status, _) = send(&app, import_req(&cookie, "wrong-token", "post.md", md)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn import_markdown_with_front_matter_creates_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = media_app(&dir).await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+
+    let md = concat!(
+        "---\n",
+        "title: Imported Post\n",
+        "tags: tech\n",
+        "---\n",
+        "\n",
+        "# Heading\n",
+        "\n",
+        "Body text with a remote ![img](https://example.com/a.png).\n"
+    );
+    let (status, resp) = send(&app, import_req(&cookie, &csrf, "post.md", md.as_bytes())).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let html = editor_after_import(&app, &cookie, resp).await;
+    assert!(html.contains("Imported Post"), "title from front matter");
+    assert!(html.contains(r#"value="tech""#), "tags from front matter");
+    assert!(html.contains("Body text with a remote"), "body imported");
+    assert!(
+        html.contains("![img](https://example.com/a.png)"),
+        "remote image untouched"
+    );
+    assert!(
+        std::fs::read_dir(dir.path()).unwrap().count() == 0,
+        "no media written"
+    );
+}
+
+#[tokio::test]
+async fn import_zip_uploads_images_and_rewrites_refs() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = media_app(&dir).await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+
+    let png = tiny_png();
+    let zip = zip_bytes(&[
+        (
+            "post.md",
+            b"# Post\n\n![A](images/a.png)\n\n![B](https://x/b.png)\n",
+        ),
+        ("images/a.png", &png),
+    ]);
+    let (status, resp) = send(&app, import_req(&cookie, &csrf, "post.zip", &zip)).await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let html = editor_after_import(&app, &cookie, resp).await;
+
+    // The bundled image is rewritten to the media store; the remote stays.
+    assert!(!html.contains("images/a.png"), "local ref rewritten");
+    assert!(html.contains("[A](/media/"), "image rewritten to /media/");
+    assert!(html.contains("![B](https://x/b.png)"), "remote kept");
+    assert!(html.contains("Post"), "title from filename stem");
+
+    // Exactly one image landed on disk, and it is served back.
+    let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+    assert_eq!(entries.len(), 1);
+    let disk_name = entries[0].as_ref().unwrap().file_name();
+    let url = format!("/media/{}", disk_name.to_string_lossy());
+    let (status, resp) = send(&app, req(Method::GET, &url, None, None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/png"
+    );
+    let served = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(served.as_ref(), png.as_slice());
+}
+
+#[tokio::test]
+async fn import_rejects_bad_archives_and_local_refs_without_zip() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = media_app(&dir).await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+
+    // Plain .md with a local image reference: tell the user to zip it.
+    let (status, _) = send(
+        &app,
+        import_req(&cookie, &csrf, "post.md", b"# X\n\n![a](img.png)\n"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Zip with no markdown.
+    let zip = zip_bytes(&[("a.txt", b"nope")]);
+    let (status, _) = send(&app, import_req(&cookie, &csrf, "a.zip", &zip)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Zip with multiple markdown files.
+    let zip = zip_bytes(&[("a.md", b"a"), ("b.md", b"b")]);
+    let (status, _) = send(&app, import_req(&cookie, &csrf, "a.zip", &zip)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Not a zip at all.
+    let (status, _) = send(
+        &app,
+        import_req(&cookie, &csrf, "a.zip", b"this is not a zip"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Wrong file type.
+    let (status, _) = send(&app, import_req(&cookie, &csrf, "a.txt", b"hello")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+// ---------------------------------------------------------------------------
 // Settings (blog name + theme)
 // ---------------------------------------------------------------------------
 

@@ -15,6 +15,50 @@
   </form>
 </div>
 
+<h2 style="margin-top:2rem;">Import a post</h2>
+<p class="muted" style="margin-top:0.4rem;">
+  Upload an existing Markdown file (.md), or a .zip bundling it with its images
+  (<code>post.md</code> plus an <code>images/</code> folder). Title and tags are
+  read from front matter when present. The post opens as a draft to review.
+</p>
+<div class="form-row" id="import-row">
+  <input type="file" id="import-input" accept=".md,.markdown,.zip,text/markdown,application/zip">
+  <button type="button" id="import-button" class="secondary">Import post</button>
+  <span class="muted" id="import-status"></span>
+</div>
+<script>
+(function () {
+	var input = document.getElementById('import-input');
+	var button = document.getElementById('import-button');
+	var status = document.getElementById('import-status');
+	var csrf = document.querySelector('input[name="csrf_token"]').value;
+	button.addEventListener('click', function () {
+		var file = input.files && input.files[0];
+		if (!file) { status.textContent = 'Choose a .md or .zip file first.'; return; }
+		var formData = new FormData();
+		formData.append('data', file);
+		status.textContent = 'Importing…';
+		button.disabled = true;
+		fetch('/admin/import', {
+			method: 'POST',
+			headers: { 'x-csrf-token': csrf },
+			body: formData
+		}).then(function (r) {
+			if (r.ok) {
+				window.location = r.url;
+				return;
+			}
+			return r.json().catch(function () { return {}; }).then(function (body) {
+				throw new Error((body && body.error) || ('Import failed (' + r.status + ').'));
+			});
+		}).catch(function (err) {
+			status.textContent = err.message;
+			button.disabled = false;
+		});
+	});
+})();
+</script>
+
 <h2>Posts</h2>
 {% if docs.is_empty() %}
 <p class="muted">No posts yet. Create your first one.</p>

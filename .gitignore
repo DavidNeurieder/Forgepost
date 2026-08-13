@@ -13,15 +13,21 @@ e2e/.auth.json
 *.db
 *.db-shm
 *.db-wal
+*.sqlite3
 
-# TLS
+# TLS / secrets
 tls/
-
-# Misc
 .env
 .env.*
 
-# docs
-
+# Server data and docs that are regenerated
 old_docs/
 media/
+
+# Editor and OS droppings
+.DS_Store
+*.swp
+*~
+
+# Logs
+*.log

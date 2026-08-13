@@ -467,6 +467,7 @@ fn flash_message(key: Option<&str>) -> String {
         Some("experiment_decided") => "Decision applied.".into(),
         Some("experiment_failed") => "Could not create experiment.".into(),
         Some("variant_required") => "At least one variant with content is required.".into(),
+        Some("imported") => "Imported draft created — review it before publishing.".into(),
         _ => String::new(),
     }
 }
@@ -1675,6 +1676,11 @@ pub(crate) async fn static_file(Path(name): Path<String>) -> Result<Response, Pa
 /// Maximum accepted upload size (10 MiB), enough for photos; the MVP stores
 /// original bytes only, so huge files would otherwise bloat disk usage.
 const MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
+/// Whole-archive import cap (a .md file plus images).
+const MAX_IMPORT_BYTES: usize = 64 * 1024 * 1024;
+/// Zip-bomb guards: total decompressed bytes and entry count.
+const MAX_ARCHIVE_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 1_000;
 
 /// Upload an image to the media directory. Owner-only; the CSRF token travels
 /// in the `x-csrf-token` header. The client's filename is never used: files
@@ -1741,6 +1747,161 @@ pub(crate) async fn media_upload(
         })
         .await?;
     Ok(Json(serde_json::json!({ "url": format!("/media/{disk_name}") })).into_response())
+}
+
+/// Import an existing Markdown post (`.md`) or a `.zip` bundling it with its
+/// images (`post.md` + `images/`, the standard export shape). Front matter
+/// (`title`, `tags`) is read and stripped, local images are uploaded to the
+/// media store and their references rewritten to `/media/<name>`, and the post
+/// is created as a draft so the owner can review before publishing.
+pub(crate) async fn import_post(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Response, PageError> {
+    let Some(auth) = require_admin(&state, &headers).await? else {
+        return Ok(login_redirect());
+    };
+    auth::verify_csrf(&headers, &auth.csrf_token)?;
+
+    let mut data: Vec<u8> = Vec::new();
+    let mut filename = String::new();
+    let mut saw_data = false;
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::bad_request(format!("multipart error: {e}")))?
+    {
+        if field.name() != Some("data") {
+            continue;
+        }
+        saw_data = true;
+        if let Some(name) = field.file_name() {
+            filename = name.to_string();
+        }
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|e| ApiError::bad_request(format!("upload error: {e}")))?
+        {
+            data.extend_from_slice(&chunk);
+            if data.len() > MAX_IMPORT_BYTES {
+                return Err(ApiError::bad_request("import too large (max 64 MiB)").into());
+            }
+        }
+    }
+    if !saw_data || data.is_empty() {
+        return Err(ApiError::bad_request("missing file").into());
+    }
+
+    let lower = filename.to_ascii_lowercase();
+    let is_zip = lower.ends_with(".zip");
+    let is_markdown = lower.ends_with(".md") || lower.ends_with(".markdown");
+    if !is_zip && !is_markdown {
+        return Err(ApiError::bad_request("expected a .md or .zip file").into());
+    }
+
+    // A zip holds the images; a bare .md can only reference remote images.
+    let (mut markdown, _, local_images) = if is_zip {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&data))
+            .map_err(|_| ApiError::bad_request("not a valid zip archive"))?;
+        let post =
+            crate::import::extract_post(&mut archive, MAX_ARCHIVE_TOTAL_BYTES, MAX_ARCHIVE_ENTRIES)
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let images = crate::import::scan_local_images(
+            &post.markdown,
+            &post.base_dir,
+            &mut archive,
+            MAX_MEDIA_BYTES as u64,
+        );
+        (post.markdown, post.base_dir, images)
+    } else {
+        (
+            String::from_utf8_lossy(&data).into_owned(),
+            String::new(),
+            Vec::new(),
+        )
+    };
+
+    let (front_matter, body) = crate::import::parse_front_matter(&markdown);
+    markdown = body;
+
+    // Upload every bundled image to the media store, keyed by its original URL.
+    let mut url_map = std::collections::HashMap::new();
+    for img in local_images {
+        let Some((content_type, ext)) = sniff_image(&img.bytes) else {
+            continue;
+        };
+        let sha256 = hex::encode(Sha256::digest(&img.bytes));
+        let disk_name = format!("{}.{ext}", Uuid::new_v4());
+        tokio::fs::create_dir_all(&state.media_dir).await?;
+        tokio::fs::write(state.media_dir.join(&disk_name), &img.bytes).await?;
+        state
+            .repo
+            .insert_media(&Media {
+                id: Uuid::new_v4(),
+                disk_name: disk_name.clone(),
+                content_type: content_type.to_string(),
+                size_bytes: img.bytes.len() as i64,
+                sha256,
+                created_at_ms: now_ms(),
+            })
+            .await?;
+        url_map.insert(img.url, format!("/media/{disk_name}"));
+    }
+
+    let (markdown, _imported, unresolved) =
+        crate::import::rewrite_image_refs(&markdown, &mut |_alt, url| url_map.get(url).cloned());
+    if !is_zip && unresolved > 0 {
+        return Err(ApiError::bad_request(format!(
+            "found {unresolved} local image reference(s) — upload a .zip with the images \
+             alongside the markdown to import them"
+        ))
+        .into());
+    }
+
+    let title = front_matter
+        .as_ref()
+        .and_then(|m| m.title.clone())
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| title_from_filename(&filename));
+    let tags = front_matter.map(|m| m.tags).unwrap_or_default();
+
+    let mut full = state.repo.create_document(auth.user.id, "Untitled").await?;
+    state
+        .repo
+        .update_document_title(full.document.id, &title)
+        .await?;
+    state
+        .repo
+        .regenerate_draft_slug(full.document.id, &title)
+        .await?;
+    crate::routes::apply_markdown(&*state.repo, &mut full.document, &markdown).await?;
+    state
+        .repo
+        .set_document_tags(full.document.id, &tags)
+        .await?;
+
+    let uri = format!("/admin/editor/{}?flash=imported", full.document.id);
+    Ok(Redirect::to(&uri).into_response())
+}
+
+/// Derive a title from the uploaded filename (`my-post.md` → `My Post`).
+fn title_from_filename(filename: &str) -> String {
+    let stem = filename
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(filename);
+    stem.split(['-', '_'])
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Serve an uploaded file. Content type comes from the media table (the sniffed

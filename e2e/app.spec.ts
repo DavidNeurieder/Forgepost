@@ -142,6 +142,109 @@ test('the owner uploads an image and it renders in the article', async ({ browse
 	await page.context().close();
 });
 
+// CRC-32 and a minimal stored-only zip writer, so the import test can hand a
+// real .zip (post.md + images/) to the dashboard without external tooling.
+function crc32(buf: Buffer): number {
+	let c = 0xffffffff;
+	for (let i = 0; i < buf.length; i++) {
+		c ^= buf[i];
+		for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
+	}
+	return (c ^ 0xffffffff) >>> 0;
+}
+
+function buildZip(entries: { name: string; data: Buffer }[]): Buffer {
+	const parts: Buffer[] = [];
+	const central: Buffer[] = [];
+	let offset = 0;
+	for (const { name, data } of entries) {
+		const nameBuf = Buffer.from(name, 'utf8');
+		const crc = crc32(data);
+		const local = Buffer.alloc(30);
+		local.writeUInt32LE(0x04034b50, 0);
+		local.writeUInt16LE(20, 4);
+		local.writeUInt16LE(0, 6);
+		local.writeUInt16LE(0, 8);
+		local.writeUInt16LE(0, 10);
+		local.writeUInt16LE(0x21, 12);
+		local.writeUInt32LE(crc, 14);
+		local.writeUInt32LE(data.length, 18);
+		local.writeUInt32LE(data.length, 22);
+		local.writeUInt16LE(nameBuf.length, 26);
+		local.writeUInt16LE(0, 28);
+		parts.push(local, nameBuf, data);
+		const cd = Buffer.alloc(46);
+		cd.writeUInt32LE(0x02014b50, 0);
+		cd.writeUInt16LE(20, 4);
+		cd.writeUInt16LE(20, 6);
+		cd.writeUInt16LE(0, 8);
+		cd.writeUInt16LE(0, 10);
+		cd.writeUInt16LE(0x21, 12);
+		cd.writeUInt16LE(0x21, 14);
+		cd.writeUInt32LE(crc, 16);
+		cd.writeUInt32LE(data.length, 20);
+		cd.writeUInt32LE(data.length, 24);
+		cd.writeUInt16LE(nameBuf.length, 28);
+		cd.writeUInt16LE(0, 30);
+		cd.writeUInt16LE(0, 32);
+		cd.writeUInt16LE(0, 34);
+		cd.writeUInt16LE(0, 36);
+		cd.writeUInt32LE(0, 38);
+		cd.writeUInt32LE(offset, 42);
+		central.push(cd, nameBuf);
+		offset += 30 + nameBuf.length + data.length;
+	}
+	const cdBuf = Buffer.concat(central);
+	const eocd = Buffer.alloc(22);
+	eocd.writeUInt32LE(0x06054b50, 0);
+	eocd.writeUInt16LE(0, 4);
+	eocd.writeUInt16LE(0, 6);
+	eocd.writeUInt16LE(entries.length, 8);
+	eocd.writeUInt16LE(entries.length, 10);
+	eocd.writeUInt32LE(cdBuf.length, 12);
+	eocd.writeUInt32LE(offset, 16);
+	eocd.writeUInt16LE(0, 20);
+	return Buffer.concat([...parts, cdBuf, eocd]);
+}
+
+test('the owner imports a zip post with images as a draft', async ({ browser }) => {
+	const fs = await import('fs');
+	const os = await import('os');
+	const path = await import('path');
+
+	const zipPath = path.join(os.tmpdir(), 'e2e-import.zip');
+	const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+	fs.writeFileSync(
+		zipPath,
+		buildZip([
+			{ name: 'post.md', data: Buffer.from('---\ntitle: Imported by E2E\ntags: imported\n---\n\n# Imported by E2E\n\n![E2E image](images/photo.png)\n') },
+			{ name: 'images/photo.png', data: png }
+		])
+	);
+
+	const page = await adminPage(browser);
+	await gotoDashboard(page);
+
+	await page.locator('#import-input').setInputFiles(zipPath);
+	await page.getByRole('button', { name: 'Import post' }).click();
+	await page.waitForURL(/\/admin\/editor\/.+flash=imported/);
+
+	await expect(page.getByText('Imported draft created — review it before publishing.')).toBeVisible();
+	await expect(page.locator('.badge')).toHaveText('draft');
+	await expect(page.getByLabel('Title', { exact: true })).toHaveValue('Imported by E2E');
+	await expect(page.getByLabel('Tags')).toHaveValue('imported');
+
+	const markdown = await page.locator('#markdown').inputValue();
+	const match = markdown.match(/!\[E2E image\]\((\/media\/[a-f0-9-]+\.png)\)/);
+	expect(match).not.toBeNull();
+	const mediaUrl = match![1];
+
+	const resp = await page.request.get(mediaUrl);
+	expect(resp.status()).toBe(200);
+	expect(resp.headers()['content-type']).toBe('image/png');
+	await page.context().close();
+});
+
 test('external readers can view the article and leave a comment', async ({ browser }) => {
 	expect(slug).not.toBe('');
 	const context = await browser.newContext();
