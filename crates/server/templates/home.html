@@ -16,11 +16,6 @@
 <link rel="alternate" type="application/rss+xml" title="{{ site_name }} RSS" href="/rss">
 {% endblock %}
 {% block content %}
-<section class="hero">
-  <h1>{{ site_name }}</h1>
-  {% if !tagline.is_empty() %}<p class="tagline">{{ tagline }}</p>{% endif %}
-  <a class="rss-link" href="/rss">Subscribe via RSS</a>
-</section>
 {% if posts.is_empty() %}
 <p class="muted">No published posts yet.</p>
 {% else %}

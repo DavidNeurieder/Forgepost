@@ -97,7 +97,7 @@ header.site .container {
 
 header.site .brand {
 	font-weight: 700;
-	font-size: 1.1rem;
+	font-size: 1.5rem;
 	text-decoration: none;
 	color: var(--fg);
 }
@@ -478,33 +478,6 @@ ul.search-results .title {
 }
 
 /* Home page */
-.hero {
-	padding: 2.5rem 0 1.5rem;
-	border-bottom: 1px solid var(--border);
-	margin-bottom: 1.5rem;
-}
-
-.hero .tagline {
-	font-size: 1.15rem;
-	color: var(--muted);
-	margin: 0 0 0.75rem;
-}
-
-.hero h1 {
-	font-size: 1.6rem;
-	margin: 0 0 0.35rem;
-}
-
-.hero .rss-link {
-	font-size: 0.9rem;
-	color: var(--accent);
-	text-decoration: none;
-}
-
-.hero .rss-link:hover {
-	text-decoration: underline;
-}
-
 ul.post-cards {
 	list-style: none;
 	padding: 0;

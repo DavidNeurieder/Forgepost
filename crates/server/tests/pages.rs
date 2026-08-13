@@ -1535,7 +1535,7 @@ async fn settings_page_shows_current_values_and_default_theme() {
     // Defaults also show up on the anonymous pages.
     let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;
     let html = body_text(resp).await;
-    assert!(html.contains("<h1>Forgepost</h1>"));
+    assert!(html.contains("class=\"brand\" href=\"/\">Forgepost</a>"));
     assert!(html.contains("data-theme=\"system\""));
 }
 
@@ -1588,7 +1588,7 @@ async fn settings_form_updates_name_and_theme() {
     // The home page and RSS feed pick up the new name, theme, URL, and tagline.
     let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;
     let html = body_text(resp).await;
-    assert!(html.contains("<h1>My Journal</h1>"));
+    assert!(html.contains("class=\"brand\" href=\"/\">My Journal</a>"));
     assert!(html.contains("data-theme=\"sepia\""));
     assert!(html.contains("<meta name=\"description\" content=\"Notes on software.\">"));
     assert!(html.contains("<link rel=\"canonical\" href=\"https://journal.example.com\">"));
@@ -1693,6 +1693,6 @@ async fn settings_form_validates_input() {
     // Nothing was persisted.
     let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;
     let html = body_text(resp).await;
-    assert!(html.contains("<h1>Forgepost</h1>"));
+    assert!(html.contains("class=\"brand\" href=\"/\">Forgepost</a>"));
     assert!(html.contains("data-theme=\"system\""));
 }

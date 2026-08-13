@@ -35,7 +35,6 @@ struct HomeTemplate {
     flash: String,
     site_name: String,
     theme: String,
-    tagline: String,
     year: u32,
     seo: SeoMeta,
     posts: Vec<HomePost>,
@@ -723,7 +722,6 @@ pub(crate) async fn home_page(
         flash: String::new(),
         site_name: site.name.clone(),
         theme: site.theme,
-        tagline: site.tagline.clone(),
         year: current_year(),
         seo: SeoMeta {
             title: site.name,
