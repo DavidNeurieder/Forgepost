@@ -4,7 +4,11 @@
 //! code, horizontal rules, image-only blocks, and flat lists (unordered `-`,
 //! `*`, `+` and ordered `N.`). Images accept an optional `=H` or `=WxH` size
 //! suffix after the URL (`![alt](src =80)`) that renders as `width`/`height`
-//! attributes. Parsing is deliberately simple and lossless enough for the
+//! attributes, and may be wrapped in a link (`[![alt](src)](href)`). A
+//! paragraph consisting entirely of raw HTML `<img>` tags (each optionally
+//! wrapped in a `[...](url)` link, e.g. README badges) is converted to image
+//! blocks, so `[<img src="…" height="80">](https://…)` renders as a linked
+//! image. Parsing is deliberately simple and lossless enough for the
 //! semantic-document model. Inline formatting (`**bold**`, `*italic*`,
 //! `` `code` ``, `[links](url)`) is rendered at display time by
 //! [`render_inline`]; source text keeps the raw markers.
@@ -83,17 +87,33 @@ pub fn parse_markdown(source: &str) -> Vec<ParsedBlock> {
             continue;
         }
 
-        if let Some((alt, src, size)) = parse_image_line(trimmed) {
-            let mut content = json!({ "src": src, "alt": alt });
-            if !size.is_empty() {
-                content["size"] = json!(size);
+        if trimmed.starts_with('!') || trimmed.starts_with("[![") {
+            let mut rest = trimmed;
+            let mut images = Vec::new();
+            loop {
+                let Some(img) = parse_image_at_start(rest) else {
+                    break;
+                };
+                let consumed = img.consumed;
+                images.push(img);
+                rest = rest[consumed..].trim_start();
+                if rest.is_empty() {
+                    break;
+                }
+                if !(rest.starts_with('!') || rest.starts_with("[![")) {
+                    break;
+                }
             }
-            blocks.push(ParsedBlock {
-                kind: BlockKind::Image,
-                content,
-            });
-            i += 1;
-            continue;
+            if !images.is_empty() && rest.is_empty() {
+                for img in images {
+                    blocks.push(ParsedBlock {
+                        kind: BlockKind::Image,
+                        content: image_content(&img.src, &img.alt, &img.size, &img.href),
+                    });
+                }
+                i += 1;
+                continue;
+            }
         }
 
         if let Some((ordered, item)) = parse_list_marker(trimmed) {
@@ -138,6 +158,15 @@ pub fn parse_markdown(source: &str) -> Vec<ParsedBlock> {
             paragraph.push_str(l.trim_end());
             i += 1;
         }
+        if let Some(images) = html_img_paragraph(&paragraph) {
+            for img in images {
+                blocks.push(ParsedBlock {
+                    kind: BlockKind::Image,
+                    content: image_content(&img.src, &img.alt, &img.size, &img.href),
+                });
+            }
+            continue;
+        }
         blocks.push(ParsedBlock {
             kind: BlockKind::Paragraph,
             content: json!({ "text": paragraph }),
@@ -161,13 +190,69 @@ fn is_horizontal_rule(line: &str) -> bool {
     chars.len() >= 3 && chars.iter().all(|&c| c == '-' || c == '_' || c == '*')
 }
 
-fn parse_image_line(line: &str) -> Option<(String, String, String)> {
-    let line = line.trim();
-    let rest = line.strip_prefix('!')?;
-    let open = rest.find('[')?;
-    let close = rest[open + 1..].find(']')?;
-    let alt = rest[open + 1..open + 1 + close].to_string();
-    let after = rest[open + 1 + close + 1..].trim_start();
+/// The JSON content of an image block.
+fn image_content(src: &str, alt: &str, size: &str, href: &str) -> serde_json::Value {
+    let mut content = json!({ "src": src, "alt": alt });
+    if !size.is_empty() {
+        content["size"] = json!(size);
+    }
+    if !href.is_empty() {
+        content["href"] = json!(href);
+    }
+    content
+}
+
+/// One image parsed from Markdown or a raw HTML `<img>` tag.
+struct ParsedImage {
+    src: String,
+    alt: String,
+    size: String,
+    href: String,
+    /// Bytes consumed from the start of the input, including a link wrapper.
+    consumed: usize,
+}
+
+/// Parse an image at the very start of `s`: either Markdown `![alt](src)`,
+/// a linked Markdown image `[![alt](src)](href)`, or (not here) raw HTML —
+/// handled by [`html_img_paragraph`]. Returns `None` when `s` does not start
+/// with an image.
+fn parse_image_at_start(s: &str) -> Option<ParsedImage> {
+    if let Some(inner) = s.strip_prefix('[') {
+        let plain = parse_plain_image_at_start(inner)?;
+        let tail = inner[plain.consumed..].strip_prefix("](")?;
+        let close = tail.find(')')?;
+        let href = tail[..close].trim().to_string();
+        if href.is_empty() {
+            return None;
+        }
+        let consumed = 1 + plain.consumed + 1 + 1 + close + 1;
+        return Some(ParsedImage {
+            src: plain.src,
+            alt: plain.alt,
+            size: plain.size,
+            href,
+            consumed,
+        });
+    }
+    let plain = parse_plain_image_at_start(s)?;
+    Some(ParsedImage {
+        src: plain.src,
+        alt: plain.alt,
+        size: plain.size,
+        href: String::new(),
+        consumed: plain.consumed,
+    })
+}
+
+/// Parse an unlinked Markdown image `![alt](src =size)` at the start of `s`.
+fn parse_plain_image_at_start(s: &str) -> Option<ParsedImage> {
+    let rest = s.strip_prefix('!')?;
+    let close = rest.find(']')?;
+    if !rest.starts_with('[') {
+        return None;
+    }
+    let alt = rest[1..close].to_string();
+    let after = rest[close + 1..].trim_start();
     let paren_open = after.strip_prefix('(')?;
     let paren_close = paren_open.find(')')?;
     let src = paren_open[..paren_close].trim();
@@ -178,7 +263,174 @@ fn parse_image_line(line: &str) -> Option<(String, String, String)> {
     if src.is_empty() {
         return None;
     }
-    Some((alt, src, size))
+    // consumed: `!` + `[alt]` + `(` + src + `)`
+    let consumed = 1 + (close + 1) + 1 + paren_close + 1;
+    Some(ParsedImage {
+        src,
+        alt,
+        size,
+        href: String::new(),
+        consumed,
+    })
+}
+
+/// A raw HTML `<img>` tag extracted from a paragraph.
+struct HtmlImg {
+    src: String,
+    alt: String,
+    size: String,
+    href: String,
+}
+
+/// If `text` is a paragraph consisting entirely of raw HTML `<img>` tags —
+/// each optionally wrapped in a `[<img …>](url)` link and separated by
+/// whitespace — return the images in document order. Any other content returns
+/// `None`, leaving the paragraph untouched so raw HTML stays escaped and can
+/// never inject markup. Tags may span multiple lines (as README badges do).
+fn html_img_paragraph(text: &str) -> Option<Vec<HtmlImg>> {
+    let mut rest = text.trim();
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        if let Some(after_bracket) = rest.strip_prefix('[') {
+            let link_close = after_bracket.find("](")?;
+            let inner = &after_bracket[..link_close];
+            let href_part = &after_bracket[link_close + 2..];
+            let close_paren = href_part.find(')')?;
+            let href = href_part[..close_paren].trim().to_string();
+            if href.is_empty() {
+                return None;
+            }
+            let (img, consumed) = parse_html_img(inner)?;
+            if consumed != inner.trim_start().len() {
+                return None;
+            }
+            let mut img = img;
+            img.href = href;
+            out.push(img);
+            rest = href_part[close_paren + 1..].trim_start();
+            continue;
+        }
+        let (img, consumed) = parse_html_img(rest)?;
+        out.push(img);
+        rest = rest[consumed..].trim_start();
+    }
+    Some(out)
+}
+
+/// Parse one raw HTML `<img>` tag starting at `s`. Returns the (whitelisted)
+/// attributes and the number of bytes the whole tag occupies. Unknown or
+/// malformed attributes (e.g. `onerror`, non-digit `width`) are dropped.
+fn parse_html_img(s: &str) -> Option<(HtmlImg, usize)> {
+    let s = s.trim_start();
+    let t = s.strip_prefix('<')?;
+    let (name, rest) = read_ident(t)?;
+    if !name.eq_ignore_ascii_case("img") {
+        return None;
+    }
+    let mut src = String::new();
+    let mut alt = String::new();
+    let mut width = String::new();
+    let mut height = String::new();
+    let bytes = rest.as_bytes();
+    let mut pos = 0usize;
+    loop {
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+            pos += 1;
+        }
+        if pos >= bytes.len() {
+            return None;
+        }
+        if bytes[pos] == b'>' {
+            pos += 1;
+            break;
+        }
+        if bytes[pos] == b'/' {
+            pos += 1;
+            if pos < bytes.len() && bytes[pos] == b'>' {
+                pos += 1;
+                break;
+            }
+            continue;
+        }
+        let name_start = pos;
+        while pos < bytes.len()
+            && !matches!(
+                bytes[pos],
+                b'=' | b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/'
+            )
+        {
+            pos += 1;
+        }
+        let attr = rest[name_start..pos].to_ascii_lowercase();
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+            pos += 1;
+        }
+        let mut value = String::new();
+        if pos < bytes.len() && bytes[pos] == b'=' {
+            pos += 1;
+            while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+                pos += 1;
+            }
+            if pos < bytes.len() && (bytes[pos] == b'"' || bytes[pos] == b'\'') {
+                let quote = bytes[pos];
+                pos += 1;
+                while pos < bytes.len() && bytes[pos] != quote {
+                    value.push(bytes[pos] as char);
+                    pos += 1;
+                }
+                if pos >= bytes.len() {
+                    return None;
+                }
+                pos += 1;
+            } else {
+                while pos < bytes.len()
+                    && !matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r' | b'>')
+                {
+                    value.push(bytes[pos] as char);
+                    pos += 1;
+                }
+            }
+        }
+        let all_digits = |v: &str| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit());
+        match attr.as_str() {
+            "src" => src = value,
+            "alt" => alt = value,
+            "width" if all_digits(&value) => width = value,
+            "height" if all_digits(&value) => height = value,
+            _ => {}
+        }
+    }
+    if src.is_empty() {
+        return None;
+    }
+    let size = match (width.is_empty(), height.is_empty()) {
+        (false, false) => format!("{width}x{height}"),
+        (false, true) => format!("{width}x"),
+        (true, false) => height,
+        (true, true) => String::new(),
+    };
+    // consumed: `<` + tag name + attributes + `>`
+    let consumed = 1 + name.len() + pos;
+    Some((
+        HtmlImg {
+            src,
+            alt,
+            size,
+            href: String::new(),
+        },
+        consumed,
+    ))
+}
+
+/// Split a leading identifier (`[A-Za-z0-9_-]*`) off `s`.
+fn read_ident(s: &str) -> Option<(&str, &str)> {
+    let end = s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    match end {
+        Some(0) => None,
+        Some(e) => Some((&s[..e], &s[e..])),
+        None if !s.is_empty() => Some((s, "")),
+        None => None,
+    }
 }
 
 /// Split a trailing ` =SIZE` suffix off an image URL, where SIZE is `H`,
@@ -202,7 +454,9 @@ fn is_valid_size(s: &str) -> bool {
     }
     if let Some((w, h)) = s.split_once('x') {
         let digits = |part: &str| part.chars().all(|c| c.is_ascii_digit());
-        (w.is_empty() || digits(w)) && (h.is_empty() || digits(h)) && !(w.is_empty() && h.is_empty())
+        (w.is_empty() || digits(w))
+            && (h.is_empty() || digits(h))
+            && !(w.is_empty() && h.is_empty())
     } else {
         s.chars().all(|c| c.is_ascii_digit())
     }
@@ -321,12 +575,21 @@ pub fn render_html<'a>(blocks: impl IntoIterator<Item = (BlockKind, &'a BlockCon
                 let src = content.get("src").and_then(|v| v.as_str()).unwrap_or("");
                 let alt = content.get("alt").and_then(|v| v.as_str()).unwrap_or("");
                 let size = content.get("size").and_then(|v| v.as_str()).unwrap_or("");
-                out.push_str(&format!(
-                    "<p><img src=\"{}\" alt=\"{}\"{} /></p>\n",
+                let href = content.get("href").and_then(|v| v.as_str()).unwrap_or("");
+                let img = format!(
+                    "<img src=\"{}\" alt=\"{}\"{} />",
                     html_escape(src),
                     html_escape(alt),
                     image_size_attrs(size)
-                ));
+                );
+                if href.is_empty() {
+                    out.push_str(&format!("<p>{img}</p>\n"));
+                } else {
+                    out.push_str(&format!(
+                        "<p><a href=\"{}\">{img}</a></p>\n",
+                        html_escape(href)
+                    ));
+                }
             }
             BlockKind::Divider => out.push_str("<hr />\n"),
             BlockKind::CallToAction => {
@@ -563,6 +826,132 @@ mod tests {
             html,
             "<p><img src=\"https://fdroid.gitlab.io/artwork/badge/get-it-on.png\" alt=\"Get it on F-Droid\" height=\"80\" /></p>\n"
         );
+    }
+
+    #[test]
+    fn parses_raw_html_img_link_wrapped_badge() {
+        let src = "[<img src=\"https://fdroid.gitlab.io/artwork/badge/get-it-on.png\"\n     alt=\"Get it on F-Droid\"\n     height=\"80\">](https://f-droid.org/packages/com.offlinecurrencyconverter.app/)";
+        let blocks = parse_markdown(src);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, BlockKind::Image);
+        assert_eq!(
+            blocks[0].content.get("src").unwrap(),
+            "https://fdroid.gitlab.io/artwork/badge/get-it-on.png"
+        );
+        assert_eq!(blocks[0].content.get("alt").unwrap(), "Get it on F-Droid");
+        assert_eq!(blocks[0].content.get("size").unwrap(), "80");
+        assert_eq!(
+            blocks[0].content.get("href").unwrap(),
+            "https://f-droid.org/packages/com.offlinecurrencyconverter.app/"
+        );
+        let html = render_html(vec![(blocks[0].kind, &blocks[0].content)]);
+        assert_eq!(
+            html,
+            "<p><a href=\"https://f-droid.org/packages/com.offlinecurrencyconverter.app/\"><img src=\"https://fdroid.gitlab.io/artwork/badge/get-it-on.png\" alt=\"Get it on F-Droid\" height=\"80\" /></a></p>\n"
+        );
+    }
+
+    #[test]
+    fn parses_multiple_raw_html_imgs_on_one_line() {
+        let src = concat!(
+            "<img src=\"fastlane/metadata/android/en-US/images/phoneScreenshots/1.png\" width=\"180\" alt=\"Screenshot 1\"> ",
+            "<img src=\"fastlane/metadata/android/en-US/images/phoneScreenshots/2.png\" width=\"180\" alt=\"Screenshot 2\"> ",
+            "<img src=\"fastlane/metadata/android/en-US/images/phoneScreenshots/3.png\" width=\"180\" alt=\"Screenshot 3\">"
+        );
+        let blocks = parse_markdown(src);
+        assert_eq!(blocks.len(), 3);
+        for (i, b) in blocks.iter().enumerate() {
+            assert_eq!(b.kind, BlockKind::Image);
+            assert_eq!(b.content.get("size").unwrap(), "180x");
+            let expected = format!(
+                "fastlane/metadata/android/en-US/images/phoneScreenshots/{}.png",
+                i + 1
+            );
+            assert_eq!(b.content.get("src").unwrap(), expected.as_str());
+        }
+    }
+
+    #[test]
+    fn parses_linked_markdown_image() {
+        let blocks = parse_markdown("[![a](img.png)](https://example.com/page)");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, BlockKind::Image);
+        assert_eq!(blocks[0].content.get("src").unwrap(), "img.png");
+        assert_eq!(blocks[0].content.get("alt").unwrap(), "a");
+        assert_eq!(
+            blocks[0].content.get("href").unwrap(),
+            "https://example.com/page"
+        );
+        let html = render_html(vec![(blocks[0].kind, &blocks[0].content)]);
+        assert_eq!(
+            html,
+            "<p><a href=\"https://example.com/page\"><img src=\"img.png\" alt=\"a\" /></a></p>\n"
+        );
+    }
+
+    #[test]
+    fn parses_multiple_markdown_images_per_line() {
+        let blocks = parse_markdown("![a](1.png) ![b](2.png =40)");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].content.get("src").unwrap(), "1.png");
+        assert_eq!(blocks[1].content.get("src").unwrap(), "2.png");
+        assert_eq!(blocks[1].content.get("size").unwrap(), "40");
+    }
+
+    #[test]
+    fn image_line_with_trailing_text_is_kept_as_paragraph() {
+        let blocks = parse_markdown("![a](1.png) and text");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, BlockKind::Paragraph);
+        assert_eq!(
+            blocks[0].content.get("text").unwrap(),
+            "![a](1.png) and text"
+        );
+    }
+
+    #[test]
+    fn raw_html_img_drops_dangerous_attributes() {
+        let blocks =
+            parse_markdown("<img src=\"x.png\" onerror=\"alert(1)\" width=\"180\" style=\"x\">");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, BlockKind::Image);
+        let html = render_html(vec![(blocks[0].kind, &blocks[0].content)]);
+        assert_eq!(
+            html,
+            "<p><img src=\"x.png\" alt=\"\" width=\"180\" /></p>\n"
+        );
+        assert!(!html.contains("onerror"));
+        assert!(!html.contains("style"));
+    }
+
+    #[test]
+    fn raw_html_img_ignores_invalid_dimensions() {
+        let blocks = parse_markdown("<img src=\"x.png\" width=\"12px\" height=\"80\">");
+        assert_eq!(blocks[0].content.get("size").unwrap(), "80");
+        let html = render_html(vec![(blocks[0].kind, &blocks[0].content)]);
+        assert_eq!(
+            html,
+            "<p><img src=\"x.png\" alt=\"\" height=\"80\" /></p>\n"
+        );
+    }
+
+    #[test]
+    fn raw_html_img_self_closing_and_unquoted_attrs() {
+        let blocks = parse_markdown("<img src=/x.png alt=\"y\" width=120 />");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].content.get("src").unwrap(), "/x.png");
+        assert_eq!(blocks[0].content.get("alt").unwrap(), "y");
+        assert_eq!(blocks[0].content.get("size").unwrap(), "120x");
+    }
+
+    #[test]
+    fn raw_html_img_mixed_with_text_stays_escaped_paragraph() {
+        let blocks = parse_markdown("See <img src=\"x.png\" alt=\"x\"> now");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, BlockKind::Paragraph);
+        let html = render_html(vec![(blocks[0].kind, &blocks[0].content)]);
+        assert!(!html.contains("<img"));
+        assert!(html.contains("&lt;img"));
     }
 
     #[test]

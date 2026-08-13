@@ -11,7 +11,7 @@ use axum::Json;
 use axum::extract::{Form, Multipart, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use forgepost_content::{now_ms, BlockKind, Document};
+use forgepost_content::{BlockKind, Document, now_ms};
 use forgepost_experiments::Recommendation;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -755,10 +755,7 @@ async fn build_home_posts(
     let mut posts = Vec::with_capacity(published.len());
     for p in published {
         let (excerpt, read_mins) = match state.repo.get_document(p.id).await? {
-            Some(full) => (
-                page_meta_description(&full),
-                read_minutes(&full.document),
-            ),
+            Some(full) => (page_meta_description(&full), read_minutes(&full.document)),
             None => (String::new(), 1),
         };
         posts.push(HomePost {
@@ -2130,10 +2127,16 @@ fn blocks_to_markdown(doc: &forgepost_content::Document) -> String {
                 let alt = c.get("alt").and_then(|v| v.as_str()).unwrap_or_default();
                 let src = c.get("src").and_then(|v| v.as_str()).unwrap_or_default();
                 let size = c.get("size").and_then(|v| v.as_str()).unwrap_or_default();
-                if size.is_empty() {
+                let href = c.get("href").and_then(|v| v.as_str()).unwrap_or_default();
+                let image = if size.is_empty() {
                     format!("![{alt}]({src})")
                 } else {
                     format!("![{alt}]({src} ={size})")
+                };
+                if href.is_empty() {
+                    image
+                } else {
+                    format!("[{image}]({href})")
                 }
             }
             BlockKind::List { ordered } => {

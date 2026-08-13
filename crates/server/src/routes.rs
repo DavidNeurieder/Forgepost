@@ -707,10 +707,7 @@ pub async fn approve_comment(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn rss(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
+pub async fn rss(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
     let site = state.repo.site_settings().await?;
     let base = crate::pages::canonical_base(&state, &site, &headers);
     let published = state.repo.list_published().await?;

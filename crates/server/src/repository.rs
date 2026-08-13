@@ -538,7 +538,9 @@ impl Repository for SqliteRepository {
         Ok(rows.iter().map(row_to_document_summary).collect())
     }
 
-    async fn list_published_with_tags(&self) -> Result<Vec<crate::model::PublishedPost>, RepositoryError> {
+    async fn list_published_with_tags(
+        &self,
+    ) -> Result<Vec<crate::model::PublishedPost>, RepositoryError> {
         let rows = sqlx::query(
             "SELECT d.id, d.title, d.slug, d.published_at_ms,
                     (SELECT json_group_array(t.slug) FROM tags t
@@ -565,7 +567,10 @@ impl Repository for SqliteRepository {
             .collect())
     }
 
-    async fn list_published_with_tag(&self, tag: &str) -> Result<Vec<crate::model::PublishedPost>, RepositoryError> {
+    async fn list_published_with_tag(
+        &self,
+        tag: &str,
+    ) -> Result<Vec<crate::model::PublishedPost>, RepositoryError> {
         let rows = sqlx::query(
             "SELECT d.id, d.title, d.slug, d.published_at_ms,
                     (SELECT json_group_array(t2.slug) FROM tags t2
