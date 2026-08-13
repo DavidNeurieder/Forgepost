@@ -63,6 +63,7 @@
 {% if docs.is_empty() %}
 <p class="muted">No posts yet. Create your first one.</p>
 {% else %}
+<div class="table-scroll table-wide">
 <table>
   <thead>
     <tr>
@@ -91,6 +92,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% endif %}
 
 <h2 style="margin-top:2rem;">Pending comments</h2>

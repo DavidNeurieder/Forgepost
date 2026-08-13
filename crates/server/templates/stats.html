@@ -47,6 +47,7 @@
 {% if blocks.is_empty() %}
 <p class="muted">No blocks in this article.</p>
 {% else %}
+<div class="table-scroll">
 <table>
   <thead>
     <tr>
@@ -75,6 +76,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% endif %}
 
 <h2 style="margin-top:2rem;">Experiments</h2>
@@ -110,6 +112,7 @@
         </form>
       </div>
     {% else %}
+      <div class="table-scroll">
       <table>
         <thead>
           <tr>
@@ -138,6 +141,7 @@
         {% endfor %}
         </tbody>
       </table>
+      </div>
 
       {% if !exp.report_line.is_empty() %}
         <p class="muted" style="margin:0.75rem 0;">{{ exp.report_line }}</p>

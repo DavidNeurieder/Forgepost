@@ -486,6 +486,20 @@ ul.search-results .title {
 	font-weight: 600;
 }
 
+/* Tables too wide for a phone scroll horizontally instead of crushing columns. */
+.table-scroll {
+	overflow-x: auto;
+	-webkit-overflow-scrolling: touch;
+}
+
+.table-scroll table {
+	min-width: 34rem;
+}
+
+.table-scroll.table-wide table {
+	min-width: 40rem;
+}
+
 /* Home page */
 ul.post-cards {
 	list-style: none;
@@ -565,5 +579,33 @@ footer.site a {
 footer.site a:hover {
 	color: var(--accent);
 	text-decoration: underline;
+}
+
+/* Mobile layout: header wraps, search gets its own full-width row, and
+   admin tables scroll horizontally instead of stretching the page. */
+@media (max-width: 640px) {
+	main {
+		padding: 1.5rem 0;
+	}
+
+	header.site .container {
+		flex-wrap: wrap;
+		row-gap: 0.5rem;
+	}
+
+	header.site nav.site {
+		margin-left: auto;
+	}
+
+	header.site .search {
+		order: 3;
+		flex-basis: 100%;
+		margin: 0;
+	}
+
+	header.site .search input {
+		width: 100%;
+		max-width: none;
+	}
 }
 
