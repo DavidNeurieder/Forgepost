@@ -468,6 +468,7 @@ fn flash_message(key: Option<&str>) -> String {
         Some("experiment_failed") => "Could not create experiment.".into(),
         Some("variant_required") => "At least one variant with content is required.".into(),
         Some("imported") => "Imported draft created — review it before publishing.".into(),
+        Some("deleted") => "Post deleted.".into(),
         _ => String::new(),
     }
 }
@@ -1038,6 +1039,29 @@ pub(crate) async fn editor_publish(
     state.repo.publish_document(id).await?;
     let uri = format!("/admin/editor/{id}?flash=published");
     Ok(Redirect::to(&uri).into_response())
+}
+
+pub(crate) async fn delete_post(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(body): Form<CsrfForm>,
+) -> Result<Response, PageError> {
+    let Some(auth) = require_admin(&state, &headers).await? else {
+        return Ok(login_redirect());
+    };
+    auth::verify_csrf_form(&headers, body.csrf_token.as_deref(), &auth.csrf_token)?;
+    let id = parse_uuid(&id)?;
+    let full = state
+        .repo
+        .get_document(id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("document not found"))?;
+    if full.owner_id != auth.user.id {
+        return Err(ApiError::forbidden().into());
+    }
+    state.repo.delete_document(id).await?;
+    Ok(Redirect::to("/admin?flash=deleted").into_response())
 }
 
 pub(crate) async fn approve_comment(

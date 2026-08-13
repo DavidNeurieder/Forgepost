@@ -324,6 +324,42 @@ test('an experiment can be created, started, and concluded', async ({ browser })
 	await page.context().close();
 });
 
+test('the owner can delete a post', async ({ browser }) => {
+	const page = await adminPage(browser);
+	await gotoDashboard(page);
+
+	// A throwaway post, so the shared post the earlier tests rely on survives.
+	await page.getByRole('button', { name: 'New post' }).click();
+	await page.waitForURL(/\/admin\/editor\//);
+	await page.getByLabel('Title', { exact: true }).fill('Deletable E2E Post');
+	await page.getByLabel('Markdown').fill('# Deletable E2E Post\n\nDelete me.');
+	await page.getByRole('button', { name: 'Save', exact: true }).click();
+	await expect(page.getByText('Saved')).toBeVisible();
+	await page.getByRole('button', { name: 'Publish', exact: true }).click();
+	await expect(page.getByText('Published', { exact: true })).toBeVisible();
+
+	const slug = (await page.getByRole('link', { name: 'View post' }).getAttribute('href'))!.replace(/^\/articles\//, '');
+	expect(slug).not.toBe('');
+
+	// The public article is live.
+	const live = await page.request.get(`/articles/${slug}`);
+	expect(live.status()).toBe(200);
+
+	// Delete from the dashboard row (the shared post row keeps its own button).
+	await page.goto('/admin');
+	const row = page.locator('tr', { hasText: 'Deletable E2E Post' });
+	page.on('dialog', (d) => d.accept());
+	await row.getByRole('button', { name: 'Delete' }).click();
+	await expect(page.getByText('Post deleted.')).toBeVisible();
+	await expect(page.getByText('Deletable E2E Post')).toHaveCount(0);
+	await expect(page.getByText(TITLE)).toBeVisible();
+
+	// The URL now 404s and the dashboard still shows the shared post.
+	const gone = await page.request.get(`/articles/${slug}`);
+	expect(gone.status()).toBe(404);
+	await page.context().close();
+});
+
 test('the owner can log out and log back in', async ({ browser }) => {
 	const page = await adminPage(browser);
 	await gotoDashboard(page);

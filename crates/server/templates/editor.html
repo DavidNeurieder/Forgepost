@@ -30,6 +30,12 @@
   </div>
 </form>
 
+<form method="post" action="/admin/editor/{{ id }}/delete" class="inline"
+  onsubmit="return confirm('Delete this post permanently? This cannot be undone.');">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button type="submit" class="danger">Delete post</button>
+</form>
+
 <h2>Preview</h2>
 <p class="muted" id="preview-status">Start typing to preview the rendered post.</p>
 <div class="notice article-body" id="preview-body"></div>

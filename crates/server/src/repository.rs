@@ -73,6 +73,10 @@ pub trait Repository: Send + Sync {
         versions: &[BlockVersion],
     ) -> Result<(), RepositoryError>;
     async fn publish_document(&self, id: DocumentId) -> Result<(), RepositoryError>;
+    /// Permanently remove a document. Cascades clear its blocks, block
+    /// versions, tags, comments, experiments, and search index rows; analytics
+    /// events survive with their `document_id` set to NULL.
+    async fn delete_document(&self, id: DocumentId) -> Result<(), RepositoryError>;
     async fn get_published_by_slug(
         &self,
         slug: &str,
@@ -789,6 +793,23 @@ impl Repository for SqliteRepository {
             .execute(&self.pool)
             .await?;
         self.refresh_search_index(id).await?;
+        Ok(())
+    }
+
+    async fn delete_document(&self, id: DocumentId) -> Result<(), RepositoryError> {
+        let mut tx = self.pool.begin().await?;
+        // Clear the FTS5 rows first: `search_rows` (needed for the lookup)
+        // cascades away once the document row is gone, leaving garbage in the
+        // virtual table.
+        remove_search_row(&mut tx, id).await?;
+        let res = sqlx::query("DELETE FROM documents WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        if res.rows_affected() == 0 {
+            return Err(RepositoryError::NotFound(id.to_string()));
+        }
         Ok(())
     }
 
@@ -2296,6 +2317,131 @@ mod tests {
         assert_eq!(fts_match_expr(""), "");
         assert_eq!(fts_match_expr("   "), "");
         assert_eq!(fts_match_expr("foo\"bar"), "\"foobar\"*");
+    }
+
+    #[tokio::test]
+    async fn delete_document_removes_post_and_cascades_but_keeps_media_and_events() {
+        let repo = repo().await;
+        let user = seed_user(&repo).await;
+        let full = repo.create_document(user.id, "Doomed Post").await.unwrap();
+        let doc_id = full.document.id;
+
+        // Blocks + versions, tags, a comment, and an experiment on a block.
+        let parsed = forgepost_content::parse_markdown("some doomed body");
+        let merged = forgepost_content::merge_blocks(&[], &[], parsed, now_ms());
+        repo.save_document_blocks(doc_id, &merged.blocks, &merged.versions)
+            .await
+            .unwrap();
+        let block_id = merged.blocks[0].id;
+        repo.set_document_tags(doc_id, &["doomed".to_string()])
+            .await
+            .unwrap();
+        repo.create_comment(doc_id, "Reader", "hi").await.unwrap();
+        repo.create_experiment(
+            doc_id,
+            block_id,
+            &crate::model::NewExperiment {
+                name: "Headline test".into(),
+                goal: "completion".into(),
+                traffic_weight: 50.0,
+                confidence_threshold: 0.95,
+                min_sample_per_variant: 100,
+                no_winner_prob: 0.1,
+                max_duration_ms: 7 * 86_400_000,
+                variants: vec![crate::model::ExperimentVariantInput {
+                    content: json!("new headline"),
+                    weight: 50.0,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        // Analytics event (document-scoped) and media (document-independent).
+        repo.record_analytics_event(&AnalyticsEvent {
+            id: Uuid::new_v4(),
+            document_id: doc_id,
+            event_type: "view".into(),
+            band: None,
+            block_id: Some(block_id),
+            pageview_id: Uuid::new_v4(),
+            visitor_id: Uuid::new_v4(),
+            referrer: None,
+            user_agent: None,
+            read_time_ms: None,
+            experiment_id: None,
+            variant_id: None,
+            created_at_ms: now_ms(),
+        })
+        .await
+        .unwrap();
+        repo.insert_media(&Media {
+            id: Uuid::new_v4(),
+            disk_name: "keep.png".into(),
+            content_type: "image/png".into(),
+            size_bytes: 3,
+            sha256: "abc".into(),
+            created_at_ms: now_ms(),
+        })
+        .await
+        .unwrap();
+
+        // Publish so the FTS index has rows for this document.
+        repo.publish_document(doc_id).await.unwrap();
+        assert_eq!(repo.search_documents("doomed", 10).await.unwrap().len(), 1);
+
+        repo.delete_document(doc_id).await.unwrap();
+
+        // Gone from every listing, including the FTS virtual table (no FK).
+        assert!(repo.get_document(doc_id).await.unwrap().is_none());
+        assert!(repo.list_documents(user.id).await.unwrap().is_empty());
+        assert!(repo.list_all_documents().await.unwrap().is_empty());
+        assert!(
+            repo.search_documents("doomed", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Cascaded dependents are cleared.
+        assert!(repo.document_tags(doc_id).await.unwrap().is_empty());
+        assert!(
+            repo.comments_for_document(doc_id, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            repo.experiments_for_document(doc_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let blocks: Vec<(String,)> = sqlx::query_as("SELECT id FROM blocks WHERE document_id = ?")
+            .bind(doc_id.to_string())
+            .fetch_all(&repo.pool)
+            .await
+            .unwrap();
+        assert!(blocks.is_empty());
+
+        // Media and analytics survive: media untouched, events keep rows with
+        // their document_id set to NULL.
+        assert!(repo.media_by_disk_name("keep.png").await.unwrap().is_some());
+        let events: Vec<(Option<String>,)> =
+            sqlx::query_as("SELECT document_id FROM analytics_events")
+                .fetch_all(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].0.is_none());
+
+        // The slug is freed for reuse, and deleting a missing id errors.
+        let again = repo.create_document(user.id, "Doomed Post").await.unwrap();
+        assert_eq!(again.slug, "doomed-post");
+        assert!(matches!(
+            repo.delete_document(doc_id).await,
+            Err(RepositoryError::NotFound(_))
+        ));
     }
 
     #[test]

@@ -1279,6 +1279,221 @@ async fn import_rejects_bad_archives_and_local_refs_without_zip() {
 }
 
 // ---------------------------------------------------------------------------
+// Deleting posts
+// ---------------------------------------------------------------------------
+
+/// POST /admin/new and return the `/admin/editor/{id}` redirect target.
+async fn create_draft(app: &Router, cookie: &str, csrf: &str) -> String {
+    let (status, resp) = send(
+        app,
+        form_req(
+            Method::POST,
+            "/admin/new",
+            Some(cookie),
+            &[("csrf_token", csrf)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    resp.headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn delete_post_requires_login_and_csrf() {
+    let app = test_app().await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+    let editor_uri = create_draft(&app, &cookie, &csrf).await;
+    let delete_uri = format!("{editor_uri}/delete");
+
+    // No session → redirect to login.
+    let (status, _) = send(
+        &app,
+        form_req(Method::POST, &delete_uri, None, &[("csrf_token", &csrf)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    // Wrong CSRF → forbidden.
+    let (status, _) = send(
+        &app,
+        form_req(
+            Method::POST,
+            &delete_uri,
+            Some(&cookie),
+            &[("csrf_token", "bad-token")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The draft is untouched by either attempt.
+    let (status, _) = send(&app, req(Method::GET, &editor_uri, Some(&cookie), None)).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn owner_can_delete_published_post_and_url_goes_404() {
+    let app = test_app().await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+    let editor_uri = create_draft(&app, &cookie, &csrf).await;
+    let delete_uri = format!("{editor_uri}/delete");
+
+    let (status, _) = send(
+        &app,
+        form_req(
+            Method::POST,
+            &editor_uri,
+            Some(&cookie),
+            &[
+                ("title", "Doomed"),
+                ("tags", "tech"),
+                ("markdown", "# Doomed\n\nSome body."),
+                ("csrf_token", &csrf),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (status, _) = send(
+        &app,
+        form_req(
+            Method::POST,
+            &format!("{editor_uri}/publish"),
+            Some(&cookie),
+            &[("csrf_token", &csrf)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    // The published article is live before the delete.
+    let (status, _) = send(&app, req(Method::GET, "/articles/doomed", None, None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Delete it.
+    let (status, resp) = send(
+        &app,
+        form_req(
+            Method::POST,
+            &delete_uri,
+            Some(&cookie),
+            &[("csrf_token", &csrf)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        resp.headers().get(header::LOCATION).unwrap(),
+        "/admin?flash=deleted"
+    );
+
+    // Gone from the dashboard (flash confirms), article 404s, editor loses it.
+    let (status, resp) = send(
+        &app,
+        req(Method::GET, "/admin?flash=deleted", Some(&cookie), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body_text(resp).await;
+    assert!(html.contains("Post deleted."), "flash shown on dashboard");
+    assert!(!html.contains("Doomed"), "post gone from dashboard list");
+
+    let (status, _) = send(&app, req(Method::GET, "/articles/doomed", None, None)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _) = send(&app, req(Method::GET, &editor_uri, Some(&cookie), None)).await;
+    assert_ne!(status, StatusCode::OK);
+
+    // Deleting again reports the missing document.
+    let (status, _) = send(
+        &app,
+        form_req(
+            Method::POST,
+            &delete_uri,
+            Some(&cookie),
+            &[("csrf_token", &csrf)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn deleted_post_slug_is_reusable() {
+    let app = test_app().await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+    let editor_uri = create_draft(&app, &cookie, &csrf).await;
+
+    // Take the "reusable" slug, then delete the post.
+    let (status, _) = send(
+        &app,
+        form_req(
+            Method::POST,
+            &editor_uri,
+            Some(&cookie),
+            &[
+                ("title", "Reusable"),
+                ("markdown", "# Reusable\n\nBody."),
+                ("csrf_token", &csrf),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (status, _) = send(
+        &app,
+        form_req(
+            Method::POST,
+            &format!("{editor_uri}/publish"),
+            Some(&cookie),
+            &[("csrf_token", &csrf)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (status, _) = send(
+        &app,
+        form_req(
+            Method::POST,
+            &format!("{editor_uri}/delete"),
+            Some(&cookie),
+            &[("csrf_token", &csrf)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    // A new post with the same title saves without a slug collision.
+    let editor_uri2 = create_draft(&app, &cookie, &csrf).await;
+    let (status, _) = send(
+        &app,
+        form_req(
+            Method::POST,
+            &editor_uri2,
+            Some(&cookie),
+            &[
+                ("title", "Reusable"),
+                ("markdown", "# Reusable\n\nBody."),
+                ("csrf_token", &csrf),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (status, resp) = send(&app, req(Method::GET, &editor_uri2, Some(&cookie), None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body_text(resp).await.contains("Reusable"));
+}
+
+// ---------------------------------------------------------------------------
 // Settings (blog name + theme)
 // ---------------------------------------------------------------------------
 

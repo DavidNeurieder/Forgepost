@@ -93,6 +93,7 @@ fn app_with_config(
             get(pages::editor_page).post(pages::editor_save),
         )
         .route("/admin/editor/{id}/publish", post(pages::editor_publish))
+        .route("/admin/editor/{id}/delete", post(pages::delete_post))
         .route("/admin/stats/{id}", get(pages::stats_page))
         .route(
             "/admin/stats/{id}/experiments",

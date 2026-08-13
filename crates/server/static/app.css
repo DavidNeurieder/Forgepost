@@ -257,9 +257,22 @@ td {
 	border-color: #2563eb;
 }
 
-.button.small {
+.button.small,
+button.small {
 	padding: 0.25rem 0.6rem;
 	font-size: 0.8rem;
+}
+
+.button.danger,
+button.danger {
+	background: transparent;
+	border-color: #dc2626;
+	color: #dc2626;
+}
+
+button.danger:hover {
+	background: #dc2626;
+	color: #fff;
 }
 
 .stat-grid {
