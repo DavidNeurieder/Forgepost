@@ -1,9 +1,11 @@
 //! Line-based Markdown parser producing a block tree.
 //!
 //! Supports the MVP block kinds: headings, paragraphs, blockquotes, fenced
-//! code, horizontal rules, and image-only blocks. Parsing is deliberately
-//! simple and lossless enough for the semantic-document model; inline
-//! formatting is preserved as raw text and rendered later.
+//! code, horizontal rules, image-only blocks, and flat lists (unordered `-`,
+//! `*`, `+` and ordered `N.`). Parsing is deliberately simple and lossless
+//! enough for the semantic-document model. Inline formatting (`**bold**`,
+//! `*italic*`, `` `code` ``, `[links](url)`) is rendered at display time by
+//! [`render_inline`]; source text keeps the raw markers.
 
 use serde_json::json;
 
@@ -88,6 +90,29 @@ pub fn parse_markdown(source: &str) -> Vec<ParsedBlock> {
             continue;
         }
 
+        if let Some((ordered, item)) = parse_list_marker(trimmed) {
+            let mut items = vec![item];
+            i += 1;
+            while i < lines.len() {
+                let l = lines[i].trim();
+                if l.is_empty() {
+                    break;
+                }
+                match parse_list_marker(l) {
+                    Some((o, item)) if o == ordered => {
+                        items.push(item);
+                        i += 1;
+                    }
+                    _ => break,
+                }
+            }
+            blocks.push(ParsedBlock {
+                kind: BlockKind::List { ordered },
+                content: json!({ "items": items }),
+            });
+            continue;
+        }
+
         let mut paragraph = String::new();
         while i < lines.len() {
             let l = lines[i];
@@ -97,6 +122,7 @@ pub fn parse_markdown(source: &str) -> Vec<ParsedBlock> {
                 || t.starts_with('>')
                 || t.starts_with("```")
                 || is_horizontal_rule(t)
+                || parse_list_marker(t).is_some()
             {
                 break;
             }
@@ -145,6 +171,34 @@ fn parse_image_line(line: &str) -> Option<(String, String)> {
     Some((alt, src))
 }
 
+/// Parse a list item line. Returns `(ordered, item_text)` for unordered
+/// markers (`- `, `* `, `+ `) and ordered markers (`1. `, `42. `, …). The
+/// marker must be followed by whitespace, matching CommonMark.
+fn parse_list_marker(line: &str) -> Option<(bool, String)> {
+    let line = line.trim();
+    let (ordered, after_marker) = if let Some(rest) = line.strip_prefix('-') {
+        (false, rest)
+    } else if let Some(rest) = line.strip_prefix('*') {
+        (false, rest)
+    } else if let Some(rest) = line.strip_prefix('+') {
+        (false, rest)
+    } else {
+        // Ordered: `N.` where N is one or more ASCII digits.
+        let digits = line.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 {
+            return None;
+        }
+        let rest = line.get(digits..)?;
+        let rest = rest.strip_prefix('.')?;
+        (true, rest)
+    };
+    let item = after_marker.trim();
+    if item.is_empty() {
+        return None;
+    }
+    Some((ordered, item.to_string()))
+}
+
 /// Escape text for safe HTML output.
 pub fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -161,8 +215,9 @@ pub fn html_escape(s: &str) -> String {
     out
 }
 
-/// Render blocks to HTML. Inline Markdown (links, emphasis) is not parsed yet;
-/// text is escaped and line breaks are preserved as paragraphs/preformatted.
+/// Render blocks to HTML. Inline Markdown (`**bold**`, `*italic*`,
+/// `` `code` ``, `[links](url)`) is rendered by [`render_inline`]; text is
+/// escaped first so user input can never inject markup.
 pub fn render_html<'a>(blocks: impl IntoIterator<Item = (BlockKind, &'a BlockContent)>) -> String {
     let mut out = String::new();
     for (kind, content) in blocks {
@@ -172,19 +227,19 @@ pub fn render_html<'a>(blocks: impl IntoIterator<Item = (BlockKind, &'a BlockCon
                 out.push_str(&format!(
                     "<h{}>{}</h{}>\n",
                     level,
-                    html_escape(&text),
+                    render_inline(&text),
                     level
                 ));
             }
             BlockKind::Paragraph => {
                 let text = text_of(content);
-                out.push_str(&format!("<p>{}</p>\n", html_escape(&text)));
+                out.push_str(&format!("<p>{}</p>\n", render_inline(&text)));
             }
             BlockKind::Quote => {
                 let text = text_of(content);
                 out.push_str(&format!(
                     "<blockquote>{}</blockquote>\n",
-                    html_escape(&text)
+                    render_inline(&text)
                 ));
             }
             BlockKind::Code => {
@@ -216,11 +271,103 @@ pub fn render_html<'a>(blocks: impl IntoIterator<Item = (BlockKind, &'a BlockCon
             BlockKind::Divider => out.push_str("<hr />\n"),
             BlockKind::CallToAction => {
                 let text = text_of(content);
-                out.push_str(&format!("<p><strong>{}</strong></p>\n", html_escape(&text)));
+                out.push_str(&format!(
+                    "<p><strong>{}</strong></p>\n",
+                    render_inline(&text)
+                ));
+            }
+            BlockKind::List { ordered } => {
+                let tag = if ordered { "ol" } else { "ul" };
+                out.push_str(&format!("<{tag}>\n"));
+                if let Some(items) = content.get("items").and_then(|v| v.as_array()) {
+                    for item in items {
+                        out.push_str(&format!(
+                            "<li>{}</li>\n",
+                            render_inline(item.as_str().unwrap_or_default())
+                        ));
+                    }
+                }
+                out.push_str(&format!("</{tag}>\n"));
             }
         }
     }
     out
+}
+
+/// Escape the text, then render inline Markdown markers to HTML. The input is
+/// treated as plain text (never trusted), and any marker found is applied
+/// after escaping, so `<script>` etc. can never reach the output.
+fn render_inline(text: &str) -> String {
+    inline_spans(&html_escape(text))
+}
+
+/// Scan an already-escaped string for inline markers. Runs recursively so
+/// formatting can nest (e.g. bold containing italic or a link).
+fn inline_spans(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while !rest.is_empty() {
+        // Inline code spans win over everything else; content stays literal.
+        if let Some(end) = rest
+            .strip_prefix('`')
+            .and_then(|after_open| after_open.find('`'))
+        {
+            out.push_str("<code>");
+            out.push_str(&rest[1..end + 1]);
+            out.push_str("</code>");
+            rest = &rest[end + 2..];
+            continue;
+        }
+        // Bold first so `**` isn't misread as two italics.
+        if let Some((inner, after)) = between(rest, "**") {
+            out.push_str("<strong>");
+            out.push_str(&inline_spans(inner));
+            out.push_str("</strong>");
+            rest = after;
+            continue;
+        }
+        // Links before italics so `[*x*](y)` still works.
+        if let Some((label, url, after)) = link(rest) {
+            out.push_str(&format!("<a href=\"{url}\">"));
+            out.push_str(&inline_spans(label));
+            out.push_str("</a>");
+            rest = after;
+            continue;
+        }
+        if let Some((inner, after)) = between(rest, "*") {
+            out.push_str("<em>");
+            out.push_str(&inline_spans(inner));
+            out.push_str("</em>");
+            rest = after;
+            continue;
+        }
+        let c = rest.chars().next().expect("non-empty rest");
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+/// If `s` starts and (later) closes with `marker`, return the inner text and
+/// the remainder after the closing marker.
+fn between<'a>(s: &'a str, marker: &str) -> Option<(&'a str, &'a str)> {
+    let rest = s.strip_prefix(marker)?;
+    let end = rest.find(marker)?;
+    Some((&rest[..end], &rest[end + marker.len()..]))
+}
+
+/// Parse `[label](url)` at the start of `s`.
+fn link(s: &str) -> Option<(&str, &str, &str)> {
+    let rest = s.strip_prefix('[')?;
+    let close = rest.find(']')?;
+    let label = &rest[..close];
+    let after = rest[close + 1..].strip_prefix('(')?;
+    let paren_close = after.find(')')?;
+    let url = after[..paren_close].trim();
+    if url.is_empty() {
+        return None;
+    }
+    Some((label, url, &after[paren_close + 1..]))
 }
 
 /// The plain text that a block contributes to search indexing. Mirrors
@@ -241,6 +388,17 @@ pub fn block_search_text(kind: &BlockKind, content: &BlockContent) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string(),
+        BlockKind::List { .. } => content
+            .get("items")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|it| it.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default(),
         BlockKind::Divider => String::new(),
     }
 }
@@ -325,5 +483,129 @@ mod tests {
             html,
             "<h1>Hi &amp; &lt;bye&gt;</h1>\n<p>para</p>\n<pre><code class=\"language-rust\">x &lt; y</code></pre>\n"
         );
+    }
+
+    #[test]
+    fn parses_unordered_list_into_one_block() {
+        let blocks =
+            parse_markdown("- **Language:** Kotlin\n- **UI:** Jetpack Compose\n- **DI:** Hilt\n");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, BlockKind::List { ordered: false });
+        let items = blocks[0].content.get("items").unwrap().as_array().unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0], "**Language:** Kotlin");
+    }
+
+    #[test]
+    fn parses_ordered_list_and_all_markers() {
+        // `-`, `*`, and `+` are interchangeable bullet markers in one list
+        // (CommonMark), so `* a\n+ b` is a single unordered list block.
+        let blocks = parse_markdown("* a\n+ b\n1. c\n2. d\n3. e\n");
+        assert_eq!(
+            kinds(&blocks),
+            vec![
+                BlockKind::List { ordered: false },
+                BlockKind::List { ordered: true },
+            ]
+        );
+        assert_eq!(
+            blocks[0]
+                .content
+                .get("items")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            blocks[1]
+                .content
+                .get("items")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn list_breaks_on_blank_line_or_paragraph() {
+        let src = "- one\n- two\n\nA paragraph.\n- three\n";
+        let blocks = parse_markdown(src);
+        assert_eq!(
+            kinds(&blocks),
+            vec![
+                BlockKind::List { ordered: false },
+                BlockKind::Paragraph,
+                BlockKind::List { ordered: false },
+            ]
+        );
+        // `- three` starts a fresh list block, not a paragraph continuation.
+        let first = &blocks[0].content.get("items").unwrap().as_array().unwrap();
+        assert_eq!(first.len(), 2);
+    }
+
+    #[test]
+    fn renders_lists_and_inline_formatting() {
+        let html = render_html(vec![
+            (
+                BlockKind::List { ordered: false },
+                &json!({ "items": ["**bold** item", "*italic*", "plain & <safe>"] }),
+            ),
+            (
+                BlockKind::List { ordered: true },
+                &json!({ "items": ["step `code`", "[link](https://e.com/?a=1&b=2)"] }),
+            ),
+        ]);
+        assert_eq!(
+            html,
+            "<ul>\n\
+             <li><strong>bold</strong> item</li>\n\
+             <li><em>italic</em></li>\n\
+             <li>plain &amp; &lt;safe&gt;</li>\n\
+             </ul>\n\
+             <ol>\n\
+             <li>step <code>code</code></li>\n\
+             <li><a href=\"https://e.com/?a=1&amp;b=2\">link</a></li>\n\
+             </ol>\n"
+        );
+    }
+
+    #[test]
+    fn inline_formatting_applies_in_paragraphs_with_escaping() {
+        let html = render_html(vec![
+            (BlockKind::Paragraph, &json!({ "text": "a **b** c" })),
+            (BlockKind::Paragraph, &json!({ "text": "x <script> **y**" })),
+        ]);
+        assert_eq!(
+            html,
+            "<p>a <strong>b</strong> c</p>\n<p>x &lt;script&gt; <strong>y</strong></p>\n"
+        );
+    }
+
+    #[test]
+    fn list_text_is_searchable() {
+        let mut doc = crate::Document::empty("Listy");
+        let id = crate::BlockId::new_v4();
+        let version = crate::BlockVersion {
+            id: crate::VersionId::new_v4(),
+            block_id: id,
+            content: json!({ "items": ["Retrofit networking", "Room database"] }),
+            created_at_ms: 0,
+        };
+        doc.blocks.push(crate::Block {
+            id,
+            kind: BlockKind::List { ordered: false },
+            version_id: version.id,
+            position: 0,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        });
+        doc.versions.push(version);
+        let text = doc.searchable_text();
+        assert!(text.contains("Retrofit networking"));
+        assert!(text.contains("Room database"));
     }
 }

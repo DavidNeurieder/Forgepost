@@ -556,7 +556,7 @@ impl Repository for SqliteRepository {
 
         let block_rows = sqlx::query(
             "SELECT id, kind, position, current_version_id, created_at_ms, updated_at_ms
-             FROM blocks WHERE document_id = ? ORDER BY position",
+             FROM blocks WHERE document_id = ? AND position >= 0 ORDER BY position",
         )
         .bind(id.to_string())
         .fetch_all(&self.pool)
@@ -715,10 +715,16 @@ impl Repository for SqliteRepository {
         versions: &[BlockVersion],
     ) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await?;
-        // Park existing blocks out of the unique (document_id, position) space
-        // first, so renumbering (e.g. inserting at position 0) cannot collide
-        // transiently while other rows still hold the old positions.
-        sqlx::query("UPDATE blocks SET position = -(position + 1) WHERE document_id = ?")
+        // Move all current rows out of the live 0..n position space first, so
+        // renumbering (e.g. inserting at position 0) cannot collide transiently
+        // while other rows still hold the old positions.
+        //
+        // The offset must be monotonic: a block dropped on an earlier save is
+        // parked here again on every later save, so using the sign-flip
+        // `-(position + 1)` is an involution that returns parked rows to the
+        // live positive space on the next save and collides with the merged
+        // blocks below (UNIQUE (document_id, position) violation).
+        sqlx::query("UPDATE blocks SET position = position - 1000000000 WHERE document_id = ?")
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;

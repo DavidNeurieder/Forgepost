@@ -2135,3 +2135,67 @@ async fn experiment_manual_stop_and_manual_promote() {
     assert_eq!(outcome["winner_variant_id"], json!(variant2));
     let _ = variant_id;
 }
+
+/// Regression: dropping a block on one save and re-adding content later must
+/// not violate the blocks `UNIQUE (document_id, position)` constraint.
+///
+/// The old parking SQL (`position = -(position + 1)`) is an involution: a
+/// dropped block parked at `-2` returns to `+1` on the next save, colliding
+/// with the freshly merged block at that position.
+#[tokio::test]
+async fn resave_after_dropping_blocks_never_collides_on_position() {
+    use forgepost_content::{merge_blocks, now_ms, parse_markdown};
+
+    let pool = pool().await;
+    let repo = SqliteRepository::from_pool(pool);
+    repo.migrate().await.expect("migrations apply");
+    let owner = repo
+        .create_first_user("owner@example.com", "Alice", "x")
+        .await
+        .expect("create owner");
+    let doc = repo
+        .create_document(owner.id, "Positions")
+        .await
+        .expect("create document");
+    let id = doc.document.id;
+
+    async fn save_md(repo: &SqliteRepository, id: uuid::Uuid, markdown: &str) {
+        let full = repo
+            .get_document(id)
+            .await
+            .expect("get document")
+            .expect("document exists");
+        let parsed = parse_markdown(markdown);
+        let merged = merge_blocks(
+            &full.document.blocks,
+            &full.document.versions,
+            parsed,
+            now_ms(),
+        );
+        repo.save_document_blocks(id, &merged.blocks, &merged.versions)
+            .await
+            .expect("save must not violate the (document_id, position) unique");
+    }
+
+    save_md(&repo, id, "Alpha\n\nBeta\n\nGamma").await;
+    save_md(&repo, id, "Alpha").await; // Beta and Gamma are dropped (parked)
+    save_md(&repo, id, "Alpha\n\nDelta").await; // previously parked rows return to 0..n
+
+    let full = repo.get_document(id).await.unwrap().unwrap();
+    let texts: Vec<&str> = full
+        .document
+        .blocks
+        .iter()
+        .map(|b| {
+            let c = full.document.current_content(b.id).expect("block content");
+            c.get("text").and_then(|v| v.as_str()).unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(texts, vec!["Alpha", "Delta"]);
+    let positions: Vec<i64> = full.document.blocks.iter().map(|b| b.position).collect();
+    assert_eq!(
+        positions,
+        vec![0, 1],
+        "parked rows must be invisible to reads"
+    );
+}

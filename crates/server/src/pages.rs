@@ -581,6 +581,19 @@ fn page_meta_description(full: &crate::model::FullDocument) -> String {
                     let t = text_of(c);
                     if t.is_empty() { None } else { Some(t) }
                 }
+                BlockKind::List { .. } => {
+                    let items = c
+                        .get("items")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|it| it.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_default();
+                    if items.is_empty() { None } else { Some(items) }
+                }
                 _ => None,
             }
         })
@@ -1813,6 +1826,19 @@ fn blocks_to_markdown(doc: &forgepost_content::Document) -> String {
                 let alt = c.get("alt").and_then(|v| v.as_str()).unwrap_or_default();
                 let src = c.get("src").and_then(|v| v.as_str()).unwrap_or_default();
                 format!("![{alt}]({src})")
+            }
+            BlockKind::List { ordered } => {
+                let items = c
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|it| it.as_str()).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let marker = if ordered { "1." } else { "-" };
+                items
+                    .iter()
+                    .map(|item| format!("{marker} {item}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             }
             BlockKind::Divider => "---".into(),
             BlockKind::Paragraph | BlockKind::CallToAction => text_of(c),

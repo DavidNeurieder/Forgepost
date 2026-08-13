@@ -442,7 +442,10 @@ async fn new_post_editor_save_and_publish() {
                 ("csrf_token", &csrf),
                 ("title", "My First Post"),
                 ("tags", "tech, blog"),
-                ("markdown", "# Hello\n\nSome **body** text."),
+                (
+                    "markdown",
+                    "# Hello\n\nSome **body** text.\n\n- **A** item\n- B item",
+                ),
             ],
         ),
     )
@@ -465,6 +468,7 @@ async fn new_post_editor_save_and_publish() {
     assert!(html.contains("Saved"));
     assert!(html.contains("My First Post"));
     assert!(html.contains("# Hello"));
+    assert!(html.contains("- **A** item")); // blocks -> markdown round-trips lists
     assert!(html.contains("tech, blog"));
 
     // Publish.
@@ -540,7 +544,7 @@ async fn seed_published(app: &Router) -> String {
                 ("tags", "tech"),
                 (
                     "markdown",
-                    "# Big Title\n\nFirst paragraph.\n\nSecond paragraph.",
+                    "# Big Title\n\nFirst paragraph.\n\n- **Tech:** Rust\n- Keep it simple",
                 ),
             ],
         ),
@@ -580,6 +584,10 @@ async fn article_page_renders_html_tracker_and_visitor_cookie() {
     let html = body_text(resp).await;
     assert!(html.contains("<h1>Big Title</h1>"));
     assert!(html.contains("First paragraph."));
+    // Lists render as real bullets with inline formatting.
+    assert!(
+        html.contains("<ul>\n<li><strong>Tech:</strong> Rust</li>\n<li>Keep it simple</li>\n</ul>")
+    );
     assert!(html.contains("data-block-id="));
     assert!(html.contains("/static/tracker.js"));
     assert!(html.contains("trackArticle"));

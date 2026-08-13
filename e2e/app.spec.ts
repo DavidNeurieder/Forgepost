@@ -20,6 +20,9 @@ const MARKDOWN = [
 	'## Section two',
 	'',
 	'More content lives here.',
+	'',
+	'- **Fast:** built with Rust',
+	'- **Simple:** one binary',
 	''
 ].join('\n');
 
@@ -147,6 +150,10 @@ test('external readers can view the article and leave a comment', async ({ brows
 	await page.goto(`/articles/${slug}`);
 	await expect(page.locator('h1').first()).toHaveText(TITLE);
 	await expect(page.locator('[data-block-id]').first()).toBeVisible();
+
+	// Markdown lists render as real `<li>` bullets with inline bold.
+	await expect(page.locator('.article-body li').first()).toContainText('built with Rust');
+	await expect(page.locator('.article-body li strong').first()).toHaveText('Fast:');
 
 	await page.getByLabel('Name', { exact: true }).fill('Reader');
 	await page.getByLabel('Comment', { exact: true }).fill('Nice post!');

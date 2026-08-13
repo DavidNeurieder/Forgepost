@@ -32,6 +32,7 @@ pub enum BlockKind {
     Code,
     CallToAction,
     Divider,
+    List { ordered: bool },
 }
 
 impl BlockKind {
