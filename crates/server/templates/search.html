@@ -17,7 +17,7 @@
   <li class="search-hit">
     <a class="title" href="/articles/{{ r.slug }}">{{ r.title }}</a>
     <div class="muted">{{ r.date }}</div>
-    {% if !r.tags.is_empty() %}<p>{% for t in r.tags %}<span class="badge">{{ t }}</span> {% endfor %}</p>{% endif %}
+    {% if !r.tags.is_empty() %}<p>{% for t in r.tags %}<a class="badge" href="/tags/{{ t|urlencode }}">{{ t }}</a> {% endfor %}</p>{% endif %}
     <p class="snippet">{{ r.snippet|safe }}</p>
   </li>
 {% endfor %}

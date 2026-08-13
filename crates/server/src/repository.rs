@@ -86,6 +86,12 @@ pub trait Repository: Send + Sync {
     async fn list_published_with_tags(
         &self,
     ) -> Result<Vec<crate::model::PublishedPost>, RepositoryError>;
+    /// Published documents tagged `tag`, newest first, with their tags
+    /// (per-tag listing page).
+    async fn list_published_with_tag(
+        &self,
+        tag: &str,
+    ) -> Result<Vec<crate::model::PublishedPost>, RepositoryError>;
     /// All non-deleted documents regardless of status (used by `export`).
     async fn list_all_documents(&self) -> Result<Vec<DocumentSummary>, RepositoryError>;
     // Tags
@@ -559,6 +565,36 @@ impl Repository for SqliteRepository {
             .collect())
     }
 
+    async fn list_published_with_tag(&self, tag: &str) -> Result<Vec<crate::model::PublishedPost>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT d.id, d.title, d.slug, d.published_at_ms,
+                    (SELECT json_group_array(t2.slug) FROM tags t2
+                       JOIN document_tags dt2 ON dt2.tag_id = t2.id
+                      WHERE dt2.document_id = d.id) AS tags
+             FROM documents d
+             JOIN document_tags dt ON dt.document_id = d.id
+             JOIN tags t ON t.id = dt.tag_id
+             WHERE d.status = 'published' AND d.deleted_at_ms IS NULL AND t.slug = ?
+             ORDER BY d.published_at_ms DESC",
+        )
+        .bind(tag)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| crate::model::PublishedPost {
+                id: Uuid::from_str(&row.get::<String, _>("id")).unwrap_or_default(),
+                title: row.get("title"),
+                slug: row.get("slug"),
+                published_at_ms: row.get("published_at_ms"),
+                tags: row
+                    .get::<Option<String>, _>("tags")
+                    .map(|s| serde_json::from_str(&s).unwrap_or_default())
+                    .unwrap_or_default(),
+            })
+            .collect())
+    }
+
     async fn list_all_documents(&self) -> Result<Vec<DocumentSummary>, RepositoryError> {
         let rows = sqlx::query(
             "SELECT id, title, slug, status, published_at_ms, updated_at_ms
@@ -754,12 +790,21 @@ impl Repository for SqliteRepository {
         // renumbering (e.g. inserting at position 0) cannot collide transiently
         // while other rows still hold the old positions.
         //
-        // The offset must be monotonic: a block dropped on an earlier save is
-        // parked here again on every later save, so using the sign-flip
-        // `-(position + 1)` is an involution that returns parked rows to the
-        // live positive space on the next save and collides with the merged
-        // blocks below (UNIQUE (document_id, position) violation).
-        sqlx::query("UPDATE blocks SET position = position - 1000000000 WHERE document_id = ?")
+        // Rows are parked in two steps so the bands stay disjoint:
+        //   1. already-parked (dropped) rows from previous saves are pushed one
+        //      generation deeper, to `orig - (k+1)*1e9` (<= -2e9);
+        //   2. live rows are moved into the freshly-freed first generation band
+        //      `pos - 1e9` (in [-1e9, -1e9+n)).
+        // A single combined UPDATE could transiently violate UNIQUE
+        // (document_id, position): a live row updated *before* a parked row that
+        // already sits at that exact destination (e.g. position 20 parks to
+        // -999999980 while a previously-dropped block still holds -999999980),
+        // because SQLite checks the constraint per row as the statement runs.
+        sqlx::query("UPDATE blocks SET position = position - 1000000000 WHERE document_id = ? AND position < 0")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE blocks SET position = position - 1000000000 WHERE document_id = ? AND position >= 0")
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
@@ -2492,5 +2537,69 @@ mod tests {
         );
         // An unmatched marker that is really body text gets escaped.
         assert_eq!(escape_snippet("a </mark> b"), "a &lt;/mark&gt; b");
+    }
+
+    #[tokio::test]
+    async fn resave_after_kind_change_parks_without_collision() {
+        // Regression (live-DB bug): a block dropped in an earlier save parks at
+        // `pos - 1e9`. If the row occupying that slot in a later save has a
+        // smaller rowid, SQLite updates it *into* the parked slot before the
+        // parked row vacates it, transiently violating UNIQUE(document_id, position).
+        let repo = repo().await;
+        let user = seed_user(&repo).await;
+        let full = repo.create_document(user.id, "Churn").await.unwrap();
+        let doc_id = full.document.id;
+
+        let md = "# H\n\na\n\nb";
+        let full = repo.get_document(doc_id).await.unwrap().unwrap();
+        let parsed = forgepost_content::parse_markdown(md);
+        let merged = forgepost_content::merge_blocks(
+            &full.document.blocks,
+            &full.document.versions,
+            parsed,
+            now_ms(),
+        );
+        repo.save_document_blocks(doc_id, &merged.blocks, &merged.versions)
+            .await
+            .unwrap();
+
+        // Simulate a block that was dropped by an earlier save: parked at
+        // position 1 - 1e9. Inserting it now gives it the newest rowid, so on
+        // the next save SQLite processes the live block at position 1 first
+        // and collides with this parked row before it can vacate.
+        let parked_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO blocks (id, document_id, kind, position, current_version_id, created_at_ms, updated_at_ms)
+             VALUES (?, ?, 'Paragraph', ?, ?, ?, ?)",
+        )
+        .bind(parked_id.to_string())
+        .bind(doc_id.to_string())
+        .bind(1 - 1_000_000_000i64)
+        .bind(Uuid::new_v4().to_string())
+        .bind(now_ms())
+        .bind(now_ms())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        let full = repo.get_document(doc_id).await.unwrap().unwrap();
+        let parsed = forgepost_content::parse_markdown(md);
+        let merged = forgepost_content::merge_blocks(
+            &full.document.blocks,
+            &full.document.versions,
+            parsed,
+            now_ms(),
+        );
+        repo.save_document_blocks(doc_id, &merged.blocks, &merged.versions)
+            .await
+            .unwrap();
+
+        let live: Vec<(i64,)> =
+            sqlx::query_as("SELECT position FROM blocks WHERE document_id = ? AND position >= 0")
+                .bind(doc_id.to_string())
+                .fetch_all(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(live, vec![(0,), (1,), (2,)]);
     }
 }

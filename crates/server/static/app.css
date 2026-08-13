@@ -242,6 +242,15 @@ td {
 	color: var(--muted);
 }
 
+a.badge {
+	text-decoration: none;
+}
+
+a.badge:hover {
+	color: var(--accent);
+	border-color: var(--accent);
+}
+
 .badge.published {
 	color: #16a34a;
 	border-color: #16a34a;

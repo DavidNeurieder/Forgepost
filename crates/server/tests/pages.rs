@@ -1696,3 +1696,65 @@ async fn settings_form_validates_input() {
     assert!(html.contains("class=\"brand\" href=\"/\">Forgepost</a>"));
     assert!(html.contains("data-theme=\"system\""));
 }
+
+#[tokio::test]
+async fn tag_pages_list_published_posts_only() {
+    let app = test_app().await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+
+    async fn publish(app: &Router, cookie: &str, csrf: &str, title: &str, tags: &str) {
+        let editor_uri = create_draft(app, cookie, csrf).await;
+        let (status, _) = send(
+            app,
+            form_req(
+                Method::POST,
+                &editor_uri,
+                Some(cookie),
+                &[
+                    ("csrf_token", csrf),
+                    ("title", title),
+                    ("tags", tags),
+                    ("markdown", &format!("# {title}\n\nSome body text.")),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        let (status, _) = send(
+            app,
+            form_req(
+                Method::POST,
+                &format!("{editor_uri}/publish"),
+                Some(cookie),
+                &[("csrf_token", csrf)],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+    }
+
+    publish(&app, &cookie, &csrf, "Rust Post", "rust, tech").await;
+    publish(&app, &cookie, &csrf, "Other Post", "cooking").await;
+
+    // The tag page lists only the matching post.
+    let (_, resp) = send(&app, req(Method::GET, "/tags/rust", None, None)).await;
+    let html = body_text(resp).await;
+    assert!(html.contains("<h1>Tag: rust</h1>"));
+    assert!(html.contains("Rust Post"));
+    assert!(!html.contains("Other Post"));
+
+    // Tag matching is case-insensitive (tags are stored lowercase).
+    let (status, _) = send(&app, req(Method::GET, "/tags/RUST", None, None)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Unknown tag -> 404.
+    let (status, _) = send(&app, req(Method::GET, "/tags/nope", None, None)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Home links to tag pages, not search.
+    let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;
+    let html = body_text(resp).await;
+    assert!(html.contains("href=\"/tags/rust\""));
+    assert!(!html.contains("href=\"/search?q="));
+}

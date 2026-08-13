@@ -34,7 +34,7 @@
   <h1>{{ title }}</h1>
   <p class="muted">{{ date }}</p>
   {% if !tags.is_empty() %}
-  <p>{% for t in tags %}<span class="badge">{{ t }}</span> {% endfor %}</p>
+  <p>{% for t in tags %}<a class="badge" href="/tags/{{ t|urlencode }}">{{ t }}</a> {% endfor %}</p>
   {% endif %}
   <div class="article-body">
     {% for block in rendered_blocks %}

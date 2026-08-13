@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ site_name }}{% endblock %}
+{% block title %}{{ tag }} · {{ site_name }}{% endblock %}
 {% block head_meta %}
 <meta name="description" content="{{ seo.description }}">
 <link rel="canonical" href="{{ seo.url }}">
@@ -13,11 +13,11 @@
 <meta name="twitter:title" content="{{ seo.title }}">
 <meta name="twitter:description" content="{{ seo.description }}">
 {% if !seo.image.is_empty() %}<meta name="twitter:image" content="{{ seo.image }}">{% endif %}
-<link rel="alternate" type="application/rss+xml" title="{{ site_name }} RSS" href="/rss">
 {% endblock %}
 {% block content %}
+<h1>Tag: {{ tag }}</h1>
 {% if posts.is_empty() %}
-<p class="muted">No published posts yet.</p>
+<p class="muted">No posts with this tag yet.</p>
 {% else %}
 <ul class="post-cards">
 {% for p in posts %}

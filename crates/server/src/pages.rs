@@ -49,6 +49,19 @@ struct HomePost {
     read_minutes: u64,
 }
 
+#[derive(Template)]
+#[template(path = "tag.html")]
+struct TagTemplate {
+    authed: bool,
+    flash: String,
+    site_name: String,
+    theme: String,
+    year: u32,
+    seo: SeoMeta,
+    tag: String,
+    posts: Vec<HomePost>,
+}
+
 /// SEO metadata rendered into `<head>` (canonical, Open Graph, Twitter,
 /// meta description, and JSON-LD).
 struct SeoMeta {
@@ -512,6 +525,20 @@ fn read_minutes(doc: &Document) -> u64 {
     (words.max(1) as u64).div_ceil(200)
 }
 
+/// Percent-encode a tag slug for use in a URL path.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 fn format_date(ms: Option<i64>) -> String {
     match ms {
         None => String::new(),
@@ -699,8 +726,34 @@ pub(crate) async fn home_page(
         site.tagline.clone()
     };
     let published = state.repo.list_published_with_tags().await?;
+    let posts = build_home_posts(&state, &published).await?;
+    page(&HomeTemplate {
+        authed: false,
+        flash: String::new(),
+        site_name: site.name.clone(),
+        theme: site.theme,
+        year: current_year(),
+        seo: SeoMeta {
+            title: site.name,
+            description,
+            url: base.clone(),
+            image: String::new(),
+            date_published: String::new(),
+            date_modified: String::new(),
+            author: String::new(),
+        },
+        posts,
+    })
+}
+
+/// Build the home-page cards (excerpt + read time) for a set of published
+/// posts; shared by the home page and per-tag listing page.
+async fn build_home_posts(
+    state: &AppState,
+    published: &[crate::model::PublishedPost],
+) -> Result<Vec<HomePost>, RepositoryError> {
     let mut posts = Vec::with_capacity(published.len());
-    for p in &published {
+    for p in published {
         let (excerpt, read_mins) = match state.repo.get_document(p.id).await? {
             Some(full) => (
                 page_meta_description(&full),
@@ -717,21 +770,41 @@ pub(crate) async fn home_page(
             read_minutes: read_mins,
         });
     }
-    page(&HomeTemplate {
+    Ok(posts)
+}
+
+pub(crate) async fn tag_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(tag): Path<String>,
+) -> Result<Response, PageError> {
+    if !state.repo.is_setup_complete().await? {
+        return Ok(Redirect::to("/setup").into_response());
+    }
+    let site = site(&state).await?;
+    let base = canonical_base(&state, &site, &headers);
+    let tag = tag.trim().to_lowercase();
+    let published = state.repo.list_published_with_tag(&tag).await?;
+    if published.is_empty() {
+        return Err(not_found(format!("Tag \"{tag}\" not found")).into());
+    }
+    let posts = build_home_posts(&state, &published).await?;
+    page(&TagTemplate {
         authed: false,
         flash: String::new(),
         site_name: site.name.clone(),
         theme: site.theme,
         year: current_year(),
         seo: SeoMeta {
-            title: site.name,
-            description,
-            url: base.clone(),
+            title: format!("{tag} · {}", site.name),
+            description: format!("Posts tagged “{tag}” on {}.", site.name),
+            url: format!("{base}/tags/{}", urlencode(&tag)),
             image: String::new(),
             date_published: String::new(),
             date_modified: String::new(),
             author: String::new(),
         },
+        tag,
         posts,
     })
 }
