@@ -35,6 +35,13 @@ Version **0.1.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
   by shared tags (the most recent posts backfill the list). Impressions and
   clicks are tracked into analytics to feed a future personalized
   recommendation engine.
+- **Traffic sources** — each article's views are bucketed into Search / Direct
+  / Community on the Stats page from the referrer captured per event.
+- **Game-feel dashboard** — the admin dashboard leads with the week's
+  most-read post, per-post **Views (7d)** with a **Δ vs last week** column,
+  and a nudge pointing at the post with the worst read-through.
+- **Share tracking** — a Share button on every article (native sheet or
+  clipboard copy) reports `share_click` events shown as a Shares stat.
 - **Solo mode** — one binary + embedded SQLite, Argon2 password hashing,
   session cookies, CSRF protection, rate-limited analytics API,
   `forgepost export` for backups, and in-process HTTPS (Let's Encrypt

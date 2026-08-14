@@ -1647,6 +1647,72 @@ async fn recommendation_events_record_and_validate() {
 }
 
 #[tokio::test]
+async fn share_click_records_and_traffic_sources_bucket() {
+    let app = test_app().await;
+    let (cookie, _, id, slug, _) = seed_published_article(&app).await;
+
+    let visitor = "55555555-5555-5555-5555-555555555555";
+    let session = "66666666-6666-6666-6666-666666666666";
+    let post = |body: Value| async {
+        send(
+            &app,
+            json_req(
+                Method::POST,
+                "/api/events",
+                Some(&format!("opv={visitor}")),
+                None,
+                Some(body),
+            ),
+        )
+        .await
+    };
+
+    // A view arriving from a search engine (Referer header), plus a share.
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/events")
+        .header(header::COOKIE, format!("opv={visitor}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::REFERER, "https://www.google.com/search?q=blog");
+    let body = json!({
+        "slug": slug, "session_id": session, "kind": "view", "payload": {},
+    })
+    .to_string();
+    let (status, _) = send(&app, req.body(Body::from(body)).unwrap()).await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "view with referrer accepted"
+    );
+
+    let (status, _) = post(json!({
+        "slug": slug, "session_id": session, "kind": "share_click", "payload": {},
+    }))
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "share_click accepted");
+
+    // The article stats now count the share.
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/documents/{id}/stats"),
+            Some(&cookie),
+            None,
+            None,
+        ),
+    )
+    .await;
+    let stats = body_json(resp).await;
+    assert_eq!(stats["article"]["views"], 1);
+    assert_eq!(stats["article"]["shares"], 1);
+    assert_eq!(
+        stats["article"]["unique_readers"], 1,
+        "the view's visitor is counted"
+    );
+}
+
+#[tokio::test]
 async fn article_includes_rendered_blocks() {
     let app = test_app().await;
     let (_, _, _, slug, block_ids) = seed_published_article(&app).await;

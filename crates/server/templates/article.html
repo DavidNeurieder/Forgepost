@@ -35,6 +35,9 @@
 <article>
   <h1>{{ title }}</h1>
   <p class="muted">{{ date }}</p>
+  <p>
+    <button type="button" id="share-button" class="button secondary small">Share</button>
+  </p>
   {% if !tags.is_empty() %}
   <p>{% for t in tags %}<a class="badge" href="/tags/{{ t|urlencode }}">{{ t }}</a> {% endfor %}</p>
   {% endif %}
@@ -114,6 +117,10 @@
       window.ForgepostTracker.trackRecommendations(
         '{{ slug }}',
         document.getElementById('keep-reading')
+      );
+      window.ForgepostTracker.trackShare(
+        '{{ slug }}',
+        document.getElementById('share-button')
       );
     }
   });

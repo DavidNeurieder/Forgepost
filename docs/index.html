@@ -84,6 +84,21 @@
             <h3>HTTPS built in</h3>
             <p>In-process TLS: automatic Let's Encrypt issuance and renewal, or bring-your-own certificates that reload on change. No reverse proxy required.</p>
           </div>
+          <div class="card">
+            <div class="icon">📚</div>
+            <h3>Keep reading</h3>
+            <p>Every article ends with up to three related-post cards, ranked by shared tags (most recent posts backfill the list). Impressions and clicks are tracked into analytics to feed a future personalized recommendation engine.</p>
+          </div>
+          <div class="card">
+            <div class="icon">🎯</div>
+            <h3>Game-feel dashboard</h3>
+            <p>The admin dashboard opens with the week's most-read post, a per-post <strong>Views (7d)</strong> column with a <strong>Δ vs last week</strong> signal, and a nudge pointing at the post with the worst read-through — keep the loop moving.</p>
+          </div>
+          <div class="card">
+            <div class="icon">🧭</div>
+            <h3>Traffic sources &amp; shares</h3>
+            <p>The Stats page buckets each article's views into Search / Direct / Community from the captured referrer, and a Share button on every article (native sheet or clipboard copy) reports <code>share_click</code> events shown as a Shares stat.</p>
+          </div>
         </div>
       </div>
     </section>
@@ -110,7 +125,7 @@
             <span class="num">3</span>
             <div>
               <h3>Measure</h3>
-              <p>Open <em>Stats</em> for a document: views, unique readers (estimated), average reading time, completion, a scroll-depth funnel, and a per-block drop-off table — where do readers leave?</p>
+              <p>Open <em>Stats</em> for a document: views, unique readers (estimated), average reading time, completion, shares, a scroll-depth funnel, a per-block drop-off table, and a traffic-sources breakdown (Search / Direct / Community) — where do readers leave, and how did they get here?</p>
             </div>
           </div>
           <div class="step">
@@ -145,7 +160,7 @@
           <div class="terminal">
             <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="term-title">forgepost serve</span></div>
             <pre><span class="t-dim">$ ./target/release/forgepost serve</span>
-<span class="t-dim">[info]</span> applying migrations (0001 → 0004) to <span class="t-dim">forgepost.db</span>
+<span class="t-dim">[info]</span> applying migrations (0001 → 0008) to <span class="t-dim">forgepost.db</span>
 <span class="t-dim">[info]</span> spawning background experiment auto-decider
 <span class="t-dim">[info]</span> listening on <span class="t-dim">http://127.0.0.1:8080</span>
 
@@ -210,7 +225,7 @@ cargo build --release --bin forgepost
           <pre class="code-block"><code>cargo test --workspace                     # engine golden + property tests, API, pages
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
-npm run test:e2e                            # real browser vs the real binary</code></pre>
+cd e2e && npm run test:e2e                    # real browser vs the real binary</code></pre>
         </div>
 
         <p class="note">The experiments crate's correctness is checked with hand-computed beta golden tests plus property tests — posterior sanity, sample-size concentration, and no-winner/stop correctness. The auto-decider promotes a variant only once it clears the spending-bound-corrected threshold.</p>

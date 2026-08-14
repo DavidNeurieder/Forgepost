@@ -244,8 +244,59 @@
 		}
 	}
 
+	// Track the article's Share button: reports a `share_click` event, then
+	// hands the current URL to the platform share sheet when available, falling
+	// back to copying the link. `element` is the share button (missing on pages
+	// that omit it).
+	function trackShare(slug, element) {
+		if (!element) return;
+		element.addEventListener('click', function () {
+			var url = window.location.href;
+			postEvent({
+				slug: slug,
+				session_id: randomId(),
+				kind: 'share_click',
+				payload: {}
+			});
+			if (typeof navigator.share === 'function') {
+				navigator
+					.share({ title: document.title, url: url })
+					.catch(function () {
+						// User dismissed the sheet; the event still counts as a click.
+					});
+				return;
+			}
+			var copied = function () {
+				var original = element.textContent;
+				element.textContent = 'Link copied';
+				window.setTimeout(function () {
+					element.textContent = original;
+				}, 2000);
+			};
+			if (navigator.clipboard && navigator.clipboard.writeText) {
+				navigator.clipboard.writeText(url).then(copied).catch(function () {});
+				return;
+			}
+			// Legacy fallback: hidden input + execCommand.
+			var tmp = document.createElement('textarea');
+			tmp.value = url;
+			tmp.style.position = 'fixed';
+			tmp.style.opacity = '0';
+			document.body.appendChild(tmp);
+			tmp.select();
+			try {
+				document.execCommand('copy');
+				copied();
+			} catch (e) {
+				// Nothing more we can do.
+			}
+			document.body.removeChild(tmp);
+		});
+	}
+
 	window.ForgepostTracker = {
 		trackArticle: trackArticle,
-		trackRecommendations: trackRecommendations
+		trackRecommendations: trackRecommendations,
+		trackShare: trackShare
 	};
 })();

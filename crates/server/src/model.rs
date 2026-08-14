@@ -94,7 +94,7 @@ pub struct AnalyticsEvent {
     pub document_id: Uuid,
     /// Wire event type: `view` | `banded_scroll` | `article_read` |
     /// `block_impression` | `experiment_impression` | `experiment_conversion` |
-    /// `recommendation_impression` | `recommendation_click`.
+    /// `recommendation_impression` | `recommendation_click` | `share_click`.
     pub event_type: String,
     pub band: Option<i64>,
     pub block_id: Option<Uuid>,
@@ -111,6 +111,20 @@ pub struct AnalyticsEvent {
     /// (`recommendation_impression` / `recommendation_click` only).
     pub recommended_slug: Option<String>,
     pub created_at_ms: i64,
+}
+
+/// Per-document dashboard metrics for the game-feel "last 7 days" view.
+#[derive(Debug, Clone, Default)]
+pub struct DashboardMetric {
+    pub document_id: Uuid,
+    /// Distinct view pageviews in the last 7 days.
+    pub views_7d: i64,
+    /// Distinct view pageviews in the 7 days before that.
+    pub views_prev_7d: i64,
+    /// Lifetime distinct view pageviews.
+    pub views_total: i64,
+    /// Lifetime pageviews that scrolled to 100% (band 100).
+    pub completed: i64,
 }
 
 /// A row of the `experiments` table plus its variant rows.

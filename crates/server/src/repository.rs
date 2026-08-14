@@ -6,7 +6,8 @@
 use crate::analytics::{ArticleStats, BandReach};
 use crate::auth::{SESSION_TTL_MS, sha256_hex};
 use crate::model::{
-    AnalyticsEvent, Comment, DocumentSummary, FullDocument, Media, Session, SiteSettings, User,
+    AnalyticsEvent, Comment, DashboardMetric, DocumentSummary, FullDocument, Media, Session,
+    SiteSettings, User,
 };
 use async_trait::async_trait;
 use forgepost_content::{
@@ -19,6 +20,9 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePo
 use sqlx::{Row, Transaction};
 use std::str::FromStr;
 use uuid::Uuid;
+
+/// One week in milliseconds; the dashboard's "last 7 days" window.
+const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 #[async_trait]
 pub trait Repository: Send + Sync {
@@ -131,6 +135,17 @@ pub trait Repository: Send + Sync {
         &self,
         document_id: DocumentId,
     ) -> Result<std::collections::HashMap<Uuid, i64>, RepositoryError>;
+    /// Per-referrer distinct view pageviews for a document (Stats "traffic
+    /// sources" table). Referrers are bucketed in `analytics::bucket_traffic_sources`.
+    async fn referrer_counts(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<Vec<(Option<String>, i64)>, RepositoryError>;
+    /// Per-document dashboard metrics for the last two 7-day windows plus
+    /// lifetime views and completions. `now_ms` pins the window boundary so
+    /// tests can drive results deterministically.
+    async fn dashboard_metrics(&self, now_ms: i64)
+    -> Result<Vec<DashboardMetric>, RepositoryError>;
 
     // Experiments (M3)
     /// Create an experiment as an overlay on a block. Control is the block's
@@ -1182,10 +1197,13 @@ impl Repository for SqliteRepository {
                     WHERE document_id = ? AND event_type = 'view') AS readers,
                 (SELECT COUNT(*) FROM analytics_events
                     WHERE document_id = ? AND event_type = 'article_read') AS reads,
+                (SELECT COUNT(DISTINCT pageview_id) FROM analytics_events
+                    WHERE document_id = ? AND event_type = 'share_click') AS shares,
                 (SELECT AVG(read_time_ms) FROM analytics_events
                     WHERE document_id = ? AND event_type = 'article_read'
                       AND read_time_ms IS NOT NULL) AS avg_read",
         )
+        .bind(document_id.to_string())
         .bind(document_id.to_string())
         .bind(document_id.to_string())
         .bind(document_id.to_string())
@@ -1195,12 +1213,14 @@ impl Repository for SqliteRepository {
         let views: i64 = row.get("views");
         let unique_readers: i64 = row.get("readers");
         let read_events: i64 = row.get("reads");
+        let shares: i64 = row.get("shares");
         let avg_read_time_ms: Option<f64> = row.get("avg_read");
         Ok(ArticleStats {
             views,
             unique_readers,
             avg_read_time_ms: avg_read_time_ms.map(|v| v.round() as i64),
             read_events,
+            shares,
             completion: None,
             band_reach: Vec::new(),
         })
@@ -1254,6 +1274,89 @@ impl Repository for SqliteRepository {
                 Uuid::from_str(&block_id)
                     .ok()
                     .map(|id| (id, r.get::<i64, _>("pvs")))
+            })
+            .collect())
+    }
+
+    async fn referrer_counts(
+        &self,
+        document_id: DocumentId,
+    ) -> Result<Vec<(Option<String>, i64)>, RepositoryError> {
+        let rows = sqlx::query(
+            "SELECT referrer, COUNT(DISTINCT pageview_id) AS pvs
+             FROM analytics_events
+             WHERE document_id = ? AND event_type = 'view'
+             GROUP BY referrer",
+        )
+        .bind(document_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let referrer: Option<String> = r.get("referrer");
+                (referrer, r.get::<i64, _>("pvs"))
+            })
+            .collect())
+    }
+
+    async fn dashboard_metrics(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<DashboardMetric>, RepositoryError> {
+        // Views in the current and previous 7-day windows, per document.
+        let views_rows = sqlx::query(
+            "SELECT document_id,
+                    COUNT(DISTINCT CASE WHEN created_at_ms >= ? THEN pageview_id END) AS cur,
+                    COUNT(DISTINCT CASE WHEN created_at_ms < ? AND created_at_ms >= ? THEN pageview_id END) AS prev
+             FROM analytics_events
+             WHERE event_type = 'view' AND created_at_ms >= ?
+             GROUP BY document_id",
+        )
+        .bind(now_ms - SEVEN_DAYS_MS)
+        .bind(now_ms - SEVEN_DAYS_MS)
+        .bind(now_ms - SEVEN_DAYS_MS - SEVEN_DAYS_MS)
+        .bind(now_ms - SEVEN_DAYS_MS - SEVEN_DAYS_MS)
+        .fetch_all(&self.pool)
+        .await?;
+
+        // Lifetime views and completed pageviews (reached band 100), per document.
+        let total_rows = sqlx::query(
+            "SELECT document_id,
+                    COUNT(DISTINCT pageview_id) AS views,
+                    (SELECT COUNT(DISTINCT c.pageview_id) FROM analytics_events c
+                     WHERE c.document_id = e.document_id
+                       AND c.event_type = 'banded_scroll' AND c.band = 100) AS completed
+             FROM analytics_events e
+             WHERE e.event_type = 'view'
+             GROUP BY e.document_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut totals: std::collections::HashMap<Uuid, (i64, i64)> = total_rows
+            .iter()
+            .filter_map(|r| {
+                let id: String = r.get("document_id");
+                Uuid::from_str(&id)
+                    .ok()
+                    .map(|id| (id, (r.get::<i64, _>("views"), r.get::<i64, _>("completed"))))
+            })
+            .collect();
+
+        Ok(views_rows
+            .iter()
+            .filter_map(|r| {
+                let id: String = r.get("document_id");
+                let id = Uuid::from_str(&id).ok()?;
+                let (views_total, completed) = totals.remove(&id).unwrap_or((0, 0));
+                Some(DashboardMetric {
+                    document_id: id,
+                    views_7d: r.get("cur"),
+                    views_prev_7d: r.get("prev"),
+                    views_total,
+                    completed,
+                })
             })
             .collect())
     }
@@ -2569,6 +2672,127 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(slug.as_deref(), Some("next-post"));
+    }
+
+    #[tokio::test]
+    async fn referrer_counts_group_by_referrer() {
+        let repo = repo().await;
+        let user = seed_user(&repo).await;
+        let full = repo.create_document(user.id, "Sources").await.unwrap();
+        let doc_id = full.document.id;
+
+        let view = |pv: Uuid, visitor: Uuid, referrer: Option<&str>| AnalyticsEvent {
+            id: Uuid::new_v4(),
+            document_id: doc_id,
+            event_type: "view".into(),
+            band: None,
+            block_id: None,
+            pageview_id: pv,
+            visitor_id: visitor,
+            referrer: referrer.map(String::from),
+            user_agent: None,
+            read_time_ms: None,
+            experiment_id: None,
+            variant_id: None,
+            recommended_slug: None,
+            created_at_ms: now_ms(),
+        };
+
+        repo.record_analytics_event(&view(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Some("https://www.google.com/"),
+        ))
+        .await
+        .unwrap();
+        repo.record_analytics_event(&view(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Some("https://www.google.com/"),
+        ))
+        .await
+        .unwrap();
+        repo.record_analytics_event(&view(Uuid::new_v4(), Uuid::new_v4(), None))
+            .await
+            .unwrap();
+        // Non-view events must be ignored.
+        repo.record_analytics_event(&AnalyticsEvent {
+            event_type: "banded_scroll".into(),
+            band: Some(100),
+            ..view(Uuid::new_v4(), Uuid::new_v4(), None)
+        })
+        .await
+        .unwrap();
+
+        let counts = repo.referrer_counts(doc_id).await.unwrap();
+        assert_eq!(counts.len(), 2);
+        let google = counts
+            .iter()
+            .find(|(r, _)| r.as_deref() == Some("https://www.google.com/"))
+            .expect("google referrer bucket");
+        assert_eq!(google.1, 2);
+        let direct = counts
+            .iter()
+            .find(|(r, _)| r.is_none())
+            .expect("direct bucket");
+        assert_eq!(direct.1, 1);
+    }
+
+    #[tokio::test]
+    async fn dashboard_metrics_windows_and_completion() {
+        let repo = repo().await;
+        let user = seed_user(&repo).await;
+        let full = repo.create_document(user.id, "Metrics").await.unwrap();
+        let doc_id = full.document.id;
+
+        let now = 1_000_000_000i64;
+        let week = 7 * 24 * 60 * 60 * 1000;
+
+        let event = |event_type: &str, band: Option<i64>, pv: Uuid, at: i64| AnalyticsEvent {
+            id: Uuid::new_v4(),
+            document_id: doc_id,
+            event_type: event_type.into(),
+            band,
+            block_id: None,
+            pageview_id: pv,
+            visitor_id: Uuid::new_v4(),
+            referrer: None,
+            user_agent: None,
+            read_time_ms: None,
+            experiment_id: None,
+            variant_id: None,
+            recommended_slug: None,
+            created_at_ms: at,
+        };
+
+        // Two views this week, one last week.
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        repo.record_analytics_event(&event("view", None, a, now - 100))
+            .await
+            .unwrap();
+        repo.record_analytics_event(&event("view", None, b, now - 200))
+            .await
+            .unwrap();
+        repo.record_analytics_event(&event("view", None, c, now - week - 100))
+            .await
+            .unwrap();
+        // One of this week's pageviews reached the end; the other only 25%.
+        repo.record_analytics_event(&event("banded_scroll", Some(100), a, now - 50))
+            .await
+            .unwrap();
+        repo.record_analytics_event(&event("banded_scroll", Some(25), b, now - 50))
+            .await
+            .unwrap();
+
+        let metrics = repo.dashboard_metrics(now).await.unwrap();
+        assert_eq!(metrics.len(), 1, "only the viewed document appears");
+        let m = &metrics[0];
+        assert_eq!(m.views_7d, 2);
+        assert_eq!(m.views_prev_7d, 1);
+        assert_eq!(m.views_total, 3);
+        assert_eq!(m.completed, 1);
     }
 
     #[test]

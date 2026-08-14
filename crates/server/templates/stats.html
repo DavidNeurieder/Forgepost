@@ -28,7 +28,46 @@
     <div class="stat-value">{{ completion }}</div>
     <div class="stat-label">Completed (scrolled to end)</div>
   </div>
+  <div class="stat-card">
+    <div class="stat-value">{{ shares }}</div>
+    <div class="stat-label">Shares</div>
+  </div>
 </div>
+
+<h2 style="margin-top:2rem;">Traffic sources</h2>
+{% if sources.is_empty() %}
+<p class="muted">No views yet.</p>
+{% else %}
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr>
+      <th>Source</th>
+      <th>Views</th>
+      <th>Share</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for s in sources %}
+    <tr>
+      <td>{{ s.label }}</td>
+      <td>{{ s.pageviews }}</td>
+      <td>
+        <div class="dropoff">
+          <div class="dropoff-fill" style="width:{{ s.pct }}%"></div>
+          <span class="dropoff-count">{{ s.pct }}%</span>
+        </div>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="muted">
+  “Direct” is visits with no referrer or links from this site itself. “Search”
+  is a handful of well-known engines; everything else counts as “Community”.
+</p>
+{% endif %}
 
 <h2 style="margin-top:2rem;">Scroll depth</h2>
 <div class="funnel">

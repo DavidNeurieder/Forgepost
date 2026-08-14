@@ -85,6 +85,8 @@ pub struct ArticleStats {
     pub avg_read_time_ms: Option<i64>,
     /// Pageviews that fired an `article_read` event.
     pub read_events: i64,
+    /// Distinct pageviews that fired a `share_click` event.
+    pub shares: i64,
     /// Fraction (0..=1) of pageviews that scrolled to 100%.
     pub completion: Option<f64>,
     /// Cumulative scroll-depth distribution (sorted ascending by band).
@@ -112,6 +114,115 @@ pub struct BlockStat {
 pub struct DocumentStatsView {
     pub article: ArticleStats,
     pub blocks: Vec<BlockStat>,
+}
+
+// ---------------------------------------------------------------------------
+// Traffic sources
+// ---------------------------------------------------------------------------
+
+/// Where a pageview's referrer points, bucketed for the Stats page
+/// ("traffic sources"): search engines, internal/direct navigation, and
+/// everything external (social, blogs, RSS readers, aggregators).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrafficSource {
+    Search,
+    Direct,
+    Community,
+}
+
+impl TrafficSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            TrafficSource::Search => "Search",
+            TrafficSource::Direct => "Direct",
+            TrafficSource::Community => "Community",
+        }
+    }
+}
+
+/// A bucketed traffic-source row: `pageviews` distinct view pageviews.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrafficSourceCount {
+    pub source: TrafficSource,
+    pub pageviews: i64,
+}
+
+/// Host portion of a URL, lowercased, without scheme, port, or `www.` prefix.
+/// Returns `None` for relative URLs (internal links) and unparseable strings.
+pub(crate) fn host_of(url: &str) -> Option<String> {
+    if url.starts_with('/') {
+        return None;
+    }
+    let rest = url.split("://").nth(1)?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    let host = host.split(':').next()?.trim();
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+/// Classify a `Referer` header value. Missing/empty referrers and links that
+/// point at this site's own origin count as `Direct`; known search-engine
+/// hosts as `Search`; everything else as `Community`.
+pub fn classify_referrer(referrer: Option<&str>, site_host: Option<&str>) -> TrafficSource {
+    let Some(raw) = referrer.map(str::trim).filter(|r| !r.is_empty()) else {
+        return TrafficSource::Direct;
+    };
+    if raw.starts_with('/') {
+        return TrafficSource::Direct;
+    }
+    let Some(host) = host_of(raw) else {
+        return TrafficSource::Direct;
+    };
+    let host = host.trim_start_matches("www.");
+    if let Some(site) = site_host {
+        let site = site.trim_start_matches("www.").to_ascii_lowercase();
+        if host == site {
+            return TrafficSource::Direct;
+        }
+    }
+    if is_search_host(host) {
+        TrafficSource::Search
+    } else {
+        TrafficSource::Community
+    }
+}
+
+fn is_search_host(host: &str) -> bool {
+    host.starts_with("google.")
+        || host.starts_with("yandex.")
+        || host == "bing.com"
+        || host == "duckduckgo.com"
+        || host == "ecosia.org"
+        || host == "qwant.com"
+        || host == "startpage.com"
+        || host == "search.brave.com"
+        || host == "baidu.com"
+}
+
+/// Aggregate raw per-referrer pageview counts into `TrafficSource` buckets,
+/// sorted by pageviews descending (then label for determinism).
+pub fn bucket_traffic_sources(
+    rows: &[(Option<String>, i64)],
+    site_host: Option<&str>,
+) -> Vec<TrafficSourceCount> {
+    let mut buckets: std::collections::HashMap<TrafficSource, i64> =
+        std::collections::HashMap::new();
+    for (referrer, pageviews) in rows {
+        let source = classify_referrer(referrer.as_deref(), site_host);
+        *buckets.entry(source).or_insert(0) += pageviews;
+    }
+    let mut out: Vec<TrafficSourceCount> = buckets
+        .into_iter()
+        .map(|(source, pageviews)| TrafficSourceCount { source, pageviews })
+        .collect();
+    out.sort_by(|a, b| {
+        b.pageviews
+            .cmp(&a.pageviews)
+            .then(a.source.label().cmp(b.source.label()))
+    });
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +375,85 @@ mod tests {
         assert_eq!(stats[1].estimated_reach, 30);
         assert_eq!(stats[0].estimated_dropoff, 20);
         assert_eq!(stats[1].estimated_dropoff, 50);
+    }
+
+    #[test]
+    fn classify_referrer_buckets_search_direct_community() {
+        let site = Some("blog.example.com");
+        assert_eq!(
+            classify_referrer(Some("https://www.google.com/search?q=rust"), site),
+            TrafficSource::Search
+        );
+        assert_eq!(
+            classify_referrer(Some("https://duckduckgo.com/?q=blog"), site),
+            TrafficSource::Search
+        );
+        assert_eq!(classify_referrer(None, site), TrafficSource::Direct);
+        assert_eq!(classify_referrer(Some(""), site), TrafficSource::Direct);
+        assert_eq!(
+            classify_referrer(Some("/posts/foo"), site),
+            TrafficSource::Direct
+        );
+        assert_eq!(
+            classify_referrer(Some("https://blog.example.com/posts/foo"), site),
+            TrafficSource::Direct
+        );
+        assert_eq!(
+            classify_referrer(Some("https://news.ycombinator.com/item?id=1"), site),
+            TrafficSource::Community
+        );
+        assert_eq!(
+            classify_referrer(Some("https://hacker-news.example.org/"), site),
+            TrafficSource::Community
+        );
+    }
+
+    #[test]
+    fn classify_referrer_site_host_ignores_www_and_case() {
+        let site = Some("www.Blog.example.com");
+        assert_eq!(
+            classify_referrer(Some("https://blog.example.com/foo"), site),
+            TrafficSource::Direct
+        );
+    }
+
+    #[test]
+    fn bucket_traffic_sources_aggregates_and_sorts() {
+        let site = Some("blog.example.com");
+        let rows = vec![
+            (Some("https://www.google.com/".into()), 5),
+            (None, 3),
+            (Some("https://news.ycombinator.com/".into()), 9),
+            (Some("/internal/link".into()), 1),
+        ];
+        let buckets = bucket_traffic_sources(&rows, site);
+        assert_eq!(
+            buckets,
+            vec![
+                TrafficSourceCount {
+                    source: TrafficSource::Community,
+                    pageviews: 9
+                },
+                TrafficSourceCount {
+                    source: TrafficSource::Search,
+                    pageviews: 5
+                },
+                TrafficSourceCount {
+                    source: TrafficSource::Direct,
+                    pageviews: 4
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn host_of_strips_scheme_port_path_and_www() {
+        assert_eq!(
+            host_of("https://www.example.com:8080/path?q=1"),
+            Some("www.example.com".into())
+        );
+        assert_eq!(host_of("/relative"), None);
+        assert_eq!(host_of("not a url"), None);
     }
 
     #[test]

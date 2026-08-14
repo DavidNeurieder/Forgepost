@@ -113,8 +113,16 @@ struct DashboardTemplate {
     year: u32,
     display_name: String,
     csrf_token: String,
+    best_post: Option<BestPost>,
+    nudge: String,
     docs: Vec<DashboardDoc>,
     pending: Vec<PendingComment>,
+}
+
+struct BestPost {
+    title: String,
+    id: String,
+    views: i64,
 }
 
 struct DashboardDoc {
@@ -123,6 +131,9 @@ struct DashboardDoc {
     status: String,
     created: String,
     updated: String,
+    views_7d: i64,
+    delta: String,
+    completion: String,
 }
 
 struct PendingComment {
@@ -163,11 +174,19 @@ struct StatsTemplate {
     unique_readers: i64,
     avg_read_time: String,
     completion: String,
+    shares: i64,
+    sources: Vec<SourceRow>,
     funnel: Vec<FunnelRow>,
     blocks: Vec<BlockStatRow>,
     experiments: Vec<ExperimentRow>,
     blocks_for_test: Vec<ExperimentableBlock>,
     variant_fields: Vec<VariantField>,
+}
+
+struct SourceRow {
+    label: String,
+    pageviews: i64,
+    pct: i64,
 }
 
 struct FunnelRow {
@@ -1106,6 +1125,46 @@ pub(crate) async fn dashboard_page(
     let docs = state.repo.list_documents(auth.user.id).await?;
     let pending = state.repo.pending_comments().await?;
     let site = site(&state).await?;
+    let metrics = state.repo.dashboard_metrics(now_ms()).await?;
+    let by_id: std::collections::HashMap<Uuid, crate::model::DashboardMetric> =
+        metrics.into_iter().map(|m| (m.document_id, m)).collect();
+
+    let published: Vec<(
+        &crate::model::DocumentSummary,
+        &crate::model::DashboardMetric,
+    )> = docs
+        .iter()
+        .filter(|d| d.status == "published")
+        .filter_map(|d| by_id.get(&d.id).map(|m| (d, m)))
+        .collect();
+
+    // Game-feel callout: most-read post this week.
+    let best_post = published
+        .iter()
+        .max_by(|a, b| (a.1.views_7d, a.1.views_total).cmp(&(b.1.views_7d, b.1.views_total)))
+        .filter(|(_, m)| m.views_7d > 0)
+        .map(|(d, m)| BestPost {
+            title: d.title.clone(),
+            id: d.id.to_string(),
+            views: m.views_7d,
+        });
+
+    // Improvement nudge: among posts with at least a few reads, the worst
+    // completion rate. Directs the author to the Stats page to iterate.
+    let nudge = published
+        .iter()
+        .filter(|(_, m)| m.views_total >= 5)
+        .min_by(|a, b| completion_rate(a.1).total_cmp(&completion_rate(b.1)))
+        .filter(|(_, m)| completion_rate(m) < 1.0)
+        .map(|(d, m)| {
+            format!(
+                "Only {}% of readers reach the end of “{}”. Try a variant of the opening to keep them reading.",
+                (completion_rate(m) * 100.0).round() as i64,
+                d.title,
+            )
+        })
+        .unwrap_or_default();
+
     page(&DashboardTemplate {
         authed: true,
         flash: flash_message(flash.flash.as_deref()),
@@ -1114,14 +1173,28 @@ pub(crate) async fn dashboard_page(
         year: current_year(),
         display_name: auth.user.display_name.clone(),
         csrf_token: auth.csrf_token.clone(),
+        best_post,
+        nudge,
         docs: docs
             .iter()
-            .map(|d| DashboardDoc {
-                id: d.id.to_string(),
-                title: d.title.clone(),
-                status: d.status.clone(),
-                created: format_date(Some(d.created_at_ms)),
-                updated: format_date(Some(d.updated_at_ms)),
+            .map(|d| {
+                let m = by_id.get(&d.id);
+                DashboardDoc {
+                    id: d.id.to_string(),
+                    title: d.title.clone(),
+                    status: d.status.clone(),
+                    created: format_date(Some(d.created_at_ms)),
+                    updated: format_date(Some(d.updated_at_ms)),
+                    views_7d: m.map(|m| m.views_7d).unwrap_or(0),
+                    delta: delta_label(
+                        m.map(|m| m.views_7d).unwrap_or(0),
+                        m.map(|m| m.views_prev_7d).unwrap_or(0),
+                    ),
+                    completion: m
+                        .filter(|m| m.views_total > 0)
+                        .map(|m| format_pct(completion_rate(m)))
+                        .unwrap_or_else(|| "—".into()),
+                }
             })
             .collect(),
         pending: pending
@@ -1134,6 +1207,28 @@ pub(crate) async fn dashboard_page(
             })
             .collect(),
     })
+}
+
+/// Lifetime fraction (0..=1) of pageviews that reached 100%.
+fn completion_rate(m: &crate::model::DashboardMetric) -> f64 {
+    if m.views_total <= 0 {
+        0.0
+    } else {
+        m.completed as f64 / m.views_total as f64
+    }
+}
+
+/// "+42%"/"−13%" vs last week; `new` for a post with no prior-window views;
+/// `—` when there is nothing to compare yet.
+fn delta_label(cur: i64, prev: i64) -> String {
+    if cur == 0 {
+        return "—".into();
+    }
+    if prev == 0 {
+        return "new".into();
+    }
+    let delta = (cur - prev) * 100 / prev;
+    format!("{}{}%", if delta >= 0 { "+" } else { "−" }, delta.abs())
 }
 
 pub(crate) async fn new_post(
@@ -1424,6 +1519,7 @@ pub(crate) async fn stats_page(
             .0;
 
     let views = stats.article.views;
+    let shares = stats.article.shares;
     let funnel = stats
         .article
         .band_reach
@@ -1479,6 +1575,20 @@ pub(crate) async fn stats_page(
         .collect();
 
     let site = site(&state).await?;
+    let referrers = state.repo.referrer_counts(doc_id).await?;
+    let site_host = crate::analytics::host_of(&site.url);
+    let sources = crate::analytics::bucket_traffic_sources(&referrers, site_host.as_deref())
+        .into_iter()
+        .map(|s| SourceRow {
+            label: s.source.label().into(),
+            pageviews: s.pageviews,
+            pct: if views > 0 {
+                (s.pageviews as f64 / views as f64 * 100.0).round() as i64
+            } else {
+                0
+            },
+        })
+        .collect();
     page(&StatsTemplate {
         authed: true,
         flash: flash_message(flash.flash.as_deref()),
@@ -1499,6 +1609,8 @@ pub(crate) async fn stats_page(
             .completion
             .map(format_pct)
             .unwrap_or_else(|| "—".into()),
+        shares,
+        sources,
         funnel,
         blocks,
         experiments: experiment_rows,

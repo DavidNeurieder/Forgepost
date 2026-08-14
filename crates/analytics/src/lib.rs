@@ -26,6 +26,7 @@ pub enum EventKind {
     Referral,
     RecommendationImpression,
     RecommendationClick,
+    ShareClick,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1222,6 +1222,15 @@ fn parse_event(body: &EventRequest) -> Result<ParsedEvent, ApiError> {
                 recommended_slug: Some(recommended_slug.to_string()),
             })
         }
+        EventKind::ShareClick => Ok(ParsedEvent {
+            event_type: "share_click",
+            band: None,
+            block_id: None,
+            read_time_ms: None,
+            experiment_id: None,
+            variant_id: None,
+            recommended_slug: None,
+        }),
         _ => Err(ApiError::bad_request("event kind not supported yet")),
     }
 }

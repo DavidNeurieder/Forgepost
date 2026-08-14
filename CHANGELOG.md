@@ -45,6 +45,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`analytics_events.recommended_slug`), and the ranking lives in
   `crates/server/src/recommender.rs` behind a visitor-aware signature ready for
   a future personalized engine.
+- **Traffic sources** — the Stats page breaks down each article's views into
+  Search / Direct / Community buckets (`classify_referrer` in
+  `crates/server/src/analytics.rs`), using the `Referer` header that was
+  already captured per event. Direct counts no-referrer and same-site visits;
+  Search is a small allow-list of well-known engines.
+- **Game-feel dashboard** — the admin dashboard opens with a "This week"
+  section: a most-read-post callout, a per-post **Views (7d)** + **Δ vs last
+  week** column pair, and a completion nudge pointing at the post with the
+  worst read-through when it has enough reads to judge.
+- **Share tracking** — articles gain a **Share** button (native share sheet
+  when available, clipboard copy otherwise) that reports a new `share_click`
+  event; the Stats page shows a **Shares** stat card.
 
 ### Changed
 

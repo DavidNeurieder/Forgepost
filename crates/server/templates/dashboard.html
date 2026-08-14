@@ -15,6 +15,17 @@
   </form>
 </div>
 
+<h2 style="margin-top:2rem;">This week</h2>
+{% if let Some(best) = best_post %}
+<div class="notice">
+  <strong>Most read this week</strong> — <a href="/admin/stats/{{ best.id }}">{{ best.title }}</a>
+  <span class="muted"> · {{ best.views }} views in the last 7 days</span>
+</div>
+{% endif %}
+{% if !nudge.is_empty() %}
+<div class="notice notice-warn">{{ nudge }}</div>
+{% endif %}
+
 <h2 style="margin-top:2rem;">Import a post</h2>
 <p class="muted" style="margin-top:0.4rem;">
   Upload an existing Markdown file (.md), or a .zip bundling it with its images
@@ -69,6 +80,9 @@
     <tr>
       <th>Title</th>
       <th>Status</th>
+      <th>Views (7d)</th>
+      <th>Δ vs last week</th>
+      <th>Reached end</th>
       <th>Created</th>
       <th>Updated</th>
       <th>Analytics</th>
@@ -80,6 +94,9 @@
     <tr>
       <td><a href="/admin/editor/{{ d.id }}">{{ d.title }}</a></td>
       <td><span class="badge {{ d.status }}">{{ d.status }}</span></td>
+      <td>{{ d.views_7d }}</td>
+      <td class="muted">{{ d.delta }}</td>
+      <td class="muted">{{ d.completion }}</td>
       <td class="muted">{{ d.created }}</td>
       <td class="muted">{{ d.updated }}</td>
       <td><a class="button small" href="/admin/stats/{{ d.id }}">Stats</a></td>

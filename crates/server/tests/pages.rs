@@ -933,6 +933,117 @@ async fn stats_page_renders_and_creates_experiment() {
     assert!(html.contains("Start experiment"));
 }
 
+#[tokio::test]
+async fn stats_page_shows_shares_and_traffic_sources() {
+    let app = test_app().await;
+    let cookie = seed_published(&app).await;
+
+    let (_, resp) = send(
+        &app,
+        req(Method::GET, "/api/documents", Some(&cookie), None),
+    )
+    .await;
+    let docs = body_json(resp).await;
+    let doc_id = docs.as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // One view coming from a search engine, one share.
+    let session = "99999999-9999-9999-9999-999999999999";
+    let view = Request::builder()
+        .method(Method::POST)
+        .uri("/api/events")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::REFERER, "https://www.google.com/search?q=forgepost")
+        .body(Body::from(
+            serde_json::json!({
+                "slug": "hello-world",
+                "session_id": session,
+                "kind": "view",
+                "payload": {},
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let (status, _) = send(&app, view).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let share = Request::builder()
+        .method(Method::POST)
+        .uri("/api/events")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "slug": "hello-world",
+                "session_id": session,
+                "kind": "share_click",
+                "payload": {},
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let (status, _) = send(&app, share).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, resp) = send(
+        &app,
+        req(
+            Method::GET,
+            &format!("/admin/stats/{doc_id}"),
+            Some(&cookie),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body_text(resp).await;
+    assert!(html.contains("Shares"));
+    assert!(html.contains("Traffic sources"));
+    assert!(html.contains(">1<"), "the single view is counted");
+    assert!(html.contains("Search"), "google referrer buckets to Search");
+    assert!(html.contains("100%"), "the share of traffic is shown");
+}
+
+#[tokio::test]
+async fn dashboard_shows_week_callout_and_game_feel_columns() {
+    let app = test_app().await;
+    let cookie = seed_published(&app).await;
+
+    // A view with a Referer so the post has measurable activity this week.
+    let view = Request::builder()
+        .method(Method::POST)
+        .uri("/api/events")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::REFERER, "https://news.ycombinator.com/")
+        .body(Body::from(
+            serde_json::json!({
+                "slug": "hello-world",
+                "session_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "kind": "view",
+                "payload": {},
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let (status, _) = send(&app, view).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, resp) = send(&app, req(Method::GET, "/admin", Some(&cookie), None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body_text(resp).await;
+    assert!(html.contains("This week"));
+    assert!(html.contains("Most read this week"));
+    assert!(html.contains("Hello World"));
+    assert!(html.contains("Views (7d)"));
+    assert!(html.contains("Δ vs last week"));
+    assert!(html.contains("Reached end"));
+    assert!(
+        html.contains(r#"<td class="muted">new</td>"#),
+        "a fresh post shows 'new' rather than a delta"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Static assets
 // ---------------------------------------------------------------------------

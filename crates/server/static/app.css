@@ -246,6 +246,11 @@ button:disabled {
 	margin-bottom: 1rem;
 }
 
+.notice-warn {
+	border-color: #d97706;
+	background: color-mix(in srgb, #d97706 8%, transparent);
+}
+
 table {
 	width: 100%;
 	border-collapse: collapse;
