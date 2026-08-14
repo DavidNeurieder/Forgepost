@@ -53,6 +53,7 @@ pub struct DocumentSummary {
     pub slug: String,
     pub status: String,
     pub published_at_ms: Option<i64>,
+    pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
 

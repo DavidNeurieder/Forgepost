@@ -118,6 +118,7 @@ struct DashboardDoc {
     id: String,
     title: String,
     status: String,
+    created: String,
     updated: String,
 }
 
@@ -1089,6 +1090,7 @@ pub(crate) async fn dashboard_page(
                 id: d.id.to_string(),
                 title: d.title.clone(),
                 status: d.status.clone(),
+                created: format_date(Some(d.created_at_ms)),
                 updated: format_date(Some(d.updated_at_ms)),
             })
             .collect(),

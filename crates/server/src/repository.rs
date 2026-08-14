@@ -297,6 +297,7 @@ fn row_to_document_summary(row: &sqlx::sqlite::SqliteRow) -> DocumentSummary {
         slug: row.get("slug"),
         status: row.get("status"),
         published_at_ms: row.get("published_at_ms"),
+        created_at_ms: row.get("created_at_ms"),
         updated_at_ms: row.get("updated_at_ms"),
     }
 }
@@ -519,9 +520,9 @@ impl Repository for SqliteRepository {
         owner_id: Uuid,
     ) -> Result<Vec<DocumentSummary>, RepositoryError> {
         let rows = sqlx::query(
-            "SELECT id, title, slug, status, published_at_ms, updated_at_ms
+            "SELECT id, title, slug, status, published_at_ms, created_at_ms, updated_at_ms
              FROM documents WHERE owner_id = ? AND deleted_at_ms IS NULL
-             ORDER BY updated_at_ms DESC",
+             ORDER BY created_at_ms DESC, id DESC",
         )
         .bind(owner_id.to_string())
         .fetch_all(&self.pool)
@@ -531,7 +532,7 @@ impl Repository for SqliteRepository {
 
     async fn list_published(&self) -> Result<Vec<DocumentSummary>, RepositoryError> {
         let rows = sqlx::query(
-            "SELECT id, title, slug, status, published_at_ms, updated_at_ms
+            "SELECT id, title, slug, status, published_at_ms, created_at_ms, updated_at_ms
              FROM documents WHERE status = 'published' AND deleted_at_ms IS NULL
              ORDER BY published_at_ms DESC",
         )
@@ -604,7 +605,7 @@ impl Repository for SqliteRepository {
 
     async fn list_all_documents(&self) -> Result<Vec<DocumentSummary>, RepositoryError> {
         let rows = sqlx::query(
-            "SELECT id, title, slug, status, published_at_ms, updated_at_ms
+            "SELECT id, title, slug, status, published_at_ms, created_at_ms, updated_at_ms
              FROM documents WHERE deleted_at_ms IS NULL
              ORDER BY updated_at_ms DESC",
         )

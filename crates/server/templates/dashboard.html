@@ -69,6 +69,7 @@
     <tr>
       <th>Title</th>
       <th>Status</th>
+      <th>Created</th>
       <th>Updated</th>
       <th>Analytics</th>
       <th>Delete</th>
@@ -79,6 +80,7 @@
     <tr>
       <td><a href="/admin/editor/{{ d.id }}">{{ d.title }}</a></td>
       <td><span class="badge {{ d.status }}">{{ d.status }}</span></td>
+      <td class="muted">{{ d.created }}</td>
       <td class="muted">{{ d.updated }}</td>
       <td><a class="button small" href="/admin/stats/{{ d.id }}">Stats</a></td>
       <td>
