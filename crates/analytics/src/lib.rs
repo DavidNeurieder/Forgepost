@@ -24,6 +24,8 @@ pub enum EventKind {
     ExperimentImpression,
     ExperimentConversion,
     Referral,
+    RecommendationImpression,
+    RecommendationClick,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

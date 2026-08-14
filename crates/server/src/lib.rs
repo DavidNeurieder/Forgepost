@@ -7,6 +7,7 @@ pub mod experiments;
 pub mod import;
 pub mod model;
 pub mod pages;
+pub mod recommender;
 pub mod repository;
 pub mod routes;
 

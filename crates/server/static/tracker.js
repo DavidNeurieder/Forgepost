@@ -4,7 +4,9 @@
 // load, and per-block impressions from an IntersectionObserver. Events are
 // sent to the public `/api/events` endpoint; the server mints the anonymous
 // visitor cookie. All writes use `sendBeacon`/`keepalive` so they survive
-// navigation.
+// navigation. "Keep reading" recommendations report one impression per card
+// (when visible) and a click event per card opened, feeding the future
+// personalized recommendation engine.
 (function () {
 	'use strict';
 
@@ -187,5 +189,63 @@
 		};
 	}
 
-	window.ForgepostTracker = { trackArticle: trackArticle };
+	// Track the "Keep reading" recommendations: one impression per card when a
+	// meaningful part is on screen, and a click event when a card is opened.
+	// `container` is the `#keep-reading` section (missing when there are no
+	// recommendations). Each card is an `li[data-recommended-slug]`.
+	function trackRecommendations(slug, container) {
+		if (!container) return;
+		var sessionId = randomId();
+		var cards = container.querySelectorAll('li[data-recommended-slug]');
+		var fired = new Set();
+
+		function recommendedSlug(target) {
+			var el = target.closest('li[data-recommended-slug]');
+			return el ? el.getAttribute('data-recommended-slug') : null;
+		}
+
+		cards.forEach(function (card) {
+			card.addEventListener('click', function (event) {
+				var rec = recommendedSlug(event.target);
+				if (!rec) return;
+				postEvent({
+					slug: slug,
+					session_id: sessionId,
+					kind: 'recommendation_click',
+					recommended_slug: rec,
+					payload: {}
+				});
+			});
+		});
+
+		if (typeof IntersectionObserver !== 'undefined') {
+			var observer = new IntersectionObserver(
+				function (entries) {
+					for (var i = 0; i < entries.length; i++) {
+						var entry = entries[i];
+						if (!entry.isIntersecting) continue;
+						var rec = entry.target.getAttribute('data-recommended-slug');
+						if (!rec || fired.has(rec)) continue;
+						fired.add(rec);
+						postEvent({
+							slug: slug,
+							session_id: sessionId,
+							kind: 'recommendation_impression',
+							recommended_slug: rec,
+							payload: {}
+						});
+					}
+				},
+				{ threshold: 0.5 }
+			);
+			cards.forEach(function (card) {
+				observer.observe(card);
+			});
+		}
+	}
+
+	window.ForgepostTracker = {
+		trackArticle: trackArticle,
+		trackRecommendations: trackRecommendations
+	};
 })();

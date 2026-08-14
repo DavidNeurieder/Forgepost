@@ -93,7 +93,8 @@ pub struct AnalyticsEvent {
     pub id: Uuid,
     pub document_id: Uuid,
     /// Wire event type: `view` | `banded_scroll` | `article_read` |
-    /// `block_impression` | `experiment_impression` | `experiment_conversion`.
+    /// `block_impression` | `experiment_impression` | `experiment_conversion` |
+    /// `recommendation_impression` | `recommendation_click`.
     pub event_type: String,
     pub band: Option<i64>,
     pub block_id: Option<Uuid>,
@@ -106,6 +107,9 @@ pub struct AnalyticsEvent {
     pub read_time_ms: Option<i64>,
     pub experiment_id: Option<Uuid>,
     pub variant_id: Option<Uuid>,
+    /// Slug of the article shown/clicked in "Keep reading"
+    /// (`recommendation_impression` / `recommendation_click` only).
+    pub recommended_slug: Option<String>,
     pub created_at_ms: i64,
 }
 

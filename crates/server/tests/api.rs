@@ -1555,6 +1555,98 @@ async fn analytics_events_are_rate_limited() {
 }
 
 #[tokio::test]
+async fn recommendation_events_record_and_validate() {
+    let app = test_app().await;
+    let (cookie, csrf, _, slug, _) = seed_published_article(&app).await;
+
+    // A second published post to be recommended.
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/documents",
+            Some(&cookie),
+            Some(&csrf),
+            Some(json!({
+                "title": "Other Post",
+                "markdown": "# Other\n\nRecommended reading.",
+                "tags": [],
+            })),
+        ),
+    )
+    .await;
+    let other = body_json(resp).await;
+    let other_id = other["id"].as_str().unwrap().to_string();
+    let other_slug = other["slug"].as_str().unwrap().to_string();
+    let (_, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/documents/{other_id}/publish"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(body_json(resp).await["status"], "published");
+
+    let visitor = "33333333-3333-3333-3333-333333333333";
+    let session = "44444444-4444-4444-4444-444444444444";
+    let post = |body: Value| async {
+        send(
+            &app,
+            json_req(
+                Method::POST,
+                "/api/events",
+                Some(&format!("opv={visitor}")),
+                None,
+                Some(body),
+            ),
+        )
+        .await
+    };
+
+    // Impression and click are accepted when the target is a different
+    // published post.
+    for kind in ["recommendation_impression", "recommendation_click"] {
+        let (status, _) = post(json!({
+            "slug": slug,
+            "session_id": session,
+            "kind": kind,
+            "recommended_slug": other_slug,
+            "payload": {},
+        }))
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{kind} accepted");
+    }
+
+    // Missing, self-referencing, and unknown targets are rejected.
+    let (status, _) = post(json!({
+        "slug": slug, "session_id": session,
+        "kind": "recommendation_click", "payload": {},
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "missing recommended_slug");
+
+    let (status, _) = post(json!({
+        "slug": slug, "session_id": session,
+        "kind": "recommendation_click",
+        "recommended_slug": slug, "payload": {},
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "cannot recommend itself");
+
+    let (status, _) = post(json!({
+        "slug": slug, "session_id": session,
+        "kind": "recommendation_click",
+        "recommended_slug": "does-not-exist", "payload": {},
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "unknown target");
+}
+
+#[tokio::test]
 async fn article_includes_rendered_blocks() {
     let app = test_app().await;
     let (_, _, _, slug, block_ids) = seed_published_article(&app).await;

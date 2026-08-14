@@ -1147,8 +1147,9 @@ impl Repository for SqliteRepository {
         sqlx::query(
             "INSERT INTO analytics_events
                 (id, document_id, event_type, band, block_id, pageview_id, visitor_id,
-                 referrer, user_agent, read_time_ms, experiment_id, variant_id, created_at_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 referrer, user_agent, read_time_ms, experiment_id, variant_id,
+                 recommended_slug, created_at_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(event.id.to_string())
         .bind(event.document_id.to_string())
@@ -1162,6 +1163,7 @@ impl Repository for SqliteRepository {
         .bind(event.read_time_ms)
         .bind(event.experiment_id.map(|e| e.to_string()))
         .bind(event.variant_id.map(|v| v.to_string()))
+        .bind(&event.recommended_slug)
         .bind(event.created_at_ms)
         .execute(&self.pool)
         .await?;
@@ -2460,6 +2462,7 @@ mod tests {
             read_time_ms: None,
             experiment_id: None,
             variant_id: None,
+            recommended_slug: None,
             created_at_ms: now_ms(),
         })
         .await
@@ -2531,6 +2534,41 @@ mod tests {
             repo.delete_document(doc_id).await,
             Err(RepositoryError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn analytics_event_roundtrips_recommended_slug() {
+        let repo = repo().await;
+        let user = seed_user(&repo).await;
+        let full = repo.create_document(user.id, "Read Now").await.unwrap();
+        let doc_id = full.document.id;
+
+        repo.record_analytics_event(&AnalyticsEvent {
+            id: Uuid::new_v4(),
+            document_id: doc_id,
+            event_type: "recommendation_click".into(),
+            band: None,
+            block_id: None,
+            pageview_id: Uuid::new_v4(),
+            visitor_id: Uuid::new_v4(),
+            referrer: None,
+            user_agent: None,
+            read_time_ms: None,
+            experiment_id: None,
+            variant_id: None,
+            recommended_slug: Some("next-post".into()),
+            created_at_ms: now_ms(),
+        })
+        .await
+        .unwrap();
+
+        let slug: Option<String> = sqlx::query_scalar(
+            "SELECT recommended_slug FROM analytics_events WHERE event_type = 'recommendation_click'",
+        )
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(slug.as_deref(), Some("next-post"));
     }
 
     #[test]

@@ -1883,3 +1883,88 @@ async fn tag_pages_list_published_posts_only() {
     assert!(html.contains("href=\"/tags/rust\""));
     assert!(!html.contains("href=\"/search?q="));
 }
+
+// ---------------------------------------------------------------------------
+// Keep reading recommendations
+// ---------------------------------------------------------------------------
+
+async fn publish_with(app: &Router, cookie: &str, csrf: &str, title: &str, tags: &str) -> String {
+    let editor_uri = create_draft(app, cookie, csrf).await;
+    let (status, _) = send(
+        app,
+        form_req(
+            Method::POST,
+            &editor_uri,
+            Some(cookie),
+            &[
+                ("csrf_token", csrf),
+                ("title", title),
+                ("tags", tags),
+                ("markdown", &format!("# {title}\n\nSome body text.")),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (status, _) = send(
+        app,
+        form_req(
+            Method::POST,
+            &format!("{editor_uri}/publish"),
+            Some(cookie),
+            &[("csrf_token", csrf)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    editor_uri
+}
+
+#[tokio::test]
+async fn article_page_recommends_related_posts() {
+    let app = test_app().await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+
+    // Two tech posts and two food posts. Reading a tech post must rank the
+    // other tech post first (shared tag), then backfill with the newest.
+    publish_with(&app, &cookie, &csrf, "Tech One", "tech").await;
+    publish_with(&app, &cookie, &csrf, "Tech Two", "tech").await;
+    publish_with(&app, &cookie, &csrf, "Food One", "food").await;
+    publish_with(&app, &cookie, &csrf, "Food Two", "food").await;
+
+    let (status, resp) = send(&app, req(Method::GET, "/articles/tech-one", None, None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body_text(resp).await;
+
+    assert!(html.contains("Keep reading"), "related section present");
+    let tech_two = html.find("Tech Two").expect("tag match ranked first");
+    let food_one = html.find("Food One").expect("backfill listed");
+    let food_two = html.find("Food Two").expect("backfill listed");
+    assert!(
+        tech_two < food_one,
+        "shared-tag match comes before backfill"
+    );
+    assert!(
+        tech_two < food_two,
+        "shared-tag match comes before backfill"
+    );
+
+    // Cards carry the tracking attribute; the current post is never recommended.
+    assert!(html.contains("data-recommended-slug=\"tech-two\""));
+    assert!(html.contains("data-recommended-slug=\"food-one\""));
+    assert!(!html.contains("href=\"/articles/tech-one\""));
+    assert!(!html.contains("data-recommended-slug=\"tech-one\""));
+}
+
+#[tokio::test]
+async fn article_page_without_other_posts_has_no_keep_reading() {
+    let app = test_app().await;
+    let _ = seed_published(&app).await;
+
+    let (status, resp) = send(&app, req(Method::GET, "/articles/hello-world", None, None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body_text(resp).await;
+    assert!(!html.contains("Keep reading"));
+    assert!(!html.contains("data-recommended-slug"));
+}

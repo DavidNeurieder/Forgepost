@@ -50,6 +50,30 @@
   </div>
 </article>
 
+{% if !related.is_empty() %}
+<hr class="sep">
+
+<section id="keep-reading">
+  <h2>Keep reading</h2>
+  <ul class="post-cards">
+  {% for p in related %}
+    <li data-recommended-slug="{{ p.slug }}">
+      <div class="post-card-body">
+        <h2><a href="/articles/{{ p.slug }}">{{ p.title }}</a></h2>
+        <p class="meta">{{ p.date }}{% if p.read_minutes > 0 %} · {{ p.read_minutes }} min read{% endif %}</p>
+        {% if !p.excerpt.is_empty() %}<p class="excerpt">{{ p.excerpt }}</p>{% endif %}
+      </div>
+      {% if !p.image.is_empty() %}
+      <a class="post-card-thumb" href="/articles/{{ p.slug }}" aria-label="{{ p.title }}">
+        <img src="{{ p.image }}" alt="{{ p.title }}" loading="lazy"{% if !p.image_width.is_empty() %} width="{{ p.image_width }}"{% endif %}{% if !p.image_height.is_empty() %} height="{{ p.image_height }}"{% endif %}>
+      </a>
+      {% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
 {% if comments_enabled %}
 <hr class="sep">
 
@@ -87,6 +111,10 @@
   window.addEventListener('load', function () {
     if (window.ForgepostTracker) {
       window.ForgepostTracker.trackArticle('{{ slug }}');
+      window.ForgepostTracker.trackRecommendations(
+        '{{ slug }}',
+        document.getElementById('keep-reading')
+      );
     }
   });
 </script>

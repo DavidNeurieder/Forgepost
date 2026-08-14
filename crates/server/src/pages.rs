@@ -245,6 +245,7 @@ struct ArticleTemplate {
     rendered_blocks: Vec<ArticleBlock>,
     comments: Vec<ArticleComment>,
     comment_error: String,
+    related: Vec<HomePost>,
 }
 
 /// Pre-serialized, script-safe JSON strings for the JSON-LD block. The values
@@ -1842,6 +1843,9 @@ async fn build_article_page(
         Vec::new()
     };
     let base = canonical_base(state, &site, headers);
+    let related_posts =
+        crate::recommender::recommend(state, Some(visitor_id), &full, &tags, 3).await?;
+    let related = build_home_posts(state, &related_posts, &base).await?;
     let description = {
         let d = page_meta_description(&full);
         if d.is_empty() { view.title.clone() } else { d }
@@ -1904,6 +1908,7 @@ async fn build_article_page(
             })
             .collect(),
         comment_error: comment_error.to_string(),
+        related,
     };
     let mut resp = render(&tpl)?.into_response();
     if let Some(c) = cookie {

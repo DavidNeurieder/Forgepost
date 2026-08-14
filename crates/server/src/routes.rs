@@ -285,6 +285,10 @@ pub struct EventRequest {
     experiment_id: Option<Uuid>,
     #[serde(default)]
     variant_id: Option<Uuid>,
+    /// Slug of the article shown/clicked in "Keep reading" (only for
+    /// `recommendation_impression` / `recommendation_click`).
+    #[serde(default)]
+    recommended_slug: Option<String>,
 }
 
 /// A new experiment: an overlay on one block with one or more content variants.
@@ -833,6 +837,14 @@ pub async fn record_event(
         }
     }
 
+    // Recommendation events must name a published article other than the one
+    // the reader is currently on (parsed above).
+    if let Some(target) = parsed.recommended_slug.as_deref()
+        && state.repo.get_published_by_slug(target).await?.is_none()
+    {
+        return Err(ApiError::bad_request("recommended article not found"));
+    }
+
     let (visitor_id, cookie) = visitor_identity_with_secure(&headers, state.secure_cookies);
     let event = AnalyticsEvent {
         id: Uuid::new_v4(),
@@ -853,6 +865,7 @@ pub async fn record_event(
         read_time_ms: parsed.read_time_ms,
         experiment_id: parsed.experiment_id,
         variant_id: parsed.variant_id,
+        recommended_slug: parsed.recommended_slug,
         created_at_ms: now_ms(),
     };
     state.repo.record_analytics_event(&event).await?;
@@ -1101,6 +1114,7 @@ struct ParsedEvent {
     read_time_ms: Option<i64>,
     experiment_id: Option<Uuid>,
     variant_id: Option<Uuid>,
+    recommended_slug: Option<String>,
 }
 
 fn parse_event(body: &EventRequest) -> Result<ParsedEvent, ApiError> {
@@ -1112,6 +1126,7 @@ fn parse_event(body: &EventRequest) -> Result<ParsedEvent, ApiError> {
             read_time_ms: None,
             experiment_id: None,
             variant_id: None,
+            recommended_slug: None,
         }),
         EventKind::BandedScroll => {
             let band = body
@@ -1129,6 +1144,7 @@ fn parse_event(body: &EventRequest) -> Result<ParsedEvent, ApiError> {
                 read_time_ms: None,
                 experiment_id: None,
                 variant_id: None,
+                recommended_slug: None,
             })
         }
         EventKind::ArticleRead => {
@@ -1144,6 +1160,7 @@ fn parse_event(body: &EventRequest) -> Result<ParsedEvent, ApiError> {
                 read_time_ms: Some(read_time_ms),
                 experiment_id: None,
                 variant_id: None,
+                recommended_slug: None,
             })
         }
         EventKind::BlockImpression => {
@@ -1157,6 +1174,7 @@ fn parse_event(body: &EventRequest) -> Result<ParsedEvent, ApiError> {
                 read_time_ms: None,
                 experiment_id: None,
                 variant_id: None,
+                recommended_slug: None,
             })
         }
         EventKind::ExperimentImpression | EventKind::ExperimentConversion => {
@@ -1176,6 +1194,32 @@ fn parse_event(body: &EventRequest) -> Result<ParsedEvent, ApiError> {
                 read_time_ms: None,
                 experiment_id: Some(experiment_id),
                 variant_id: Some(variant_id),
+                recommended_slug: None,
+            })
+        }
+        EventKind::RecommendationImpression | EventKind::RecommendationClick => {
+            let recommended_slug = body
+                .recommended_slug
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| ApiError::bad_request("missing recommended_slug"))?;
+            if recommended_slug == body.slug {
+                return Err(ApiError::bad_request(
+                    "recommended_slug cannot be the current article",
+                ));
+            }
+            Ok(ParsedEvent {
+                event_type: match body.kind {
+                    EventKind::RecommendationImpression => "recommendation_impression",
+                    _ => "recommendation_click",
+                },
+                band: None,
+                block_id: None,
+                read_time_ms: None,
+                experiment_id: None,
+                variant_id: None,
+                recommended_slug: Some(recommended_slug.to_string()),
             })
         }
         _ => Err(ApiError::bad_request("event kind not supported yet")),
