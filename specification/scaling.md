@@ -96,3 +96,26 @@ and keep personalization to a small swappable fragment.** Forgepost could adopt
 the cheap end of this (CDN + content-versioned HTML cache + batched analytics)
 without redesigning anything — the stateless server and block-versioned content
 model are already shaped for it.
+
+## 6. Recommendations & scaling
+
+"Keep reading" (`crates/server/src/recommender.rs`) adds three costs to watch.
+All are fine at blog scale and cheap to fix later; none blocks the current
+design.
+
+1. **Article pages grew from fixed to O(all published posts) work.** Every
+   article view runs `list_published_with_tags` (`repository.rs:544`) plus up to
+   3 `get_document` calls for the recommended cards. Previously those queries
+   only ran on home/tag pages. Fix later: cache the published-with-tags list
+   keyed by a publish-version counter (bump on save/publish/unpublish), or
+   precompute the related map at write time instead of read time.
+2. **More events on the analytics write bottleneck.** Each recommendation card
+   fires an impression event and clicks fire one per click through the same
+   single-writer `analytics_events` path. Same mitigation as the general
+   analytics backlog: batch writes or push them off the content DB.
+3. **The future interest engine needs a `visitor_id` index.** Phase 2 will score
+   candidates from a visitor's own `analytics_events`; today the table is only
+   indexed on `document_id`-led columns (`0003_analytics.sql`), so a
+   per-visitor query would be a full scan. Add
+   `CREATE INDEX ... ON analytics_events(visitor_id, created_at_ms)` (and
+   likely `visitor_id, event_type`) when the personalized engine ships.
