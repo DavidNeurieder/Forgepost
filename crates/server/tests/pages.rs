@@ -1556,6 +1556,7 @@ async fn settings_form_updates_name_and_theme() {
                 ("theme", "sepia"),
                 ("url", "https://journal.example.com"),
                 ("tagline", "Notes on software."),
+                ("image", "https://journal.example.com/og.png"),
             ],
         ),
     )
@@ -1584,6 +1585,7 @@ async fn settings_form_updates_name_and_theme() {
     assert!(html.contains("<option value=\"sepia\" selected>Sepia</option>"));
     assert!(html.contains("value=\"https://journal.example.com\""));
     assert!(html.contains("value=\"Notes on software.\""));
+    assert!(html.contains("value=\"https://journal.example.com/og.png\""));
 
     // The home page and RSS feed pick up the new name, theme, URL, and tagline.
     let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;
@@ -1593,6 +1595,14 @@ async fn settings_form_updates_name_and_theme() {
     assert!(html.contains("<meta name=\"description\" content=\"Notes on software.\">"));
     assert!(html.contains("<link rel=\"canonical\" href=\"https://journal.example.com\">"));
     assert!(html.contains("<meta property=\"og:site_name\" content=\"My Journal\">"));
+    assert!(
+        html.contains(
+            "<meta property=\"og:image\" content=\"https://journal.example.com/og.png\">"
+        )
+    );
+    assert!(html.contains("<meta property=\"og:image:width\" content=\"1200\">"));
+    assert!(html.contains("<meta property=\"og:image:height\" content=\"630\">"));
+    assert!(html.contains("<meta name=\"twitter:card\" content=\"summary_large_image\">"));
 
     let (_, resp) = send(&app, req(Method::GET, "/rss", None, None)).await;
     assert_eq!(
@@ -1611,6 +1621,38 @@ async fn settings_form_updates_name_and_theme() {
             .await
             .contains("Sitemap: https://journal.example.com/sitemap.xml")
     );
+}
+
+#[tokio::test]
+async fn default_image_relative_path_is_absolutized() {
+    let app = test_app().await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+    let (status, _) = send(
+        &app,
+        form_req(
+            Method::POST,
+            "/admin/settings",
+            Some(&cookie),
+            &[
+                ("csrf_token", &csrf),
+                ("name", "Forgepost"),
+                ("theme", "system"),
+                ("url", "https://example.com"),
+                ("image", "/media/og.png"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;
+    let html = body_text(resp).await;
+    assert!(
+        html.contains("<meta property=\"og:image\" content=\"https://example.com/media/og.png\">")
+    );
+    assert!(html.contains("<meta property=\"og:image:width\" content=\"1200\">"));
+    assert!(html.contains("<meta name=\"twitter:card\" content=\"summary_large_image\">"));
 }
 
 #[tokio::test]
@@ -1668,6 +1710,29 @@ async fn settings_form_validates_input() {
     assert_eq!(status, StatusCode::OK);
     let html = body_text(resp).await;
     assert!(html.contains("Site URL must start with http:// or https://."));
+
+    // Default image must be an uploaded /media/… path or an absolute URL.
+    let (status, resp) = send(
+        &app,
+        form_req(
+            Method::POST,
+            "/admin/settings",
+            Some(&cookie),
+            &[
+                ("csrf_token", &csrf),
+                ("name", "Fine"),
+                ("theme", "dark"),
+                ("url", "https://ok.example.com"),
+                ("image", "not-a-url"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body_text(resp).await;
+    assert!(html.contains(
+        "Default image must be an uploaded /media/… URL or a full http:// or https:// URL."
+    ));
 
     // Oversized tagline.
     let (status, resp) = send(

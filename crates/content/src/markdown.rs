@@ -577,7 +577,7 @@ pub fn render_html<'a>(blocks: impl IntoIterator<Item = (BlockKind, &'a BlockCon
                 let size = content.get("size").and_then(|v| v.as_str()).unwrap_or("");
                 let href = content.get("href").and_then(|v| v.as_str()).unwrap_or("");
                 let img = format!(
-                    "<img src=\"{}\" alt=\"{}\"{} />",
+                    "<img src=\"{}\" alt=\"{}\" loading=\"lazy\" decoding=\"async\"{} />",
                     html_escape(src),
                     html_escape(alt),
                     image_size_attrs(size)
@@ -824,7 +824,7 @@ mod tests {
         let html = render_html(vec![(blocks[0].kind, &blocks[0].content)]);
         assert_eq!(
             html,
-            "<p><img src=\"https://fdroid.gitlab.io/artwork/badge/get-it-on.png\" alt=\"Get it on F-Droid\" height=\"80\" /></p>\n"
+            "<p><img src=\"https://fdroid.gitlab.io/artwork/badge/get-it-on.png\" alt=\"Get it on F-Droid\" loading=\"lazy\" decoding=\"async\" height=\"80\" /></p>\n"
         );
     }
 
@@ -847,7 +847,7 @@ mod tests {
         let html = render_html(vec![(blocks[0].kind, &blocks[0].content)]);
         assert_eq!(
             html,
-            "<p><a href=\"https://f-droid.org/packages/com.offlinecurrencyconverter.app/\"><img src=\"https://fdroid.gitlab.io/artwork/badge/get-it-on.png\" alt=\"Get it on F-Droid\" height=\"80\" /></a></p>\n"
+            "<p><a href=\"https://f-droid.org/packages/com.offlinecurrencyconverter.app/\"><img src=\"https://fdroid.gitlab.io/artwork/badge/get-it-on.png\" alt=\"Get it on F-Droid\" loading=\"lazy\" decoding=\"async\" height=\"80\" /></a></p>\n"
         );
     }
 
@@ -885,7 +885,7 @@ mod tests {
         let html = render_html(vec![(blocks[0].kind, &blocks[0].content)]);
         assert_eq!(
             html,
-            "<p><a href=\"https://example.com/page\"><img src=\"img.png\" alt=\"a\" /></a></p>\n"
+            "<p><a href=\"https://example.com/page\"><img src=\"img.png\" alt=\"a\" loading=\"lazy\" decoding=\"async\" /></a></p>\n"
         );
     }
 
@@ -918,7 +918,7 @@ mod tests {
         let html = render_html(vec![(blocks[0].kind, &blocks[0].content)]);
         assert_eq!(
             html,
-            "<p><img src=\"x.png\" alt=\"\" width=\"180\" /></p>\n"
+            "<p><img src=\"x.png\" alt=\"\" loading=\"lazy\" decoding=\"async\" width=\"180\" /></p>\n"
         );
         assert!(!html.contains("onerror"));
         assert!(!html.contains("style"));
@@ -931,7 +931,7 @@ mod tests {
         let html = render_html(vec![(blocks[0].kind, &blocks[0].content)]);
         assert_eq!(
             html,
-            "<p><img src=\"x.png\" alt=\"\" height=\"80\" /></p>\n"
+            "<p><img src=\"x.png\" alt=\"\" loading=\"lazy\" decoding=\"async\" height=\"80\" /></p>\n"
         );
     }
 
@@ -965,7 +965,7 @@ mod tests {
         let html = render_html(vec![(blocks[0].kind, &blocks[0].content)]);
         assert_eq!(
             html,
-            "<p><img src=\"https://e.com/x.png =8.5\" alt=\"a\" /></p>\n"
+            "<p><img src=\"https://e.com/x.png =8.5\" alt=\"a\" loading=\"lazy\" decoding=\"async\" /></p>\n"
         );
     }
 
@@ -975,7 +975,10 @@ mod tests {
             BlockKind::Image,
             &json!({ "src": "/x.png", "alt": "x", "size": "\" onerror=\"alert(1)" }),
         )]);
-        assert_eq!(html, "<p><img src=\"/x.png\" alt=\"x\" /></p>\n");
+        assert_eq!(
+            html,
+            "<p><img src=\"/x.png\" alt=\"x\" loading=\"lazy\" decoding=\"async\" /></p>\n"
+        );
     }
 
     #[test]

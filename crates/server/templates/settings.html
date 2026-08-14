@@ -26,6 +26,20 @@
     <input id="tagline" name="tagline" type="text" maxlength="200" placeholder="A short description of this blog" value="{{ tagline }}">
   </field>
   <field>
+    <label for="image">Default image</label>
+    <input type="hidden" id="image" name="image" value="{{ image }}">
+    <div class="image-picker">
+      <img id="image-preview" src="{{ image }}" alt="Default image preview"{% if image.is_empty() %} hidden{% endif %}>
+      <div class="image-picker-actions">
+        <button type="button" id="image-upload" class="secondary">Upload image</button>
+        <input type="file" id="image-file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+        <button type="button" id="image-clear" class="secondary"{% if image.is_empty() %} hidden{% endif %}>Remove</button>
+        <span class="muted" id="image-status"></span>
+      </div>
+    </div>
+    <p class="muted" style="margin:0.25rem 0 0;">Used as the social preview image for the home page and for any post without an image of its own. Uploaded images are stored under /media/. 1200×630 recommended.</p>
+  </field>
+  <field>
     <label for="comments_enabled" class="checkbox">
       <input id="comments_enabled" name="comments_enabled" type="checkbox" value="true"{% if comments_enabled %} checked{% endif %}>
       Allow comments on posts
@@ -35,4 +49,54 @@
   {% if !error.is_empty() %}<p class="error">{{ error }}</p>{% endif %}
   <button type="submit">Save settings</button>
 </form>
+<script>
+(function () {
+	var input = document.getElementById('image');
+	var preview = document.getElementById('image-preview');
+	var fileInput = document.getElementById('image-file');
+	var clearBtn = document.getElementById('image-clear');
+	var statusEl = document.getElementById('image-status');
+	var csrf = document.querySelector('input[name="csrf_token"]').value;
+
+	document.getElementById('image-upload').addEventListener('click', function (e) {
+		e.preventDefault();
+		fileInput.click();
+	});
+
+	fileInput.addEventListener('change', function () {
+		var file = fileInput.files && fileInput.files[0];
+		if (!file) { return; }
+		var formData = new FormData();
+		formData.append('data', file);
+		statusEl.textContent = 'Uploading…';
+		fetch('/admin/media', {
+			method: 'POST',
+			headers: { 'x-csrf-token': csrf },
+			body: formData
+		})
+			.then(function (r) {
+				if (!r.ok) { throw new Error('upload failed'); }
+				return r.json();
+			})
+			.then(function (data) {
+				input.value = data.url;
+				preview.src = data.url;
+				preview.hidden = false;
+				clearBtn.hidden = false;
+				statusEl.textContent = 'Image uploaded.';
+			})
+			.catch(function () { statusEl.textContent = 'Upload failed.'; })
+			.finally(function () { fileInput.value = ''; });
+	});
+
+	clearBtn.addEventListener('click', function (e) {
+		e.preventDefault();
+		input.value = '';
+		preview.src = '';
+		preview.hidden = true;
+		clearBtn.hidden = true;
+		statusEl.textContent = '';
+	});
+})();
+</script>
 {% endblock %}

@@ -149,6 +149,30 @@ form field {
 	margin-bottom: 1rem;
 }
 
+.image-picker {
+	display: flex;
+	align-items: flex-start;
+	gap: 1rem;
+	flex-wrap: wrap;
+}
+
+.image-picker img {
+	max-width: 18rem;
+	max-height: 10rem;
+	object-fit: contain;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	padding: 0.25rem;
+	background: var(--bg);
+}
+
+.image-picker-actions {
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+	flex-wrap: wrap;
+}
+
 form label {
 	display: block;
 	font-weight: 600;

@@ -69,6 +69,10 @@ struct SeoMeta {
     description: String,
     url: String,
     image: String,
+    /// Pixel width of `image` when known (`og:image:width`); empty to omit.
+    image_width: String,
+    /// Pixel height of `image` when known (`og:image:height`); empty to omit.
+    image_height: String,
     date_published: String,
     date_modified: String,
     author: String,
@@ -306,6 +310,7 @@ struct SettingsTemplate {
     year: u32,
     site_url: String,
     tagline: String,
+    image: String,
     comments_enabled: bool,
     csrf_token: String,
     themes: Vec<ThemeOption>,
@@ -383,6 +388,8 @@ pub(crate) struct SettingsForm {
     url: String,
     #[serde(default)]
     tagline: String,
+    #[serde(default)]
+    image: String,
     #[serde(default)]
     comments_enabled: bool,
     #[serde(default)]
@@ -660,9 +667,11 @@ fn page_meta_description(full: &crate::model::FullDocument) -> String {
     }
 }
 
-/// Absolute URL of the article's first image block (relative paths get the
-/// site base prepended); empty when the article has no image.
-fn article_image(full: &crate::model::FullDocument, base: &str) -> String {
+/// `(absolute URL, width, height)` of the article's first image block.
+/// Relative paths get the site base prepended; the URL is empty when the
+/// article has no image and dimensions are empty when the image has no
+/// `=SIZE` suffix.
+fn article_image(full: &crate::model::FullDocument, base: &str) -> (String, String, String) {
     full.document
         .blocks
         .iter()
@@ -672,13 +681,41 @@ fn article_image(full: &crate::model::FullDocument, base: &str) -> String {
             }
             let c = full.document.current_content(b.id)?;
             let src = c.get("src").and_then(|v| v.as_str())?;
-            if src.starts_with('/') {
-                Some(format!("{base}{src}"))
+            let url = if src.starts_with('/') {
+                format!("{base}{src}")
             } else {
-                Some(src.to_string())
-            }
+                src.to_string()
+            };
+            let size = c.get("size").and_then(|v| v.as_str()).unwrap_or("");
+            let (width, height) = image_size_dimensions(size);
+            Some((url, width, height))
         })
         .unwrap_or_default()
+}
+
+/// `(width, height)` pixel strings from an image `size` value (`120x80`,
+/// `120`, `x80`, or `120x`), re-validated as digits so a hand-crafted block
+/// can never inject extra attributes. Empty strings mean "unknown".
+fn image_size_dimensions(size: &str) -> (String, String) {
+    let digits = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
+    if let Some((w, h)) = size.split_once('x') {
+        (
+            if digits(w) {
+                w.to_string()
+            } else {
+                String::new()
+            },
+            if digits(h) {
+                h.to_string()
+            } else {
+                String::new()
+            },
+        )
+    } else if digits(size) {
+        (String::new(), size.to_string())
+    } else {
+        (String::new(), String::new())
+    }
 }
 
 /// Serialize a string as JSON, then additionally escape the characters that
@@ -727,6 +764,7 @@ pub(crate) async fn home_page(
     };
     let published = state.repo.list_published_with_tags().await?;
     let posts = build_home_posts(&state, &published).await?;
+    let (image, image_width, image_height) = default_image_meta(site.image.clone(), &base);
     page(&HomeTemplate {
         authed: false,
         flash: String::new(),
@@ -737,13 +775,32 @@ pub(crate) async fn home_page(
             title: site.name,
             description,
             url: base.clone(),
-            image: String::new(),
+            image,
+            image_width,
+            image_height,
             date_published: String::new(),
             date_modified: String::new(),
             author: String::new(),
         },
         posts,
     })
+}
+
+/// `(url, width, height)` for the site-wide default image. Relative paths
+/// (e.g. an uploaded `/media/…`) get the site base prepended so Open Graph
+/// always sees an absolute URL. The 1200×630 dimensions match the Open Graph
+/// recommended size for the value configured in the settings form.
+fn default_image_meta(image: String, base: &str) -> (String, String, String) {
+    let url = if image.starts_with('/') {
+        format!("{base}{image}")
+    } else {
+        image
+    };
+    if url.is_empty() {
+        (url, String::new(), String::new())
+    } else {
+        (url, "1200".into(), "630".into())
+    }
 }
 
 /// Build the home-page cards (excerpt + read time) for a set of published
@@ -786,6 +843,7 @@ pub(crate) async fn tag_page(
         return Err(not_found(format!("Tag \"{tag}\" not found")).into());
     }
     let posts = build_home_posts(&state, &published).await?;
+    let (image, image_width, image_height) = default_image_meta(site.image.clone(), &base);
     page(&TagTemplate {
         authed: false,
         flash: String::new(),
@@ -796,7 +854,9 @@ pub(crate) async fn tag_page(
             title: format!("{tag} · {}", site.name),
             description: format!("Posts tagged “{tag}” on {}.", site.name),
             url: format!("{base}/tags/{}", urlencode(&tag)),
-            image: String::new(),
+            image,
+            image_width,
+            image_height,
             date_published: String::new(),
             date_modified: String::new(),
             author: String::new(),
@@ -848,6 +908,8 @@ pub(crate) async fn search_page(
             description: format!("Search results for \"{q}\" on {}.", site.name),
             url: base,
             image: String::new(),
+            image_width: String::new(),
+            image_height: String::new(),
             date_published: String::new(),
             date_modified: String::new(),
             author: String::new(),
@@ -1236,6 +1298,10 @@ pub(crate) async fn settings_form(
         .await?;
     state
         .repo
+        .set_setting("site.image", body.image.trim())
+        .await?;
+    state
+        .repo
         .set_setting(
             "comments.enabled",
             if body.comments_enabled { "1" } else { "0" },
@@ -1259,6 +1325,7 @@ fn settings_template(
         year: current_year(),
         site_url: site.url,
         tagline: site.tagline,
+        image: site.image,
         comments_enabled: site.comments_enabled,
         csrf_token: auth.csrf_token,
         themes: THEMES
@@ -1289,6 +1356,18 @@ fn validate_settings(body: &SettingsForm) -> String {
     }
     if body.tagline.trim().len() > 200 {
         return "Tagline is too long (200 characters max).".into();
+    }
+    let image = body.image.trim();
+    if !(image.is_empty()
+        || image.starts_with('/')
+        || image.starts_with("http://")
+        || image.starts_with("https://"))
+    {
+        return "Default image must be an uploaded /media/… URL or a full http:// or https:// URL."
+            .into();
+    }
+    if image.len() > 1000 {
+        return "Default image URL is too long.".into();
     }
     String::new()
 }
@@ -1740,11 +1819,17 @@ async fn build_article_page(
         Some(u) => u.display_name.clone(),
         None => site.name.clone(),
     };
+    let (mut image, mut image_width, mut image_height) = article_image(&full, &base);
+    if image.is_empty() {
+        (image, image_width, image_height) = default_image_meta(site.image.clone(), &base);
+    }
     let seo = SeoMeta {
         title: view.title.clone(),
         description,
         url: format!("{base}/articles/{}", view.slug),
-        image: article_image(&full, &base),
+        image,
+        image_width,
+        image_height,
         date_published: full.published_at_ms.map(format_iso_utc).unwrap_or_default(),
         date_modified: format_iso_utc(full.document.updated_at_ms),
         author,

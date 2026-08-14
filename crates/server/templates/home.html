@@ -9,7 +9,9 @@
 <meta property="og:description" content="{{ seo.description }}">
 <meta property="og:url" content="{{ seo.url }}">
 {% if !seo.image.is_empty() %}<meta property="og:image" content="{{ seo.image }}">{% endif %}
-<meta name="twitter:card" content="summary">
+{% if !seo.image_width.is_empty() %}<meta property="og:image:width" content="{{ seo.image_width }}">{% endif %}
+{% if !seo.image_height.is_empty() %}<meta property="og:image:height" content="{{ seo.image_height }}">{% endif %}
+<meta name="twitter:card" content="{% if seo.image.is_empty() %}summary{% else %}summary_large_image{% endif %}">
 <meta name="twitter:title" content="{{ seo.title }}">
 <meta name="twitter:description" content="{{ seo.description }}">
 {% if !seo.image.is_empty() %}<meta name="twitter:image" content="{{ seo.image }}">{% endif %}

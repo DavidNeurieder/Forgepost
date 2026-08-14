@@ -398,6 +398,7 @@ impl Repository for SqliteRepository {
             .unwrap_or_else(|| "system".into());
         let url = self.get_setting("site.url").await?.unwrap_or_default();
         let tagline = self.get_setting("site.tagline").await?.unwrap_or_default();
+        let image = self.get_setting("site.image").await?.unwrap_or_default();
         let comments_enabled = self
             .get_setting("comments.enabled")
             .await?
@@ -408,6 +409,7 @@ impl Repository for SqliteRepository {
             theme,
             url,
             tagline,
+            image,
             comments_enabled,
         })
     }
@@ -2029,6 +2031,7 @@ mod tests {
         assert_eq!(site.theme, "system");
         assert_eq!(site.url, "");
         assert_eq!(site.tagline, "");
+        assert_eq!(site.image, "", "no default image until configured");
         assert!(!site.comments_enabled, "comments must default to disabled");
         assert!(repo.get_setting("site.name").await.unwrap().is_none());
 
@@ -2041,6 +2044,9 @@ mod tests {
         repo.set_setting("site.tagline", "Notes on things.")
             .await
             .unwrap();
+        repo.set_setting("site.image", "https://example.com/og.png")
+            .await
+            .unwrap();
         assert_eq!(
             repo.get_setting("site.name").await.unwrap().unwrap(),
             "My Blog"
@@ -2050,6 +2056,7 @@ mod tests {
         assert_eq!(site.theme, "dark");
         assert_eq!(site.url, "https://example.com");
         assert_eq!(site.tagline, "Notes on things.");
+        assert_eq!(site.image, "https://example.com/og.png");
 
         // Comments are opt-in: explicitly enabling flips the default.
         repo.set_setting("comments.enabled", "1").await.unwrap();

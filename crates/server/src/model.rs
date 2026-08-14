@@ -38,6 +38,10 @@ pub struct SiteSettings {
     pub url: String,
     /// One-line site description used as the home page meta description.
     pub tagline: String,
+    /// Default social-preview image (absolute or base-relative URL) used as
+    /// the Open Graph / Twitter card image for the home page and for any
+    /// published post that contains no image. Empty until configured.
+    pub image: String,
     /// Whether readers can leave comments. Disabled by default.
     pub comments_enabled: bool,
 }
