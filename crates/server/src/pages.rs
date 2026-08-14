@@ -47,6 +47,9 @@ struct HomePost {
     tags: Vec<String>,
     excerpt: String,
     read_minutes: u64,
+    image: String,
+    image_width: String,
+    image_height: String,
 }
 
 #[derive(Template)]
@@ -668,10 +671,12 @@ fn page_meta_description(full: &crate::model::FullDocument) -> String {
     }
 }
 
-/// `(absolute URL, width, height)` of the article's first image block.
-/// Relative paths get the site base prepended; the URL is empty when the
-/// article has no image and dimensions are empty when the image has no
-/// `=SIZE` suffix.
+/// `(absolute URL, width, height)` of the article's first *resolvable* image
+/// block. Relative server paths (`/media/…`) get the site base prepended;
+/// bare-relative references (`images/foo.png`) are skipped because they cannot
+/// resolve to a served file, so a post with a broken ref falls through to a
+/// working image. The URL is empty when the article has no usable image and
+/// dimensions are empty when the image has no `=SIZE` suffix.
 fn article_image(full: &crate::model::FullDocument, base: &str) -> (String, String, String) {
     full.document
         .blocks
@@ -682,6 +687,10 @@ fn article_image(full: &crate::model::FullDocument, base: &str) -> (String, Stri
             }
             let c = full.document.current_content(b.id)?;
             let src = c.get("src").and_then(|v| v.as_str())?;
+            if !(src.starts_with('/') || src.starts_with("http://") || src.starts_with("https://"))
+            {
+                return None;
+            }
             let url = if src.starts_with('/') {
                 format!("{base}{src}")
             } else {
@@ -764,7 +773,7 @@ pub(crate) async fn home_page(
         site.tagline.clone()
     };
     let published = state.repo.list_published_with_tags().await?;
-    let posts = build_home_posts(&state, &published).await?;
+    let posts = build_home_posts(&state, &published, &base).await?;
     let (image, image_width, image_height) = default_image_meta(site.image.clone(), &base);
     page(&HomeTemplate {
         authed: false,
@@ -809,13 +818,30 @@ fn default_image_meta(image: String, base: &str) -> (String, String, String) {
 async fn build_home_posts(
     state: &AppState,
     published: &[crate::model::PublishedPost],
+    base: &str,
 ) -> Result<Vec<HomePost>, RepositoryError> {
     let mut posts = Vec::with_capacity(published.len());
     for p in published {
-        let (excerpt, read_mins) = match state.repo.get_document(p.id).await? {
-            Some(full) => (page_meta_description(&full), read_minutes(&full.document)),
-            None => (String::new(), 1),
-        };
+        let (excerpt, read_mins, image, image_width, image_height) =
+            match state.repo.get_document(p.id).await? {
+                Some(full) => {
+                    let (image, image_width, image_height) = article_image(&full, base);
+                    (
+                        page_meta_description(&full),
+                        read_minutes(&full.document),
+                        image,
+                        image_width,
+                        image_height,
+                    )
+                }
+                None => (
+                    String::new(),
+                    1,
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ),
+            };
         posts.push(HomePost {
             title: p.title.clone(),
             slug: p.slug.clone(),
@@ -823,6 +849,9 @@ async fn build_home_posts(
             tags: p.tags.clone(),
             excerpt,
             read_minutes: read_mins,
+            image,
+            image_width,
+            image_height,
         });
     }
     Ok(posts)
@@ -843,7 +872,7 @@ pub(crate) async fn tag_page(
     if published.is_empty() {
         return Err(not_found(format!("Tag \"{tag}\" not found")).into());
     }
-    let posts = build_home_posts(&state, &published).await?;
+    let posts = build_home_posts(&state, &published, &base).await?;
     let (image, image_width, image_height) = default_image_meta(site.image.clone(), &base);
     page(&TagTemplate {
         authed: false,

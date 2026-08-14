@@ -507,6 +507,66 @@ async fn new_post_editor_save_and_publish() {
     assert!(html.contains("My First Post"));
 }
 
+#[tokio::test]
+async fn home_card_uses_first_resolvable_image() {
+    let app = test_app().await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+    let (_, resp) = send(
+        &app,
+        form_req(
+            Method::POST,
+            "/admin/new",
+            Some(&cookie),
+            &[("csrf_token", &csrf)],
+        ),
+    )
+    .await;
+    let editor_uri = resp
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let (_, _) = send(
+        &app,
+        form_req(
+            Method::POST,
+            &editor_uri,
+            Some(&cookie),
+            &[
+                ("csrf_token", &csrf),
+                ("title", "Images"),
+                ("tags", ""),
+                (
+                    "markdown",
+                    "![Broken](fastlane/x.png)\n\n![Badge](https://example.com/badge.png)",
+                ),
+            ],
+        ),
+    )
+    .await;
+    let (_, _) = send(
+        &app,
+        form_req(
+            Method::POST,
+            &format!("{editor_uri}/publish"),
+            Some(&cookie),
+            &[("csrf_token", &csrf)],
+        ),
+    )
+    .await;
+
+    // The first image is a bare-relative ref that cannot resolve; the card
+    // must fall through to the absolute URL instead of emitting a broken thumb.
+    let (_, resp) = send(&app, req(Method::GET, "/", None, None)).await;
+    let html = body_text(resp).await;
+    assert!(html.contains("post-card-thumb"));
+    assert!(html.contains("<img src=\"https://example.com/badge.png\""));
+    assert!(!html.contains("fastlane/x.png"));
+}
+
 // ---------------------------------------------------------------------------
 // Public article page + tracker
 // ---------------------------------------------------------------------------
