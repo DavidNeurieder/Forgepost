@@ -19,7 +19,9 @@ Version **0.1.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
   the dashboard to create a reviewable draft; title/tags read from front
   matter), opt-in comments (disabled by default) with moderation, RSS,
   full-text search (SQLite FTS5, with as-you-type prefix matching and snippet
-  highlighting), and one clean theme.
+  highlighting), and one clean theme. SEO is first-class: per-post social
+  cards (Open Graph/Twitter image + dimensions, canonical, JSON-LD) and a
+  site-wide **default image** you can upload in Settings as the fallback.
 - **Per-block analytics** — privacy-lean browser tracking (banded scroll depth,
   completion, read time, block impressions), estimated reach and drop-off per
   block, honestly labeled ("estimated") because blockers and JS-disabled
@@ -29,6 +31,10 @@ Version **0.1.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
   **Bayesian sequential test**: exact `P(beats control)`, credible intervals, a
   spending-bound-corrected confidence threshold, a no-winner stopping rule, and
   automatic promotion of the winning variant.
+- **Keep reading** — after each article, up to three related-post cards ranked
+  by shared tags (the most recent posts backfill the list). Impressions and
+  clicks are tracked into analytics to feed a future personalized
+  recommendation engine.
 - **Solo mode** — one binary + embedded SQLite, Argon2 password hashing,
   session cookies, CSRF protection, rate-limited analytics API,
   `forgepost export` for backups, and in-process HTTPS (Let's Encrypt
@@ -44,7 +50,7 @@ crates/server       Axum app: page routes, API, auth, repository, TLS
 crates/server/templates   Askama templates (all pages server-rendered)
 crates/server/static      app.css, favicon, tracker.js (embedded in the binary)
 e2e                 Playwright end-to-end suite against the built binary
-migrations          SQLite schema (0001 … 0004)
+migrations          SQLite schema (0001 … 0008)
 docs                Website (GitHub Pages, static)
 ```
 
@@ -93,7 +99,7 @@ The binary lands at `target/release/forgepost`. Verify it:
 On first start this:
 
 1. creates `forgepost.db` in the current directory,
-2. runs the SQLite migrations (`migrations/0001 … 0004`),
+2. runs the SQLite migrations (`migrations/0001 … 0008`),
 3. spawns the background experiment auto-decider,
 4. listens on `127.0.0.1:8080`.
 

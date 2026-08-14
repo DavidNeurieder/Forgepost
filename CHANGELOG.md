@@ -30,6 +30,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   theme: system (auto), light, dark, sepia, or solarized. Themes are applied
   via a `data-theme` attribute; the home page gains a header **Log in** link
   for anonymous visitors.
+- **Default blog image** — the Settings page accepts an uploaded site-wide
+  image (`/media/…`) used as the fallback social-card image for articles, the
+  home page, and tag pages when a post has no image of its own; relative upload
+  paths are absolutized so crawlers always see an absolute URL.
+- **Post card thumbnails** — home and tag pages show each post's first
+  resolvable image as a linked, lazy-loaded card thumbnail (12×8rem desktop,
+  6.5×4.33rem mobile). The dashboard gained a **Created** column and its list
+  is ordered newest-first by creation.
+- **"Keep reading" recommendations** — every article ends with up to three
+  related-post cards (before the comments), ranked by shared tags with the most
+  recent posts as backfill. New `recommendation_impression` /
+  `recommendation_click` events record what readers are shown and open
+  (`analytics_events.recommended_slug`), and the ranking lives in
+  `crates/server/src/recommender.rs` behind a visitor-aware signature ready for
+  a future personalized engine.
+
+### Changed
+
+- **SEO head for articles, home, and tags** — canonical URL, meta description,
+  Open Graph (`og:image` + `og:image:width/height`) and Twitter
+  (`summary` / `summary_large_image`) cards, and JSON-LD now carry the post's
+  image and dimensions (first resolvable image, else the site default). All
+  rendered images are lazy-loaded with `decoding="async"`.
+- **Migrations run through 0008** — `0007_recommendations.sql` adds
+  `analytics_events.recommended_slug`; `0008_recommendation_visitor_index.sql`
+  adds `visitor_id`-led indexes for the future interest engine.
+- **`specification/scaling.md`** — new "Recommendations & scaling" section
+  documenting the per-article read-path cost of ranking, the extra analytics
+  writes, and the visitor index.
 
 ## [0.1.0] - 2026-08-05
 
