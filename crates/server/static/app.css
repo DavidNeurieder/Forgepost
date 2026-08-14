@@ -551,8 +551,8 @@ ul.post-cards .post-card-thumb {
 }
 
 ul.post-cards .post-card-thumb img {
-	width: 9rem;
-	height: 6rem;
+	width: 12rem;
+	height: 8rem;
 	object-fit: cover;
 	border: 1px solid var(--border);
 	border-radius: var(--radius);
@@ -659,8 +659,8 @@ footer.site a:hover {
 	}
 
 	ul.post-cards .post-card-thumb img {
-		width: 5rem;
-		height: 3.75rem;
+		width: 6.5rem;
+		height: 4.333rem;
 	}
 }
 
