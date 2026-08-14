@@ -4,27 +4,28 @@ All notable changes to Forgepost are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-08-14
 
-### Changed
-
-- **Single-binary migration** — SvelteKit/Vite/Vitest (`frontend/`) is gone.
-  Rust + Askama renders every page (home, setup, login, dashboard, editor,
-  stats, article, error) with POST-REDIRECT-GET; the `/api/*` JSON surface is
-  unchanged. The Playwright e2e harness moved to `e2e/` at the repo root and
-  now drives the compiled binary directly. See `docs/single_binary_plan.md`.
+First release. The learn-MVP (publish + measure + experiment + dashboard) plus
+the post-MVP wave — single-binary rendering, HTTPS, SEO, recommendations,
+traffic sources, the game-feel dashboard, and share tracking — as a solo-mode
+single binary.
 
 ### Added
 
-- In-process HTTPS with two tiers: automatic Let's Encrypt issuance + renewal
-  (`--tls-domain`) and bring-your-own certificates (`--tls-cert`/`--tls-key`,
-  reloaded on change), plus a configurable HTTP→HTTPS 301 redirect listener
-  and `Secure` session/visitor cookies under TLS.
-- Editor live preview via `POST /api/render` (vanilla JS, no client build).
+**M1 — Thin blog host + activation**
+
+- Argon2 password hashing, session cookies, CSRF protection, and a `/setup`
+  wizard that creates the first admin account and then locks.
+- Markdown editor that parses to an immutable block tree (`heading`,
+  `paragraph`, `image`, `call_to_action`, `quote`, `code`, `divider`) with a
+  live preview, plus a `POST /api/render` live preview endpoint.
+- Documents with tags, publish/unpublish, public article rendering, comments
+  with moderation, and an RSS feed.
 - UI-created posts get their slug from the title while still a draft, instead
   of the old `untitled` placeholder; published slugs stay stable.
-- `tests/pages.rs` (server-rendered page flows), `tests/tls.rs` (self-signed
-  cert over a real socket), and the relocated e2e suite.
+- `forgepost export` for JSON backups of the full database.
+- AGPL-3.0 license and workspace scaffolding.
 - Admin **Settings** page (`/admin/settings`) to change the blog name (shown
   in the header, page titles, home page, and RSS feed) and pick a site-wide
   theme: system (auto), light, dark, sepia, or solarized. Themes are applied
@@ -38,6 +39,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolvable image as a linked, lazy-loaded card thumbnail (12×8rem desktop,
   6.5×4.33rem mobile). The dashboard gained a **Created** column and its list
   is ordered newest-first by creation.
+
+**M2 — Per-block analytics**
+
+- Browser tracking script: banded scroll depth, article completion, read time,
+  and per-block impressions, delivered through a rate-limited analytics API.
+- Per-article stats (views, unique readers, average reading time, completion,
+  scroll-depth funnel) and a per-block drop-off dashboard.
+- Estimated numbers are explicitly labeled: blockers and JS-disabled readers
+  are undercounted by design.
 - **"Keep reading" recommendations** — every article ends with up to three
   related-post cards (before the comments), ranked by shared tags with the most
   recent posts as backfill. New `recommendation_impression` /
@@ -53,52 +63,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Game-feel dashboard** — the admin dashboard opens with a "This week"
   section: a most-read-post callout, a per-post **Views (7d)** + **Δ vs last
   week** column pair, and a completion nudge pointing at the post with the
-  worst read-through when it has enough reads to judge.
+  worst read-through once it has enough reads to judge.
 - **Share tracking** — articles gain a **Share** button (native share sheet
   when available, clipboard copy otherwise) that reports a new `share_click`
   event; the Stats page shows a **Shares** stat card.
-
-### Changed
-
-- **SEO head for articles, home, and tags** — canonical URL, meta description,
-  Open Graph (`og:image` + `og:image:width/height`) and Twitter
-  (`summary` / `summary_large_image`) cards, and JSON-LD now carry the post's
-  image and dimensions (first resolvable image, else the site default). All
-  rendered images are lazy-loaded with `decoding="async"`.
-- **Migrations run through 0008** — `0007_recommendations.sql` adds
-  `analytics_events.recommended_slug`; `0008_recommendation_visitor_index.sql`
-  adds `visitor_id`-led indexes for the future interest engine.
-- **`specification/scaling.md`** — new "Recommendations & scaling" section
-  documenting the per-article read-path cost of ranking, the extra analytics
-  writes, and the visitor index.
-
-## [0.1.0] - 2026-08-05
-
-First release. The learn-MVP (publish + measure + experiment + dashboard) as a
-solo-mode single binary.
-
-### Added
-
-**M1 — Thin blog host + activation**
-
-- Argon2 password hashing, session cookies, CSRF protection, and a `/setup`
-  wizard that creates the first admin account and then locks.
-- Markdown editor that parses to an immutable block tree (`heading`,
-  `paragraph`, `image`, `call_to_action`, `quote`, `code`, `divider`) with a
-  live preview.
-- Documents with tags, publish/unpublish, public article rendering, comments
-  with moderation, and an RSS feed.
-- `forgepost export` for JSON backups of the full database.
-- AGPL-3.0 license and workspace scaffolding.
-
-**M2 — Per-block analytics**
-
-- Browser tracking script: banded scroll depth, article completion, read time,
-  and per-block impressions, delivered through a rate-limited analytics API.
-- Per-article stats (views, unique readers, average reading time, completion,
-  scroll-depth funnel) and a per-block drop-off dashboard.
-- Estimated numbers are explicitly labeled: blockers and JS-disabled readers
-  are undercounted by design.
 
 **M3 — Block experiments**
 
@@ -124,6 +92,35 @@ solo-mode single binary.
   P(beats control) bars, and manual Decide / Promote best / No improvement /
   Stop actions.
 
+**Operations**
+
+- In-process HTTPS with two tiers: automatic Let's Encrypt issuance + renewal
+  (`--tls-domain`) and bring-your-own certificates (`--tls-cert`/`--tls-key`,
+  reloaded on change), plus a configurable HTTP→HTTPS 301 redirect listener
+  and `Secure` session/visitor cookies under TLS.
+- `tests/pages.rs` (server-rendered page flows) and `tests/tls.rs` (self-signed
+  cert over a real socket); the e2e harness moved to `e2e/` at the repo root
+  and drives the compiled binary directly.
+
+### Changed
+
+- **Single-binary migration** — SvelteKit/Vite/Vitest (`frontend/`) is gone.
+  Rust + Askama renders every page (home, setup, login, dashboard, editor,
+  stats, article, error) with POST-REDIRECT-GET; the `/api/*` JSON surface is
+  unchanged. The Playwright e2e harness moved to `e2e/` at the repo root and
+  now drives the compiled binary directly. See `docs/single_binary_plan.md`.
+- **SEO head for articles, home, and tags** — canonical URL, meta description,
+  Open Graph (`og:image` + `og:image:width/height`) and Twitter
+  (`summary` / `summary_large_image`) cards, and JSON-LD now carry the post's
+  image and dimensions (first resolvable image, else the site default). All
+  rendered images are lazy-loaded with `decoding="async"`.
+- **Migrations run through 0008** — `0007_recommendations.sql` adds
+  `analytics_events.recommended_slug`; `0008_recommendation_visitor_index.sql`
+  adds `visitor_id`-led indexes for the future interest engine.
+- **`specification/scaling.md`** — new "Recommendations & scaling" section
+  documenting the per-article read-path cost of ranking, the extra analytics
+  writes, and the visitor index.
+
 ### Fixed
 
 - API integration test asserted paragraph blocks were not experimentable; the
@@ -140,4 +137,4 @@ solo-mode single binary.
   leaderboards are explicitly deferred beyond the MVP gates (see
   `docs/mvp_plan_v6.md`).
 
-[0.1.0]: https://github.com/DavidNeurieder/my_blog/releases/tag/v0.1.0
+[0.1.0]: https://github.com/DavidNeurieder/Forgepost/releases/tag/v0.1.0

@@ -77,8 +77,8 @@ used to drive the Playwright test suite.
 Build from source (a release build of the single `forgepost` binary):
 
 ```sh
-git clone https://github.com/DavidNeurieder/my_blog.git
-cd my_blog
+git clone https://github.com/DavidNeurieder/Forgepost.git
+cd Forgepost
 cargo build --release --bin forgepost
 ```
 

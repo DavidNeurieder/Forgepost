@@ -13,9 +13,10 @@ DB="${FORGEPOST_BACKUP_DB:-sqlite:///var/lib/forgepost/forgepost.db}"
 MEDIA_DIR="${FORGEPOST_BACKUP_MEDIA_DIR:-/var/lib/forgepost/media}"
 BACKUP_DIR="${FORGEPOST_BACKUP_DIR:-/var/lib/forgepost/backups}"
 RETENTION_DAYS="${FORGEPOST_BACKUP_RETENTION_DAYS:-30}"
+BIN="${FORGEPOST_BACKUP_BIN:-/opt/forgepost/forgepost}"
 
 mkdir -p "$BACKUP_DIR"
-/opt/forgepost/forgepost export \
+"$BIN" export \
 	--database-url "$DB" \
 	--output "$BACKUP_DIR/db-$(date +%F).json"
 

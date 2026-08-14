@@ -18,7 +18,7 @@
 #
 set -euo pipefail
 
-DOMAIN="${1:-}"
+DOMAIN="${FORGEPOST_DOMAIN:-${1:-}}"
 if [[ -z "$DOMAIN" ]]; then
   echo "usage: $0 <domain>" >&2
   exit 2
@@ -28,11 +28,12 @@ if [[ $EUID -ne 0 ]]; then
   exit 2
 fi
 
-REPO_URL="https://github.com/DavidNeurieder/my_blog.git"
-SRC_DIR="/opt/forgepost/src"
-BIN_DIR="/opt/forgepost"
-DATA_DIR="/var/lib/forgepost"
-CONF_DIR="/etc/forgepost"
+REPO_URL="${FORGEPOST_REPO_URL:-https://github.com/DavidNeurieder/Forgepost.git}"
+SRC_DIR="${FORGEPOST_SRC_DIR:-/opt/forgepost/src}"
+BIN_DIR="${FORGEPOST_BIN_DIR:-/opt/forgepost}"
+DATA_DIR="${FORGEPOST_DATA_DIR:-/var/lib/forgepost}"
+CONF_DIR="${FORGEPOST_CONF_DIR:-/etc/forgepost}"
+TLS_DOMAIN="${FORGEPOST_TLS_DOMAIN:-$DOMAIN}"
 
 echo "==> Installing build dependencies"
 export DEBIAN_FRONTEND=noninteractive
@@ -64,14 +65,16 @@ mkdir -p "$DATA_DIR/tls" "$DATA_DIR/backups" "$DATA_DIR/media" "$CONF_DIR"
 chown -R forgepost:forgepost "$DATA_DIR"
 
 echo "==> Writing $CONF_DIR/forgepost.env"
-cat > "$CONF_DIR/forgepost.env" <<EOF
-# Forgepost server configuration
-FORGEPOST_ADDR=0.0.0.0:443
-FORGEPOST_TLS_DOMAIN=$DOMAIN
-DATABASE_URL=sqlite://$DATA_DIR/forgepost.db
-FORGEPOST_MEDIA_DIR=$DATA_DIR/media
-RUST_LOG=info
-EOF
+{
+  echo "# Forgepost server configuration"
+  echo "FORGEPOST_ADDR=0.0.0.0:443"
+  if [[ -n "$TLS_DOMAIN" ]]; then
+    echo "FORGEPOST_TLS_DOMAIN=$TLS_DOMAIN"
+  fi
+  echo "DATABASE_URL=sqlite://$DATA_DIR/forgepost.db"
+  echo "FORGEPOST_MEDIA_DIR=$DATA_DIR/media"
+  echo "RUST_LOG=info"
+} > "$CONF_DIR/forgepost.env"
 chmod 600 "$CONF_DIR/forgepost.env"
 
 echo "==> Installing systemd units"

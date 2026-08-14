@@ -12,9 +12,9 @@ if [[ $EUID -ne 0 ]]; then
   exit 2
 fi
 
-SRC_DIR="/opt/forgepost/src"
-BIN_DIR="/opt/forgepost"
-export PATH="/root/.cargo/bin:$PATH"
+SRC_DIR="${FORGEPOST_SRC_DIR:-/opt/forgepost/src}"
+BIN_DIR="${FORGEPOST_BIN_DIR:-/opt/forgepost}"
+export PATH="${FORGEPOST_CARGO_BIN:-/root/.cargo/bin}:$PATH"
 
 if [[ ! -d "$SRC_DIR/.git" ]]; then
   echo "no checkout at $SRC_DIR — run deploy/install.sh first" >&2

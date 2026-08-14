@@ -1,6 +1,6 @@
 [Unit]
 Description=Forgepost — self-hosted block-level experimentation for creators
-Documentation=https://github.com/DavidNeurieder/my_blog
+Documentation=https://github.com/DavidNeurieder/Forgepost
 After=network-online.target
 Wants=network-online.target
 

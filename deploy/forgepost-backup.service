@@ -1,6 +1,6 @@
 [Unit]
 Description=Forgepost nightly database export
-Documentation=https://github.com/DavidNeurieder/my_blog
+Documentation=https://github.com/DavidNeurieder/Forgepost
 
 [Service]
 Type=oneshot
