@@ -144,6 +144,74 @@ h3 {
 	max-width: 100%;
 }
 
+/* Click-to-load video embeds: a thumbnail button that becomes an iframe on
+   click. The outer wrapper keeps a 16:9 box so the layout does not jump when
+   the video starts playing. */
+.article-body figure.video {
+	margin: 1rem 0;
+}
+
+.article-body .video-box {
+	display: block;
+	position: relative;
+	width: 100%;
+	max-width: 42rem;
+	margin: 0 auto;
+	padding: 0;
+	border: 0;
+	border-radius: var(--radius);
+	overflow: hidden;
+	cursor: pointer;
+	background: var(--code-bg);
+	aspect-ratio: 16 / 9;
+}
+
+.article-body .video-thumb {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	border: 0;
+}
+
+.article-body .video-play {
+	position: absolute;
+	inset: 0;
+	margin: auto;
+	width: 4rem;
+	height: 4rem;
+	border-radius: 50%;
+	background: rgba(0, 0, 0, 0.65);
+	color: #fff;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 1.4rem;
+	line-height: 1;
+}
+
+.article-body .video-box:hover .video-play {
+	background: var(--accent);
+}
+
+.article-body figure.video figcaption {
+	margin-top: 0.4rem;
+	font-size: 0.85rem;
+	text-align: center;
+	color: var(--muted);
+}
+
+.article-body .video-frame {
+	display: block;
+	width: 100%;
+	max-width: 42rem;
+	margin: 0 auto;
+	aspect-ratio: 16 / 9;
+	border: 0;
+	border-radius: var(--radius);
+}
+
 form field {
 	display: block;
 	margin-bottom: 1rem;

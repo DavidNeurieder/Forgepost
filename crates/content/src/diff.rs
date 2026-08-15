@@ -49,7 +49,16 @@ pub fn merge_blocks(
         let block = match match_for.get(&position) {
             Some(&prev_idx) => {
                 let prev = &previous[prev_idx];
-                let content_changed = current_content(prev) != Some(&parsed_block.content);
+                let content_changed = match parsed_block.kind {
+                    // Video identity is the provider/id/url triple; oEmbed
+                    // fields (title, thumbnail) are derived metadata, so a
+                    // refreshed fetch must never mint a new version.
+                    BlockKind::Video => {
+                        current_content(prev).map(crate::video_identity)
+                            != Some(crate::video_identity(&parsed_block.content))
+                    }
+                    _ => current_content(prev) != Some(&parsed_block.content),
+                };
                 if content_changed {
                     let version_id = VersionId::new_v4();
                     versions.push(BlockVersion {
@@ -254,6 +263,53 @@ mod tests {
         assert_eq!(result.blocks.len(), 1);
         assert_ne!(result.blocks[0].id, b1, "image block is replaced");
         assert_eq!(result.blocks[0].kind, BlockKind::Paragraph);
+    }
+
+    #[test]
+    fn video_metadata_change_does_not_mint_a_new_version() {
+        let b1 = crate::BlockId::new_v4();
+        let v1 = VersionId::new_v4();
+        let previous = vec![block(b1, BlockKind::Video, v1)];
+        let versions = vec![version(
+            v1,
+            b1,
+            json!({ "provider": "rumble", "id": "1abc2", "url": "https://rumble.com/v1abc2-x.html", "title": "Old", "thumbnail": "https://old/x.jpg" }),
+        )];
+        let parsed = vec![ParsedBlock {
+            kind: BlockKind::Video,
+            content: json!({ "provider": "rumble", "id": "1abc2", "url": "https://rumble.com/v1abc2-x.html", "title": "New", "thumbnail": "https://new/x.jpg" }),
+        }];
+
+        let result = merge_blocks(&previous, &versions, parsed, 1000);
+        assert_eq!(result.blocks[0].id, b1);
+        assert_eq!(
+            result.blocks[0].version_id, v1,
+            "metadata-only change keeps version"
+        );
+        assert!(result.versions.is_empty());
+    }
+
+    #[test]
+    fn video_identity_change_does_mint_a_new_version() {
+        let b1 = crate::BlockId::new_v4();
+        let v1 = VersionId::new_v4();
+        let previous = vec![block(b1, BlockKind::Video, v1)];
+        let versions = vec![version(
+            v1,
+            b1,
+            json!({ "provider": "youtube", "id": "aaa", "url": "https://youtu.be/aaa" }),
+        )];
+        let parsed = vec![ParsedBlock {
+            kind: BlockKind::Video,
+            content: json!({ "provider": "youtube", "id": "bbb", "url": "https://youtu.be/bbb" }),
+        }];
+
+        let result = merge_blocks(&previous, &versions, parsed, 1000);
+        assert_ne!(
+            result.blocks[0].version_id, v1,
+            "different video = new version"
+        );
+        assert_eq!(result.versions.len(), 1);
     }
 
     #[test]

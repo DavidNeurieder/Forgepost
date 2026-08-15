@@ -4,6 +4,43 @@ All notable changes to Forgepost are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-15
+
+Video embeds: a new `video` block kind with click-to-load rendering, privacy-first
+embed URLs, and first-class SEO (`og:video` + JSON-LD `VideoObject`).
+
+### Added
+
+- **Video blocks** — a Markdown line that is exactly one YouTube or Rumble URL
+  (`watch`/`shorts`/`embed`/`live`/`youtu.be`, Rumble watch or embed links) or
+  a raw HTML `<iframe>` line parses into a `video` block. A URL embedded in
+  prose stays a paragraph; iframe attributes are whitelisted (`src`, `title`,
+  `width`, `height`) and `src` must be http(s), so a hand-crafted tag can
+  never smuggle `javascript:`.
+- **Click-to-load rendering** — a video block renders as a button with a lazy
+  thumbnail and a play badge and *no iframe*, so the reader's browser never
+  contacts the provider until they choose to play. Clicking swaps in the
+  iframe via the new `/static/embed.js` (privacy-host YouTube embeds,
+  `referrerpolicy="no-referrer"`, `allowfullscreen`).
+- **Thumbnails** — YouTube's thumbnail is derived from the video id
+  (`i.ytimg.com/vi/<id>/hqdefault.jpg`); Rumble's title and thumbnail are
+  fetched once, best-effort, from Rumble's oEmbed endpoint at save time (3s
+  timeout, non-fatal, idempotent — never minting new block versions).
+- **Video SEO** — articles with a video block gain `og:video`,
+  `og:video:type`, `og:video:secure_url`, and a JSON-LD `VideoObject` node
+  (name, description, thumbnailUrl, uploadDate, embedUrl, contentUrl).
+- **Editor** — an **Insert video** button opens a dialog for a URL or an
+  `<iframe>` snippet and inserts it at the cursor; the blocks↔markdown
+  round-trip preserves video blocks.
+- Videos are not experimentable (their content is a single immutable URL).
+
+### Changed
+
+- Workspace version bumped to **0.2.0**.
+- `crates/server/Cargo.toml` gains `reqwest` (main deps, json + rustls-tls) for
+  the oEmbed fetch; video-block diffs compare by provider/id/url identity so
+  refreshed metadata never creates a new immutable version.
+
 ## [0.1.0] - 2026-08-14
 
 First release. The learn-MVP (publish + measure + experiment + dashboard) plus
@@ -137,4 +174,5 @@ single binary.
   leaderboards are explicitly deferred beyond the MVP gates (see
   `docs/mvp_plan_v6.md`).
 
+[0.2.0]: https://github.com/DavidNeurieder/Forgepost/releases/tag/v0.2.0
 [0.1.0]: https://github.com/DavidNeurieder/Forgepost/releases/tag/v0.1.0

@@ -79,6 +79,10 @@ struct SeoMeta {
     date_published: String,
     date_modified: String,
     author: String,
+    /// `og:video` embed URL for the article's first video block; empty to omit.
+    video: String,
+    /// `og:video:type`; empty to omit.
+    video_type: String,
 }
 
 #[derive(Template)]
@@ -256,6 +260,7 @@ struct ArticleTemplate {
     year: u32,
     seo: SeoMeta,
     seo_ld: JsonLd,
+    video_ld: Option<VideoLd>,
     slug: String,
     title: String,
     date: String,
@@ -276,6 +281,16 @@ struct JsonLd {
     author: String,
     publisher: String,
     image: String,
+}
+
+/// A JSON-LD `VideoObject` node for the article's first video block, rendered
+/// inside the JSON-LD script. Each field is JSON-encoded and then script
+/// escaped, mirroring `JsonLd`.
+struct VideoLd {
+    name: String,
+    description: String,
+    thumbnail: String,
+    embed: String,
 }
 
 struct ArticleBlock {
@@ -723,6 +738,29 @@ fn article_image(full: &crate::model::FullDocument, base: &str) -> (String, Stri
         .unwrap_or_default()
 }
 
+/// `(embed URL, thumbnail URL, title)` of the article's first video block, if
+/// any. Videos are never experimentable, so the published block content is
+/// also what the reader sees.
+fn article_video(full: &crate::model::FullDocument) -> Option<(String, String, String)> {
+    full.document
+        .blocks
+        .iter()
+        .find(|b| b.kind == forgepost_content::BlockKind::Video)
+        .and_then(|b| {
+            full.document.current_content(b.id).map(|c| {
+                (
+                    forgepost_content::video_embed_url(c),
+                    forgepost_content::video_thumbnail(c),
+                    c.get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                )
+            })
+        })
+        .filter(|(embed, _, _)| !embed.is_empty())
+}
+
 /// `(width, height)` pixel strings from an image `size` value (`120x80`,
 /// `120`, `x80`, or `120x`), re-validated as digits so a hand-crafted block
 /// can never inject extra attributes. Empty strings mean "unknown".
@@ -811,6 +849,8 @@ pub(crate) async fn home_page(
             date_published: String::new(),
             date_modified: String::new(),
             author: String::new(),
+            video: String::new(),
+            video_type: String::new(),
         },
         posts,
     })
@@ -910,6 +950,8 @@ pub(crate) async fn tag_page(
             date_published: String::new(),
             date_modified: String::new(),
             author: String::new(),
+            video: String::new(),
+            video_type: String::new(),
         },
         tag,
         posts,
@@ -963,6 +1005,8 @@ pub(crate) async fn search_page(
             date_published: String::new(),
             date_modified: String::new(),
             author: String::new(),
+            video: String::new(),
+            video_type: String::new(),
         },
         query: q,
         results,
@@ -1970,6 +2014,7 @@ async fn build_article_page(
     if image.is_empty() {
         (image, image_width, image_height) = default_image_meta(site.image.clone(), &base);
     }
+    let video = article_video(&full);
     let seo = SeoMeta {
         title: view.title.clone(),
         description,
@@ -1980,7 +2025,19 @@ async fn build_article_page(
         date_published: full.published_at_ms.map(format_iso_utc).unwrap_or_default(),
         date_modified: format_iso_utc(full.document.updated_at_ms),
         author,
+        video: video.as_ref().map(|v| v.0.clone()).unwrap_or_default(),
+        video_type: if video.is_some() {
+            "text/html".to_string()
+        } else {
+            String::new()
+        },
     };
+    let video_ld = video.as_ref().map(|(embed, thumb, title)| VideoLd {
+        name: script_json(title),
+        description: script_json(&seo.description),
+        thumbnail: script_json(thumb),
+        embed: script_json(embed),
+    });
     let seo_ld = JsonLd {
         headline: script_json(&view.title),
         description: script_json(&seo.description),
@@ -1996,6 +2053,7 @@ async fn build_article_page(
         year: current_year(),
         seo,
         seo_ld,
+        video_ld,
         slug: view.slug.clone(),
         title: view.title.clone(),
         date: format_date(view.published_at_ms),
@@ -2041,6 +2099,7 @@ pub(crate) async fn static_file(Path(name): Path<String>) -> Result<Response, Pa
             include_str!("../static/tracker.js"),
             "application/javascript",
         ),
+        "embed.js" => (include_str!("../static/embed.js"), "application/javascript"),
         _ => return Err(not_found("static file not found").into()),
     };
     Ok(([(header::CONTENT_TYPE, content_type)], body).into_response())
@@ -2386,6 +2445,31 @@ fn blocks_to_markdown(doc: &forgepost_content::Document) -> String {
                     .join("\n")
             }
             BlockKind::Divider => "---".into(),
+            BlockKind::Video => {
+                let provider = c.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+                let url = c.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+                match provider {
+                    "youtube" | "rumble" if !url.is_empty() => url.to_string(),
+                    "iframe" if !url.is_empty() => {
+                        let title = c.get("title").and_then(|v| v.as_str()).unwrap_or_default();
+                        let width = c.get("width").and_then(|v| v.as_str()).unwrap_or_default();
+                        let height = c.get("height").and_then(|v| v.as_str()).unwrap_or_default();
+                        let mut tag = format!("<iframe src=\"{url}\"");
+                        if !title.is_empty() {
+                            tag.push_str(&format!(" title=\"{title}\""));
+                        }
+                        if !width.is_empty() {
+                            tag.push_str(&format!(" width=\"{width}\""));
+                        }
+                        if !height.is_empty() {
+                            tag.push_str(&format!(" height=\"{height}\""));
+                        }
+                        tag.push_str(" allowfullscreen></iframe>");
+                        tag
+                    }
+                    _ => String::new(),
+                }
+            }
             BlockKind::Paragraph | BlockKind::CallToAction => text_of(c),
         };
         parts.push(part);

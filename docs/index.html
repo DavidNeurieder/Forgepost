@@ -24,7 +24,7 @@
     "applicationCategory": "WebApplication",
     "description": "Self-hosted block-level experimentation for creators: a blogging engine with per-block analytics and Bayesian A/B testing, shipped as a single Rust binary with embedded SQLite.",
     "url": "https://davidneurieder.github.io/Forgepost/",
-    "softwareVersion": "0.1.0",
+    "softwareVersion": "0.2.0",
     "license": "https://www.gnu.org/licenses/agpl-3.0.html",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
   }
@@ -58,6 +58,11 @@
             <div class="icon">✍️</div>
             <h3>Thin blog host</h3>
             <p>A Markdown editor that parses to a block tree, publish/unpublish, tags, image uploads served from /media, Markdown import (drop in an existing <code>.md</code> or a <code>.zip</code> bundling it with its images to create a reviewable draft), comments with moderation, RSS, full-text search (SQLite FTS5 with snippet highlighting), and one clean theme. Each block is a first-class, versioned object.</p>
+          </div>
+          <div class="card">
+            <div class="icon">🎬</div>
+            <h3>Video embeds</h3>
+            <p>A line that is exactly one YouTube or Rumble URL — or a raw <code>&lt;iframe&gt;</code> line — becomes a video block. Click-to-load rendering: a lazy thumbnail with zero third-party requests until the reader chooses to play, plus <code>og:video</code> and a JSON-LD <code>VideoObject</code>.</p>
           </div>
           <div class="card">
             <div class="icon">📊</div>
@@ -237,7 +242,7 @@ cd e2e && npm run test:e2e                    # real browser vs the real binary<
 
   <footer>
     <div class="container">
-      <p>Forgepost — version 0.1.0 · AGPL-3.0-only — <a href="https://github.com/DavidNeurieder/Forgepost/blob/main/LICENSE">License</a> · <a href="https://github.com/DavidNeurieder/Forgepost/blob/main/CHANGELOG.md">Changelog</a> · <a href="https://github.com/DavidNeurieder/Forgepost">Source</a></p>
+      <p>Forgepost — version 0.2.0 · AGPL-3.0-only — <a href="https://github.com/DavidNeurieder/Forgepost/blob/main/LICENSE">License</a> · <a href="https://github.com/DavidNeurieder/Forgepost/blob/main/CHANGELOG.md">Changelog</a> · <a href="https://github.com/DavidNeurieder/Forgepost">Source</a></p>
     </div>
   </footer>
 </body>

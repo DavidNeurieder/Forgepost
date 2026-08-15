@@ -6,6 +6,7 @@ pub mod error;
 pub mod experiments;
 pub mod import;
 pub mod model;
+pub mod oembed;
 pub mod pages;
 pub mod recommender;
 pub mod repository;

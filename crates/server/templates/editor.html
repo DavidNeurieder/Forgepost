@@ -20,6 +20,7 @@
   <div class="form-row">
     <button type="button" id="upload-image" class="secondary">Upload image</button>
     <input type="file" id="media-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+    <button type="button" id="insert-video" class="secondary">Insert video</button>
     <button type="submit">Save</button>
     {% if status != "published" %}
     <button type="submit" formaction="/admin/editor/{{ id }}/publish" name="publish" value="1">Publish</button>
@@ -39,6 +40,19 @@
 <h2>Preview</h2>
 <p class="muted" id="preview-status">Start typing to preview the rendered post.</p>
 <div class="notice article-body" id="preview-body"></div>
+<dialog id="video-dialog">
+  <form method="dialog">
+    <field>
+      <label for="video-url">Video URL or &lt;iframe&gt; code</label>
+      <input id="video-url" type="text" placeholder="https://www.youtube.com/watch?v=…" maxlength="2000">
+    </field>
+    <p class="muted">A line that is exactly one YouTube or Rumble URL (or a raw &lt;iframe&gt; line) renders as a click-to-load video.</p>
+    <div class="form-row">
+      <button type="submit" value="insert">Insert</button>
+      <button type="submit" value="cancel" class="secondary">Cancel</button>
+    </div>
+  </form>
+</dialog>
 <script>
 (function () {
 	var textarea = document.getElementById('markdown');
@@ -75,6 +89,24 @@
 	uploadBtn.addEventListener('click', function (e) {
 		e.preventDefault();
 		mediaInput.click();
+	});
+
+	var videoBtn = document.getElementById('insert-video');
+	var videoDialog = document.getElementById('video-dialog');
+	var videoInput = document.getElementById('video-url');
+
+	videoBtn.addEventListener('click', function (e) {
+		e.preventDefault();
+		videoInput.value = '';
+		videoDialog.showModal();
+	});
+
+	videoDialog.addEventListener('close', function () {
+		if (videoDialog.returnValue !== 'insert') { return; }
+		var value = videoInput.value.trim();
+		if (!value) { return; }
+		insertAtCursor(value);
+		textarea.dispatchEvent(new Event('input'));
 	});
 
 	function insertAtCursor(text) {

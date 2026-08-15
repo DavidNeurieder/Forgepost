@@ -11,6 +11,9 @@
 {% if !seo.image.is_empty() %}<meta property="og:image" content="{{ seo.image }}">{% endif %}
 {% if !seo.image_width.is_empty() %}<meta property="og:image:width" content="{{ seo.image_width }}">{% endif %}
 {% if !seo.image_height.is_empty() %}<meta property="og:image:height" content="{{ seo.image_height }}">{% endif %}
+{% if !seo.video.is_empty() %}<meta property="og:video" content="{{ seo.video }}">
+<meta property="og:video:type" content="{{ seo.video_type }}">
+<meta property="og:video:secure_url" content="{{ seo.video }}">{% endif %}
 <meta name="twitter:card" content="{% if seo.image.is_empty() %}summary{% else %}summary_large_image{% endif %}">
 <meta name="twitter:title" content="{{ seo.title }}">
 <meta name="twitter:description" content="{{ seo.description }}">
@@ -28,6 +31,15 @@
   "url": "{{ seo.url }}",
   "mainEntityOfPage": { "@type": "WebPage", "@id": "{{ seo.url }}" }
   {% if !seo.image.is_empty() %}, "image": {{ seo_ld.image|safe }}{% endif %}
+  {% if let Some(video) = video_ld %}, "video": {
+    "@type": "VideoObject",
+    "name": {{ video.name|safe }},
+    "description": {{ video.description|safe }},
+    "thumbnailUrl": {{ video.thumbnail|safe }},
+    "uploadDate": "{{ seo.date_published }}",
+    "embedUrl": {{ video.embed|safe }},
+    "contentUrl": {{ video.embed|safe }}
+  }{% endif %}
 }
 </script>
 {% endblock %}
@@ -110,6 +122,7 @@
 {% endif %}
 
 <script src="/static/tracker.js" defer></script>
+{% if video_ld.is_some() %}<script src="/static/embed.js" defer></script>{% endif %}
 <script>
   window.addEventListener('load', function () {
     if (window.ForgepostTracker) {

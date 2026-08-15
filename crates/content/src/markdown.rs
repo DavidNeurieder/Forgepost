@@ -8,9 +8,13 @@
 //! paragraph consisting entirely of raw HTML `<img>` tags (each optionally
 //! wrapped in a `[...](url)` link, e.g. README badges) is converted to image
 //! blocks, so `[<img src="…" height="80">](https://…)` renders as a linked
-//! image. Parsing is deliberately simple and lossless enough for the
-//! semantic-document model. Inline formatting (`**bold**`, `*italic*`,
-//! `` `code` ``, `[links](url)`) is rendered at display time by
+//! image. A paragraph consisting entirely of raw HTML `<iframe>` tags is
+//! converted to a video block (whitelisted `src`/`title`/`width`/`height`
+//! attributes; the `src` must be http(s)). A line that is *exactly* one
+//! YouTube or Rumble URL is parsed as a video block too; URLs embedded in
+//! prose stay paragraphs. Parsing is deliberately simple and lossless enough
+//! for the semantic-document model. Inline formatting (`**bold**`,
+//! `*italic*`, `` `code` ``, `[links](url)`) is rendered at display time by
 //! [`render_inline`]; source text keeps the raw markers.
 
 use serde_json::json;
@@ -28,6 +32,12 @@ pub fn parse_markdown(source: &str) -> Vec<ParsedBlock> {
         let trimmed = line.trim();
 
         if trimmed.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        if let Some(video) = parse_video_line(trimmed) {
+            blocks.push(video);
             i += 1;
             continue;
         }
@@ -165,6 +175,10 @@ pub fn parse_markdown(source: &str) -> Vec<ParsedBlock> {
                     content: image_content(&img.src, &img.alt, &img.size, &img.href),
                 });
             }
+            continue;
+        }
+        if let Some(video) = iframe_video_paragraph(&paragraph) {
+            blocks.push(video);
             continue;
         }
         blocks.push(ParsedBlock {
@@ -433,6 +447,304 @@ fn read_ident(s: &str) -> Option<(&str, &str)> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Video blocks
+// ---------------------------------------------------------------------------
+
+/// A video block's JSON content (`provider`, `id`, `url`, plus optional
+/// `title` / `thumbnail` / `width` / `height`).
+fn video_block(provider: &'static str, id: String, url: &str) -> ParsedBlock {
+    ParsedBlock {
+        kind: BlockKind::Video,
+        content: json!({ "provider": provider, "id": id, "url": url }),
+    }
+}
+
+/// If `line` is *exactly* a single YouTube or Rumble video URL, return the
+/// parsed video block. A URL embedded in prose never matches, so plain links
+/// stay paragraphs.
+fn parse_video_line(line: &str) -> Option<ParsedBlock> {
+    let line = line.trim();
+    let (provider, id) = video_from_url(line)?;
+    Some(video_block(provider, id, line))
+}
+
+/// Extract `(provider, video id)` from a YouTube or Rumble URL.
+fn video_from_url(url: &str) -> Option<(&'static str, String)> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let (host, path) = match rest.split_once('/') {
+        Some((h, p)) => (h.to_ascii_lowercase(), p),
+        None => (rest.to_ascii_lowercase(), ""),
+    };
+    let path = path.trim_end_matches('/');
+
+    let is_yt = host == "youtu.be" || host == "youtube.com" || host.ends_with(".youtube.com");
+    if is_yt {
+        let id = if host == "youtu.be" {
+            path.split('?').next().map(str::to_string)
+        } else if let Some(rest) = path.strip_prefix("watch") {
+            let query = rest.split_once('?').map(|(_, q)| q).unwrap_or("");
+            extract_query_param(query, "v").map(str::to_string)
+        } else {
+            ["shorts/", "embed/", "v/", "live/"]
+                .iter()
+                .find_map(|prefix| path.strip_prefix(prefix))
+                .map(|rest| rest.split('/').next().unwrap_or(rest).to_string())
+        };
+        if let Some(id) = id.filter(|id| valid_video_id(id)) {
+            return Some(("youtube", id));
+        }
+        return None;
+    }
+
+    if host == "rumble.com" || host.ends_with(".rumble.com") {
+        let id = if let Some(rest) = path.strip_prefix("v") {
+            // Watch URLs look like `v<id>-<slug>.html`; the id is base36 and
+            // starts with a digit, which keeps listing pages like `/videos` out.
+            if rest.starts_with(|c: char| c.is_ascii_digit()) {
+                Some(rest.split('-').next().unwrap_or(rest).to_string())
+            } else {
+                None
+            }
+        } else {
+            path.strip_prefix("embed/")
+                .map(|rest| rest.split('/').next().unwrap_or(rest).to_string())
+        };
+        if let Some(id) =
+            id.filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()))
+        {
+            return Some(("rumble", id));
+        }
+        return None;
+    }
+
+    None
+}
+
+/// Extract the `key=value` query parameter from a URL query string.
+fn extract_query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query.split('&').find_map(|pair| {
+        let mut parts = pair.splitn(2, '=');
+        let k = parts.next().unwrap_or_default();
+        let v = parts.next().unwrap_or_default();
+        if k == key && !v.is_empty() {
+            Some(v)
+        } else {
+            None
+        }
+    })
+}
+
+fn valid_video_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 32
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// If `text` is a paragraph consisting of a single raw HTML `<iframe>` element
+/// (optionally with a closing `</iframe>` tag), return it as a video block.
+/// Only `src`, `title`, `width`, and `height` are whitelisted; the `src` must
+/// be http(s), so a hand-crafted tag can never smuggle `javascript:` in.
+fn iframe_video_paragraph(text: &str) -> Option<ParsedBlock> {
+    let text = text.trim();
+    let (attrs, consumed) = parse_iframe_tag(text)?;
+    if consumed != text.len() {
+        return None;
+    }
+    let src = attrs
+        .iter()
+        .find(|(k, _)| k == "src")
+        .map(|(_, v)| v.clone())?;
+    if !(src.starts_with("https://") || src.starts_with("http://")) {
+        return None;
+    }
+    let mut content = json!({ "provider": "iframe", "url": src });
+    for (k, v) in attrs {
+        match k.as_str() {
+            "title" => content["title"] = json!(v),
+            "width" => content["width"] = json!(v),
+            "height" => content["height"] = json!(v),
+            _ => {}
+        }
+    }
+    Some(ParsedBlock {
+        kind: BlockKind::Video,
+        content,
+    })
+}
+
+/// Parse one raw HTML `<iframe>` tag starting at `s`. Returns the whitelisted
+/// attributes and the number of bytes the whole element occupies (including an
+/// optional `</iframe>` closer). Unknown or malformed attributes are dropped.
+fn parse_iframe_tag(s: &str) -> Option<(Vec<(String, String)>, usize)> {
+    let t = s.strip_prefix('<')?;
+    let (name, rest) = read_ident(t)?;
+    if !name.eq_ignore_ascii_case("iframe") {
+        return None;
+    }
+    let bytes = rest.as_bytes();
+    let mut pos = 0usize;
+    let mut attrs: Vec<(String, String)> = Vec::new();
+    loop {
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+            pos += 1;
+        }
+        if pos >= bytes.len() {
+            return None;
+        }
+        if bytes[pos] == b'>' {
+            pos += 1;
+            break;
+        }
+        if bytes[pos] == b'/' {
+            pos += 1;
+            if pos < bytes.len() && bytes[pos] == b'>' {
+                pos += 1;
+                break;
+            }
+            continue;
+        }
+        let name_start = pos;
+        while pos < bytes.len()
+            && !matches!(
+                bytes[pos],
+                b'=' | b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/'
+            )
+        {
+            pos += 1;
+        }
+        let attr = rest[name_start..pos].to_ascii_lowercase();
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+            pos += 1;
+        }
+        let mut value = String::new();
+        if pos < bytes.len() && bytes[pos] == b'=' {
+            pos += 1;
+            while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r') {
+                pos += 1;
+            }
+            if pos < bytes.len() && (bytes[pos] == b'"' || bytes[pos] == b'\'') {
+                let quote = bytes[pos];
+                pos += 1;
+                while pos < bytes.len() && bytes[pos] != quote {
+                    value.push(bytes[pos] as char);
+                    pos += 1;
+                }
+                if pos >= bytes.len() {
+                    return None;
+                }
+                pos += 1;
+            } else {
+                while pos < bytes.len()
+                    && !matches!(bytes[pos], b' ' | b'\t' | b'\n' | b'\r' | b'>')
+                {
+                    value.push(bytes[pos] as char);
+                    pos += 1;
+                }
+            }
+        }
+        let all_digits = |v: &str| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit());
+        let keep = match attr.as_str() {
+            "src" | "title" => Some(value),
+            "width" if all_digits(&value) => Some(value),
+            "height" if all_digits(&value) => Some(value),
+            _ => None,
+        };
+        if let Some(v) = keep {
+            attrs.push((attr, v));
+        }
+    }
+    // `rest` was consumed up to `pos` (just past the opening `>`).
+    let opening_end = 1 + name.len() + pos;
+    let after_open = &s[opening_end..];
+    let after_open_trimmed = after_open.trim_start();
+    let skipped_ws = after_open.len() - after_open_trimmed.len();
+    let closing_len = if let Some(rest) = after_open_trimmed.strip_prefix("</iframe") {
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix('>')?;
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        after_open_trimmed.len()
+    } else {
+        if !after_open_trimmed.is_empty() {
+            return None;
+        }
+        0
+    };
+    let total = opening_end + skipped_ws + closing_len;
+    Some((attrs, total))
+}
+
+/// The iframe `src` that plays a video block (the embed URL). YouTube and
+/// Rumble embeds are built from the video id (privacy-friendly hosts); generic
+/// iframe blocks use the stored URL.
+pub fn video_embed_url(content: &BlockContent) -> String {
+    let provider = content
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let id = content.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let url = content.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    match provider {
+        "youtube" if !id.is_empty() => {
+            format!("https://www.youtube-nocookie.com/embed/{id}")
+        }
+        "rumble" if !id.is_empty() => format!("https://rumble.com/embed/{id}"),
+        _ => url.to_string(),
+    }
+}
+
+/// Absolute thumbnail URL for a video block (empty when unknown). YouTube's is
+/// deterministic from the id; other providers store one fetched via oEmbed.
+pub fn video_thumbnail(content: &BlockContent) -> String {
+    let provider = content
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let id = content.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if provider == "youtube" && !id.is_empty() {
+        return format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg");
+    }
+    content
+        .get("thumbnail")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Whether a video block still needs oEmbed metadata (thumbnail/title).
+pub fn video_needs_metadata(content: &BlockContent) -> bool {
+    video_thumbnail(content).is_empty()
+}
+
+/// The `(provider, id, url)` triple that uniquely identifies a video embed.
+/// oEmbed-derived fields (`title`, `thumbnail`) are metadata, so this is the
+/// identity used when diffing content for block versions.
+pub fn video_identity(content: &BlockContent) -> (String, String, String) {
+    (
+        content
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        content
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        content
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    )
+}
+
 /// Split a trailing ` =SIZE` suffix off an image URL, where SIZE is `H`,
 /// `WxH`, `Wx`, or `xH` (digits only). Returns `(url, size)`; anything that
 /// doesn't match is left in the URL, preserving the previous behavior.
@@ -599,6 +911,38 @@ pub fn render_html<'a>(blocks: impl IntoIterator<Item = (BlockKind, &'a BlockCon
                     render_inline(&text)
                 ));
             }
+            BlockKind::Video => {
+                let url = video_embed_url(content);
+                let title = content.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let thumb = video_thumbnail(content);
+                let label = if title.is_empty() {
+                    "Play video".to_string()
+                } else {
+                    format!("Play video: {title}")
+                };
+                let mut figure = format!(
+                    "<figure class=\"video\">\n<button type=\"button\" class=\"video-box\" data-video data-src=\"{}\" aria-label=\"{}\">\n",
+                    html_escape(&url),
+                    html_escape(&label)
+                );
+                if !thumb.is_empty() {
+                    figure.push_str(&format!(
+                        "<img class=\"video-thumb\" src=\"{}\" alt=\"\" loading=\"lazy\" decoding=\"async\">\n",
+                        html_escape(&thumb)
+                    ));
+                }
+                figure.push_str(
+                    "<span class=\"video-play\" aria-hidden=\"true\">&#9654;</span>\n</button>\n",
+                );
+                if !title.is_empty() {
+                    figure.push_str(&format!(
+                        "<figcaption>{}</figcaption>\n",
+                        html_escape(title)
+                    ));
+                }
+                figure.push_str("</figure>\n");
+                out.push_str(&figure);
+            }
             BlockKind::List { ordered } => {
                 let tag = if ordered { "ol" } else { "ul" };
                 out.push_str(&format!("<{tag}>\n"));
@@ -711,6 +1055,18 @@ pub fn block_search_text(kind: &BlockKind, content: &BlockContent) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string(),
+        BlockKind::Video => content
+            .get("title")
+            .and_then(|v| v.as_str())
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                content
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            }),
         BlockKind::List { .. } => content
             .get("items")
             .and_then(|v| v.as_array())
@@ -740,6 +1096,10 @@ mod tests {
 
     fn kinds(blocks: &[ParsedBlock]) -> Vec<BlockKind> {
         blocks.iter().map(|b| b.kind).collect()
+    }
+
+    fn html_of(blocks: &[ParsedBlock]) -> String {
+        render_html(blocks.iter().map(|b| (b.kind, &b.content)))
     }
 
     #[test]
@@ -1122,5 +1482,131 @@ mod tests {
         let text = doc.searchable_text();
         assert!(text.contains("Retrofit networking"));
         assert!(text.contains("Room database"));
+    }
+
+    #[test]
+    fn parses_standalone_youtube_urls_as_video_blocks() {
+        let cases = [
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtu.be/dQw4w9WgXcQ?t=42",
+            "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+            "https://www.youtube.com/embed/dQw4w9WgXcQ",
+            "https://youtube.com/live/dQw4w9WgXcQ",
+            "https://m.youtube.com/watch?v=dQw4w9WgXcQ&t=1",
+        ];
+        for url in cases {
+            let blocks = parse_markdown(url);
+            assert_eq!(blocks.len(), 1, "{url}");
+            assert_eq!(blocks[0].kind, BlockKind::Video, "{url}");
+            assert_eq!(blocks[0].content["provider"], "youtube", "{url}");
+            assert_eq!(blocks[0].content["id"], "dQw4w9WgXcQ", "{url}");
+        }
+    }
+
+    #[test]
+    fn parses_standalone_rumble_urls_as_video_blocks() {
+        let blocks = parse_markdown("https://rumble.com/v10dqz9-cool-video.html");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, BlockKind::Video);
+        assert_eq!(blocks[0].content["provider"], "rumble");
+        assert_eq!(blocks[0].content["id"], "10dqz9");
+
+        let blocks = parse_markdown("https://www.rumble.com/embed/10dqz9");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].content["provider"], "rumble");
+        assert_eq!(blocks[0].content["id"], "10dqz9");
+    }
+
+    #[test]
+    fn url_in_prose_stays_a_paragraph() {
+        for line in [
+            "watch https://www.youtube.com/watch?v=dQw4w9WgXcQ now",
+            "https://youtu.be/dQw4w9WgXcQ and more text",
+            "> https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ.md",
+            "https://vimeo.com/123456",
+            "https://rumble.com/videos",
+            "https://rumble.com/videos/animals",
+        ] {
+            let blocks = parse_markdown(line);
+            assert_ne!(blocks[0].kind, BlockKind::Video, "{line}");
+        }
+    }
+
+    #[test]
+    fn raw_iframe_paragraph_becomes_a_video_block() {
+        let blocks = parse_markdown(
+            "<iframe src=\"https://example.com/v/123\" title=\"Demo\" width=\"560\" height=\"315\" allowfullscreen></iframe>",
+        );
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, BlockKind::Video);
+        assert_eq!(blocks[0].content["provider"], "iframe");
+        assert_eq!(blocks[0].content["url"], "https://example.com/v/123");
+        assert_eq!(blocks[0].content["title"], "Demo");
+        assert_eq!(blocks[0].content["width"], "560");
+    }
+
+    #[test]
+    fn raw_iframe_rejects_non_http_and_trailing_text() {
+        let blocks = parse_markdown("<iframe src=\"javascript:alert(1)\"></iframe>");
+        assert_eq!(blocks[0].kind, BlockKind::Paragraph);
+        let html = html_of(&blocks);
+        assert!(!html.contains("<iframe"), "no live iframe ever rendered");
+        assert!(html.contains("&lt;iframe"), "tag stays inert escaped text");
+
+        let blocks = parse_markdown("<iframe src=\"https://a.com\"></iframe> trailing text");
+        assert_eq!(blocks[0].kind, BlockKind::Paragraph);
+        assert!(html_of(&blocks).contains("&lt;iframe"));
+    }
+
+    #[test]
+    fn renders_video_with_click_to_load_box() {
+        let html = html_of(&parse_markdown("https://youtu.be/dQw4w9WgXcQ"));
+        assert!(html.contains("class=\"video-box\""));
+        assert!(html.contains("data-src=\"https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ\""));
+        assert!(html.contains("i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"));
+        assert!(html.contains("data-video"));
+        assert!(!html.contains("<iframe"), "no iframe on page load");
+    }
+
+    #[test]
+    fn renders_video_escaping_title_and_attr_values() {
+        let html = html_of(&parse_markdown(
+            "<iframe src=\"https://a.com/x\" title=\"&quot;evil&quot;\"></iframe>",
+        ));
+        assert!(
+            html.contains("&amp;quot;evil&amp;quot;"),
+            "title is escaped twice"
+        );
+        assert!(html.contains("data-src=\"https://a.com/x\""));
+    }
+
+    #[test]
+    fn video_embed_url_and_thumbnail_helpers() {
+        assert_eq!(
+            video_embed_url(&json!({ "provider": "youtube", "id": "abc", "url": "x" })),
+            "https://www.youtube-nocookie.com/embed/abc"
+        );
+        assert_eq!(
+            video_embed_url(&json!({ "provider": "rumble", "id": "1a", "url": "x" })),
+            "https://rumble.com/embed/1a"
+        );
+        assert_eq!(
+            video_embed_url(&json!({ "provider": "iframe", "url": "https://e.com/x" })),
+            "https://e.com/x"
+        );
+        assert_eq!(
+            video_thumbnail(&json!({ "provider": "youtube", "id": "abc", "url": "x" })),
+            "https://i.ytimg.com/vi/abc/hqdefault.jpg"
+        );
+        assert_eq!(
+            video_thumbnail(
+                &json!({ "provider": "iframe", "url": "x", "thumbnail": "https://t/x.jpg" })
+            ),
+            "https://t/x.jpg"
+        );
+        assert!(video_needs_metadata(
+            &json!({ "provider": "iframe", "url": "x" })
+        ));
     }
 }

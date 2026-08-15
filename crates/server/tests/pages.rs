@@ -691,6 +691,120 @@ async fn article_page_renders_html_tracker_and_visitor_cookie() {
 }
 
 #[tokio::test]
+async fn video_block_renders_click_to_load_and_video_seo() {
+    let app = test_app().await;
+    let cookie = setup_owner(&app).await;
+    let csrf = csrf_for(&app, &cookie).await;
+    let editor_uri = create_draft(&app, &cookie, &csrf).await;
+    let (status, _) = send(
+        &app,
+        form_req(
+            Method::POST,
+            &editor_uri,
+            Some(&cookie),
+            &[
+                ("csrf_token", &csrf),
+                ("title", "Video Post"),
+                ("tags", "video"),
+                (
+                    "markdown",
+                    "Intro paragraph.\n\nhttps://www.youtube.com/watch?v=dQw4w9WgXcQ\n\nOutro.",
+                ),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    let (status, _) = send(
+        &app,
+        form_req(
+            Method::POST,
+            &format!("{editor_uri}/publish"),
+            Some(&cookie),
+            &[("csrf_token", &csrf)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    // Editor round-trips the URL back into the markdown textarea.
+    let (status, resp) = send(&app, req(Method::GET, &editor_uri, Some(&cookie), None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body_text(resp).await;
+    assert!(
+        html.contains("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+        "video block serializes back to its URL"
+    );
+
+    // Public article: click-to-load box, lazy thumbnail, no iframe on load,
+    // and both SEO hooks (og:video + JSON-LD VideoObject).
+    let (status, resp) = send(&app, req(Method::GET, "/articles/video-post", None, None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let html = body_text(resp).await;
+    assert!(html.contains("class=\"video-box\""));
+    assert!(html.contains("data-video"));
+    assert!(html.contains("data-src=\"https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ\""));
+    assert!(html.contains("i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"));
+    assert!(
+        !html.contains("<iframe"),
+        "no third-party iframe on page load"
+    );
+    assert!(html.contains("aria-label=\"Play video\""));
+
+    // embed.js is loaded for the click-to-load behavior.
+    assert!(html.contains("/static/embed.js"));
+
+    // og:video + JSON-LD VideoObject for the article's first video.
+    assert!(
+        html.contains("<meta property=\"og:video\" content=\"https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ\">")
+    );
+    assert!(html.contains("<meta property=\"og:video:type\" content=\"text/html\">"));
+    assert!(html.contains("\"@type\": \"VideoObject\""));
+    assert!(html.contains("\"embedUrl\": \"https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ\""));
+    assert!(
+        html.contains("\"thumbnailUrl\": \"https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg\"")
+    );
+
+    // The preview API renders the same click-to-load markup.
+    let (status, resp) = send(
+        &app,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/render")
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "markdown": "https://youtu.be/dQw4w9WgXcQ",
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let preview = body_json(resp).await["html"].as_str().unwrap().to_string();
+    assert!(preview.contains("class=\"video-box\""));
+    assert!(preview.contains("youtube-nocookie.com"));
+}
+
+#[tokio::test]
+async fn article_without_video_has_no_video_seo() {
+    let app = test_app().await;
+    let _ = seed_published(&app).await;
+
+    let (_, resp) = send(&app, req(Method::GET, "/articles/hello-world", None, None)).await;
+    let html = body_text(resp).await;
+    assert!(
+        !html.contains("og:video"),
+        "no og:video without a video block"
+    );
+    assert!(!html.contains("VideoObject"));
+    assert!(!html.contains("/static/embed.js"));
+    assert!(!html.contains("video-box"));
+}
+
+#[tokio::test]
 async fn article_page_404_is_html() {
     let app = test_app().await;
     let _ = seed_published(&app).await;
@@ -1057,6 +1171,7 @@ async fn static_assets_are_served() {
         ("app.css", "text/css"),
         ("favicon.svg", "image/svg+xml"),
         ("tracker.js", "application/javascript"),
+        ("embed.js", "application/javascript"),
     ] {
         let (status, resp) = send(
             &app,

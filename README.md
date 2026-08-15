@@ -9,7 +9,7 @@ Markdown, publish, watch where readers drop off, then A/B test alternative
 content on a single block and let a Bayesian engine decide when a variant is a
 clear winner.
 
-Version **0.1.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
+Version **0.2.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
 
 ## Features
 
@@ -22,6 +22,13 @@ Version **0.1.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
   highlighting), and one clean theme. SEO is first-class: per-post social
   cards (Open Graph/Twitter image + dimensions, canonical, JSON-LD) and a
   site-wide **default image** you can upload in Settings as the fallback.
+- **Video embeds** — a line that is exactly one YouTube or Rumble URL (or a
+  raw `<iframe>` line) becomes a video block, rendered as a **click-to-load**
+  box: a lazy thumbnail and zero third-party requests until the reader chooses
+  to play. YouTube's thumbnail is derived from the video id; Rumble's title
+  and thumbnail are fetched once, best-effort, via oEmbed at save time. Embeds
+  render privacy-first (`youtube-nocookie.com`, `referrerpolicy="no-referrer"`)
+  and articles gain `og:video` + a JSON-LD `VideoObject`.
 - **Per-block analytics** — privacy-lean browser tracking (banded scroll depth,
   completion, read time, block impressions), estimated reach and drop-off per
   block, honestly labeled ("estimated") because blockers and JS-disabled

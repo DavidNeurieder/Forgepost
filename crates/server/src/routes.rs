@@ -1303,7 +1303,8 @@ pub(crate) async fn apply_markdown(
     doc: &mut Document,
     markdown: &str,
 ) -> Result<(), ApiError> {
-    let parsed = forgepost_content::parse_markdown(markdown);
+    let mut parsed = forgepost_content::parse_markdown(markdown);
+    crate::oembed::enrich_video_metadata(&mut parsed).await;
     let merged = forgepost_content::merge_blocks(
         &doc.blocks,
         &doc.versions,
