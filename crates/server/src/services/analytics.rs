@@ -7,11 +7,14 @@ use uuid::Uuid;
 
 use crate::analytics::{RateLimiter, block_stats, preview_text};
 use crate::model::{AnalyticsEvent, DashboardMetric};
-use crate::repository::Repository;
+use crate::repository::{AnalyticsRepo, CommentRepo, DocumentRepo, ExperimentRepo, Repository};
 use crate::services::ServiceError;
 
 pub struct AnalyticsService {
-    repo: Arc<dyn Repository>,
+    analytics_repo: Arc<dyn AnalyticsRepo>,
+    doc_repo: Arc<dyn DocumentRepo>,
+    exp_repo: Arc<dyn ExperimentRepo>,
+    comment_repo: Arc<dyn CommentRepo>,
     rate_limiter: RateLimiter,
 }
 
@@ -28,7 +31,13 @@ pub struct ParsedEvent {
 
 impl AnalyticsService {
     pub fn new(repo: Arc<dyn Repository>, rate_limiter: RateLimiter) -> Self {
-        Self { repo, rate_limiter }
+        Self {
+            analytics_repo: repo.clone(),
+            doc_repo: repo.clone(),
+            exp_repo: repo.clone(),
+            comment_repo: repo,
+            rate_limiter,
+        }
     }
 
     /// Check rate limit. Returns `Ok(())` if allowed, `Err(RateLimited)` otherwise.
@@ -50,7 +59,7 @@ impl AnalyticsService {
         user_agent: Option<String>,
     ) -> Result<(), ServiceError> {
         let full = self
-            .repo
+            .doc_repo
             .get_published_by_slug(slug)
             .await?
             .ok_or_else(|| ServiceError::Validation("article not found".into()))?;
@@ -66,7 +75,7 @@ impl AnalyticsService {
         // Validate experiment references.
         if let (Some(exp_id), Some(variant_id)) = (parsed.experiment_id, parsed.variant_id) {
             let exp = self
-                .repo
+                .exp_repo
                 .experiment(exp_id)
                 .await?
                 .ok_or_else(|| ServiceError::Validation("unknown experiment".into()))?;
@@ -79,7 +88,7 @@ impl AnalyticsService {
                 ));
             }
             if !self
-                .repo
+                .exp_repo
                 .experiment_variant_belongs(exp_id, variant_id)
                 .await?
             {
@@ -91,7 +100,7 @@ impl AnalyticsService {
 
         // Validate recommendation slug.
         if let Some(target) = parsed.recommended_slug.as_deref()
-            && self.repo.get_published_by_slug(target).await?.is_none()
+            && self.doc_repo.get_published_by_slug(target).await?.is_none()
         {
             return Err(ServiceError::Validation(
                 "recommended article not found".into(),
@@ -114,7 +123,7 @@ impl AnalyticsService {
             recommended_slug: parsed.recommended_slug.clone(),
             created_at_ms: now_ms(),
         };
-        self.repo.record_analytics_event(&event).await?;
+        self.analytics_repo.record_analytics_event(&event).await?;
         Ok(())
     }
 
@@ -125,7 +134,7 @@ impl AnalyticsService {
         owner_id: Uuid,
     ) -> Result<crate::analytics::DocumentStatsView, ServiceError> {
         let full = self
-            .repo
+            .doc_repo
             .get_document(document_id)
             .await?
             .ok_or_else(|| ServiceError::Validation("document not found".into()))?;
@@ -133,9 +142,9 @@ impl AnalyticsService {
             return Err(ServiceError::Forbidden);
         }
 
-        let mut article = self.repo.article_stats(document_id).await?;
-        let band_reach = self.repo.band_reach(document_id).await?;
-        let impressions = self.repo.block_impressions(document_id).await?;
+        let mut article = self.analytics_repo.article_stats(document_id).await?;
+        let band_reach = self.analytics_repo.band_reach(document_id).await?;
+        let impressions = self.analytics_repo.block_impressions(document_id).await?;
         article.band_reach = band_reach.clone();
         article.completion = band_reach
             .iter()
@@ -162,8 +171,8 @@ impl AnalyticsService {
 
     /// Dashboard metrics: best post, nudge, and per-document metrics.
     pub async fn dashboard(&self, owner_id: Uuid) -> Result<DashboardResult, ServiceError> {
-        let docs = self.repo.list_documents(owner_id).await?;
-        let metrics = self.repo.dashboard_metrics(now_ms()).await?;
+        let docs = self.doc_repo.list_documents(owner_id).await?;
+        let metrics = self.analytics_repo.dashboard_metrics(now_ms()).await?;
         let by_id: std::collections::HashMap<Uuid, DashboardMetric> =
             metrics.into_iter().map(|m| (m.document_id, m)).collect();
 
@@ -220,7 +229,7 @@ impl AnalyticsService {
 
         Ok(DashboardResult {
             docs,
-            pending: self.repo.pending_comments().await?,
+            pending: self.comment_repo.pending_comments().await?,
             best_post,
             nudge,
             doc_metrics,

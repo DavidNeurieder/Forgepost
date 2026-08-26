@@ -5,16 +5,20 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::model::{ExperimentRecord, ExperimentVariantInput, NewExperiment};
-use crate::repository::Repository;
+use crate::repository::{DocumentRepo, ExperimentRepo, Repository};
 use crate::services::ServiceError;
 
 pub struct ExperimentService {
-    repo: Arc<dyn Repository>,
+    exp_repo: Arc<dyn ExperimentRepo>,
+    doc_repo: Arc<dyn DocumentRepo>,
 }
 
 impl ExperimentService {
     pub fn new(repo: Arc<dyn Repository>) -> Self {
-        Self { repo }
+        Self {
+            exp_repo: repo.clone(),
+            doc_repo: repo,
+        }
     }
 
     /// All experiments for a document, with live reports.
@@ -24,7 +28,7 @@ impl ExperimentService {
         owner_id: Uuid,
     ) -> Result<Vec<ExperimentRecord>, ServiceError> {
         let _full = self.verify_document_owner(document_id, owner_id).await?;
-        Ok(self.repo.experiments_for_document(document_id).await?)
+        Ok(self.exp_repo.experiments_for_document(document_id).await?)
     }
 
     /// Create an experiment overlay on a block.
@@ -79,7 +83,7 @@ impl ExperimentService {
             variants,
         };
         Ok(self
-            .repo
+            .exp_repo
             .create_experiment(document_id, block_id, &new)
             .await?)
     }
@@ -124,14 +128,14 @@ impl ExperimentService {
     /// Start a draft experiment.
     pub async fn start(&self, id: Uuid, owner_id: Uuid) -> Result<(), ServiceError> {
         let exp = self.verify_experiment_owner(id, owner_id).await?;
-        self.repo.start_experiment(exp.id).await?;
+        self.exp_repo.start_experiment(exp.id).await?;
         Ok(())
     }
 
     /// Stop a running experiment.
     pub async fn stop(&self, id: Uuid, owner_id: Uuid) -> Result<(), ServiceError> {
         let exp = self.verify_experiment_owner(id, owner_id).await?;
-        self.repo.stop_experiment(exp.id).await?;
+        self.exp_repo.stop_experiment(exp.id).await?;
         Ok(())
     }
 
@@ -142,7 +146,7 @@ impl ExperimentService {
         owner_id: Uuid,
     ) -> Result<Option<crate::experiments::DecisionOutcome>, ServiceError> {
         let exp = self.verify_experiment_owner(id, owner_id).await?;
-        Ok(crate::experiments::decide_experiment(&*self.repo, exp.id).await?)
+        Ok(crate::experiments::decide_experiment(&*self.exp_repo, exp.id).await?)
     }
 
     /// Manual override: promote the current best variant.
@@ -152,7 +156,7 @@ impl ExperimentService {
         owner_id: Uuid,
     ) -> Result<crate::experiments::DecisionOutcome, ServiceError> {
         let exp = self.verify_experiment_owner(id, owner_id).await?;
-        Ok(crate::experiments::promote_experiment(&*self.repo, exp.id).await?)
+        Ok(crate::experiments::promote_experiment(&*self.exp_repo, exp.id).await?)
     }
 
     /// Manual override: conclude "no improvement".
@@ -162,7 +166,7 @@ impl ExperimentService {
         owner_id: Uuid,
     ) -> Result<crate::experiments::DecisionOutcome, ServiceError> {
         let exp = self.verify_experiment_owner(id, owner_id).await?;
-        Ok(crate::experiments::conclude_no_winner(&*self.repo, exp.id).await?)
+        Ok(crate::experiments::conclude_no_winner(&*self.exp_repo, exp.id).await?)
     }
 
     // ------------------------------------------------------------------
@@ -176,7 +180,7 @@ impl ExperimentService {
         owner_id: Uuid,
     ) -> Result<crate::model::FullDocument, ServiceError> {
         let full = self
-            .repo
+            .doc_repo
             .get_document(document_id)
             .await?
             .ok_or_else(|| ServiceError::Validation("document not found".into()))?;
@@ -193,7 +197,7 @@ impl ExperimentService {
         owner_id: Uuid,
     ) -> Result<ExperimentRecord, ServiceError> {
         let exp = self
-            .repo
+            .exp_repo
             .experiment(experiment_id)
             .await?
             .ok_or_else(|| ServiceError::Validation("experiment not found".into()))?;

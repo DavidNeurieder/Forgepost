@@ -6,11 +6,11 @@ use forgepost_content::{Document, now_ms};
 use uuid::Uuid;
 
 use crate::model::{DocumentSummary, FullDocument};
-use crate::repository::Repository;
+use crate::repository::{DocumentRepo, Repository};
 use crate::services::ServiceError;
 
 pub struct DocumentService {
-    repo: Arc<dyn Repository>,
+    repo: Arc<dyn DocumentRepo>,
 }
 
 /// Result of saving a document: the full document (for re-rendering the view)
@@ -22,7 +22,9 @@ pub struct SaveResult {
 
 impl DocumentService {
     pub fn new(repo: Arc<dyn Repository>) -> Self {
-        Self { repo }
+        Self {
+            repo: repo as Arc<dyn DocumentRepo>,
+        }
     }
 
     /// List all documents owned by `owner_id`.
@@ -150,7 +152,7 @@ impl DocumentService {
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn apply_markdown(
-    repo: &dyn Repository,
+    repo: &dyn DocumentRepo,
     doc: &mut Document,
     markdown: &str,
 ) -> Result<(), ServiceError> {

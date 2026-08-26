@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::auth::{AuthUser, verify_csrf};
 use crate::error::ApiError;
 use crate::model::{AnalyticsEvent, DocumentSummary, FullDocument, User};
-use crate::{AppState, repository::Repository};
+use crate::{AppState, repository::DocumentRepo};
 
 /// Anonymous visitor cookie used to de-duplicate unique readers.
 pub const VISITOR_COOKIE: &str = "opv";
@@ -1126,7 +1126,7 @@ fn comment_view(c: crate::model::Comment) -> CommentView {
 }
 
 pub(crate) async fn apply_markdown(
-    repo: &dyn Repository,
+    repo: &dyn DocumentRepo,
     doc: &mut Document,
     markdown: &str,
 ) -> Result<(), ApiError> {

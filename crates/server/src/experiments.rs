@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::model::{ExperimentCounts, ExperimentDecision, ExperimentRecord};
-use crate::repository::{Repository, RepositoryError};
+use crate::repository::{ExperimentRepo, RepositoryError};
 
 // ---------------------------------------------------------------------------
 // Response DTOs (mirror of `ExperimentRecord` + live report + decisions).
@@ -86,7 +86,7 @@ pub fn config_from(exp: &ExperimentRecord) -> EngineConfig {
 
 /// Build the full admin view for one experiment: record, live report, decisions.
 pub async fn experiment_view(
-    repo: &dyn Repository,
+    repo: &dyn ExperimentRepo,
     exp: &ExperimentRecord,
 ) -> Result<ExperimentView, RepositoryError> {
     let report = if exp.status == "running" {
@@ -200,7 +200,7 @@ pub fn live_report(exp: &ExperimentRecord, counts: &[ExperimentCounts]) -> Exper
 /// records the append-only decision row. Returns the outcome, or `None` when
 /// the engine says to keep collecting (or the experiment is not running).
 pub async fn decide_experiment(
-    repo: &dyn Repository,
+    repo: &dyn ExperimentRepo,
     id: Uuid,
 ) -> Result<Option<DecisionOutcome>, RepositoryError> {
     let exp = repo
@@ -240,7 +240,7 @@ pub async fn decide_experiment(
 
 /// Manual "ship it": promote the current best variant, whatever the threshold.
 pub async fn promote_experiment(
-    repo: &dyn Repository,
+    repo: &dyn ExperimentRepo,
     id: Uuid,
 ) -> Result<DecisionOutcome, RepositoryError> {
     let exp = repo
@@ -288,7 +288,7 @@ pub async fn promote_experiment(
 
 /// Manual "no improvement": conclude without promoting anything.
 pub async fn conclude_no_winner(
-    repo: &dyn Repository,
+    repo: &dyn ExperimentRepo,
     id: Uuid,
 ) -> Result<DecisionOutcome, RepositoryError> {
     let exp = repo
@@ -338,7 +338,7 @@ fn winner_outcome(
 }
 
 async fn record_decision(
-    repo: &dyn Repository,
+    repo: &dyn ExperimentRepo,
     exp: &ExperimentRecord,
     counts: &[ExperimentCounts],
     outcome: &DecisionOutcome,

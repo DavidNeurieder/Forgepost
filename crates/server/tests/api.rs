@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, Response, StatusCode, header};
 use forgepost_experiments::assign_variant;
 use forgepost_server::app;
-use forgepost_server::repository::{Repository, SqliteRepository};
+use forgepost_server::repository::{DocumentRepo, SettingsRepo, SqliteRepository, UserRepo};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};

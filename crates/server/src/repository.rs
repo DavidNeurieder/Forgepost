@@ -24,9 +24,12 @@ use uuid::Uuid;
 /// One week in milliseconds; the dashboard's "last 7 days" window.
 const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
+// ---------------------------------------------------------------------------
+// Sub-traits: each service depends on the narrowest trait it needs.
+// ---------------------------------------------------------------------------
+
 #[async_trait]
-pub trait Repository: Send + Sync {
-    // Setup / users
+pub trait UserRepo: Send + Sync {
     async fn is_setup_complete(&self) -> Result<bool, RepositoryError>;
     async fn create_first_user(
         &self,
@@ -36,19 +39,25 @@ pub trait Repository: Send + Sync {
     ) -> Result<User, RepositoryError>;
     async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, RepositoryError>;
     async fn find_user_by_id(&self, id: Uuid) -> Result<Option<User>, RepositoryError>;
+}
 
-    // Settings
+#[async_trait]
+pub trait SessionRepo: Send + Sync {
+    async fn create_session(&self, user_id: Uuid) -> Result<Session, RepositoryError>;
+    async fn session_by_token(&self, token: &str) -> Result<Option<Session>, RepositoryError>;
+    async fn delete_session(&self, token: &str) -> Result<(), RepositoryError>;
+}
+
+#[async_trait]
+pub trait SettingsRepo: Send + Sync {
     async fn get_setting(&self, key: &str) -> Result<Option<String>, RepositoryError>;
     async fn set_setting(&self, key: &str, value: &str) -> Result<(), RepositoryError>;
     /// Read the blog-wide settings, applying the defaults for any unset keys.
     async fn site_settings(&self) -> Result<SiteSettings, RepositoryError>;
+}
 
-    // Sessions
-    async fn create_session(&self, user_id: Uuid) -> Result<Session, RepositoryError>;
-    async fn session_by_token(&self, token: &str) -> Result<Option<Session>, RepositoryError>;
-    async fn delete_session(&self, token: &str) -> Result<(), RepositoryError>;
-
-    // Documents
+#[async_trait]
+pub trait DocumentRepo: Send + Sync {
     async fn list_documents(&self, owner_id: Uuid)
     -> Result<Vec<DocumentSummary>, RepositoryError>;
     async fn get_document(&self, id: DocumentId) -> Result<Option<FullDocument>, RepositoryError>;
@@ -98,15 +107,16 @@ pub trait Repository: Send + Sync {
     ) -> Result<Vec<crate::model::PublishedPost>, RepositoryError>;
     /// All non-deleted documents regardless of status (used by `export`).
     async fn list_all_documents(&self) -> Result<Vec<DocumentSummary>, RepositoryError>;
-    // Tags
     async fn set_document_tags(
         &self,
         id: DocumentId,
         tags: &[String],
     ) -> Result<(), RepositoryError>;
     async fn document_tags(&self, id: DocumentId) -> Result<Vec<String>, RepositoryError>;
+}
 
-    // Comments
+#[async_trait]
+pub trait CommentRepo: Send + Sync {
     async fn create_comment(
         &self,
         document_id: DocumentId,
@@ -120,11 +130,10 @@ pub trait Repository: Send + Sync {
     ) -> Result<Vec<Comment>, RepositoryError>;
     async fn pending_comments(&self) -> Result<Vec<Comment>, RepositoryError>;
     async fn set_comment_status(&self, id: Uuid, status: &str) -> Result<(), RepositoryError>;
+}
 
-    // Export
-    async fn export_json(&self) -> Result<serde_json::Value, RepositoryError>;
-
-    // Analytics (M2)
+#[async_trait]
+pub trait AnalyticsRepo: Send + Sync {
     async fn record_analytics_event(&self, event: &AnalyticsEvent) -> Result<(), RepositoryError>;
     async fn article_stats(&self, document_id: DocumentId)
     -> Result<ArticleStats, RepositoryError>;
@@ -146,8 +155,10 @@ pub trait Repository: Send + Sync {
     /// tests can drive results deterministically.
     async fn dashboard_metrics(&self, now_ms: i64)
     -> Result<Vec<DashboardMetric>, RepositoryError>;
+}
 
-    // Experiments (M3)
+#[async_trait]
+pub trait ExperimentRepo: Send + Sync {
     /// Create an experiment as an overlay on a block. Control is the block's
     /// current version; each variant writes a fresh immutable version to the
     /// shared pool without touching the block's canonical `current_version_id`.
@@ -213,8 +224,10 @@ pub trait Repository: Send + Sync {
         id: forgepost_experiments::ExperimentId,
         variant_id: forgepost_experiments::VariantId,
     ) -> Result<bool, RepositoryError>;
+}
 
-    // Full-text search (M5)
+#[async_trait]
+pub trait SearchRepo: Send + Sync {
     /// Search published documents, ranked by BM25. `query` is a plain string;
     /// the last token is treated as a prefix (as-you-type matching).
     async fn search_documents(
@@ -227,13 +240,43 @@ pub trait Repository: Send + Sync {
     async fn refresh_search_index(&self, document_id: DocumentId) -> Result<(), RepositoryError>;
     /// Rebuild the index from scratch for every published document.
     async fn rebuild_search_index_all(&self) -> Result<(), RepositoryError>;
+}
 
-    // Media (M6)
+#[async_trait]
+pub trait MediaRepo: Send + Sync {
     /// Record an uploaded file. The caller writes the bytes to the media
     /// directory itself; this only persists the metadata row.
     async fn insert_media(&self, media: &Media) -> Result<(), RepositoryError>;
     /// Fetch media metadata by the on-disk name (e.g. `<uuid>.png`).
     async fn media_by_disk_name(&self, disk_name: &str) -> Result<Option<Media>, RepositoryError>;
+}
+
+#[async_trait]
+pub trait ExportRepo: Send + Sync {
+    async fn export_json(&self) -> Result<serde_json::Value, RepositoryError>;
+}
+
+// ---------------------------------------------------------------------------
+// Composite trait: the full storage surface used by AppState and route
+// handlers that touch multiple domains. Services should depend on the
+// narrowest sub-trait instead.
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+pub trait Repository:
+    UserRepo
+    + SessionRepo
+    + SettingsRepo
+    + DocumentRepo
+    + CommentRepo
+    + AnalyticsRepo
+    + ExperimentRepo
+    + SearchRepo
+    + MediaRepo
+    + ExportRepo
+    + Send
+    + Sync
+{
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -371,7 +414,10 @@ async fn next_slug(
 }
 
 #[async_trait]
-impl Repository for SqliteRepository {
+impl Repository for SqliteRepository {}
+
+#[async_trait]
+impl UserRepo for SqliteRepository {
     async fn is_setup_complete(&self) -> Result<bool, RepositoryError> {
         let row = sqlx::query("SELECT value FROM settings WHERE key = 'setup.complete'")
             .fetch_optional(&self.pool)
@@ -379,54 +425,6 @@ impl Repository for SqliteRepository {
         Ok(match row {
             Some(r) => r.get::<String, _>("value") == "1",
             None => false,
-        })
-    }
-
-    async fn get_setting(&self, key: &str) -> Result<Option<String>, RepositoryError> {
-        let row = sqlx::query("SELECT value FROM settings WHERE key = ?")
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|r| r.get::<String, _>("value")))
-    }
-
-    async fn set_setting(&self, key: &str, value: &str) -> Result<(), RepositoryError> {
-        sqlx::query(
-            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, strftime('%s','now') * 1000)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                                             updated_at = excluded.updated_at",
-        )
-        .bind(key)
-        .bind(value)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn site_settings(&self) -> Result<SiteSettings, RepositoryError> {
-        let name = self
-            .get_setting("site.name")
-            .await?
-            .unwrap_or_else(|| "Forgepost".into());
-        let theme = self
-            .get_setting("theme")
-            .await?
-            .unwrap_or_else(|| "system".into());
-        let url = self.get_setting("site.url").await?.unwrap_or_default();
-        let tagline = self.get_setting("site.tagline").await?.unwrap_or_default();
-        let image = self.get_setting("site.image").await?.unwrap_or_default();
-        let comments_enabled = self
-            .get_setting("comments.enabled")
-            .await?
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        Ok(SiteSettings {
-            name,
-            theme,
-            url,
-            tagline,
-            image,
-            comments_enabled,
         })
     }
 
@@ -483,7 +481,10 @@ impl Repository for SqliteRepository {
         .await?;
         Ok(row.map(|r| row_to_user(&r)))
     }
+}
 
+#[async_trait]
+impl SessionRepo for SqliteRepository {
     async fn create_session(&self, user_id: Uuid) -> Result<Session, RepositoryError> {
         let token = Uuid::new_v4().to_string();
         let csrf = Uuid::new_v4().to_string();
@@ -529,7 +530,61 @@ impl Repository for SqliteRepository {
             .await?;
         Ok(())
     }
+}
 
+#[async_trait]
+impl SettingsRepo for SqliteRepository {
+    async fn get_setting(&self, key: &str) -> Result<Option<String>, RepositoryError> {
+        let row = sqlx::query("SELECT value FROM settings WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get::<String, _>("value")))
+    }
+
+    async fn set_setting(&self, key: &str, value: &str) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, strftime('%s','now') * 1000)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                             updated_at = excluded.updated_at",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn site_settings(&self) -> Result<SiteSettings, RepositoryError> {
+        let name = self
+            .get_setting("site.name")
+            .await?
+            .unwrap_or_else(|| "Forgepost".into());
+        let theme = self
+            .get_setting("theme")
+            .await?
+            .unwrap_or_else(|| "system".into());
+        let url = self.get_setting("site.url").await?.unwrap_or_default();
+        let tagline = self.get_setting("site.tagline").await?.unwrap_or_default();
+        let image = self.get_setting("site.image").await?.unwrap_or_default();
+        let comments_enabled = self
+            .get_setting("comments.enabled")
+            .await?
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        Ok(SiteSettings {
+            name,
+            theme,
+            url,
+            tagline,
+            image,
+            comments_enabled,
+        })
+    }
+}
+
+#[async_trait]
+impl DocumentRepo for SqliteRepository {
     async fn list_documents(
         &self,
         owner_id: Uuid,
@@ -957,7 +1012,10 @@ impl Repository for SqliteRepository {
         .await?;
         Ok(rows.iter().map(|r| r.get::<String, _>("slug")).collect())
     }
+}
 
+#[async_trait]
+impl CommentRepo for SqliteRepository {
     async fn create_comment(
         &self,
         document_id: DocumentId,
@@ -1053,7 +1111,10 @@ impl Repository for SqliteRepository {
             })
             .collect())
     }
+}
 
+#[async_trait]
+impl ExportRepo for SqliteRepository {
     async fn export_json(&self) -> Result<serde_json::Value, RepositoryError> {
         let settings: Vec<(String, String, i64)> =
             sqlx::query_as("SELECT key, value, updated_at FROM settings")
@@ -1157,7 +1218,10 @@ impl Repository for SqliteRepository {
             "experiment_decisions": experiment_decisions,
         }))
     }
+}
 
+#[async_trait]
+impl AnalyticsRepo for SqliteRepository {
     async fn record_analytics_event(&self, event: &AnalyticsEvent) -> Result<(), RepositoryError> {
         sqlx::query(
             "INSERT INTO analytics_events
@@ -1360,11 +1424,10 @@ impl Repository for SqliteRepository {
             })
             .collect())
     }
+}
 
-    // -----------------------------------------------------------------------
-    // Experiments (M3)
-    // -----------------------------------------------------------------------
-
+#[async_trait]
+impl ExperimentRepo for SqliteRepository {
     async fn create_experiment(
         &self,
         document_id: DocumentId,
@@ -1754,9 +1817,10 @@ impl Repository for SqliteRepository {
         .await?;
         Ok(row.is_some())
     }
+}
 
-    // Full-text search (M5)
-
+#[async_trait]
+impl SearchRepo for SqliteRepository {
     async fn search_documents(
         &self,
         query: &str,
@@ -1895,7 +1959,10 @@ impl Repository for SqliteRepository {
         }
         Ok(())
     }
+}
 
+#[async_trait]
+impl MediaRepo for SqliteRepository {
     async fn insert_media(&self, media: &Media) -> Result<(), RepositoryError> {
         sqlx::query(
             "INSERT INTO media (id, disk_name, content_type, size_bytes, sha256, created_at_ms)

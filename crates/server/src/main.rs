@@ -17,7 +17,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use clap::{Args, Parser, Subcommand};
 use forgepost_server::analytics::RateLimiter;
 use forgepost_server::experiments;
-use forgepost_server::repository::{Repository, SqliteRepository};
+use forgepost_server::repository::{ExportRepo, Repository, SqliteRepository};
 use rustls_acme::AcmeConfig;
 use rustls_acme::caches::DirCache;
 use tokio::net::TcpListener;

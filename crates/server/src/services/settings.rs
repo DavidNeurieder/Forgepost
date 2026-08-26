@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use crate::model::SiteSettings;
-use crate::repository::Repository;
+use crate::repository::{Repository, SettingsRepo};
 use crate::services::ServiceError;
 
 pub struct SettingsService {
-    repo: Arc<dyn Repository>,
+    repo: Arc<dyn SettingsRepo>,
 }
 
 impl SettingsService {

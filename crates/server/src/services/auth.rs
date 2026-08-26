@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::repository::Repository;
+use crate::repository::{Repository, SessionRepo, UserRepo};
 use crate::services::ServiceError;
 
 pub struct AuthService {
-    repo: Arc<dyn Repository>,
+    repo: Arc<dyn UserRepo>,
+    sessions: Arc<dyn SessionRepo>,
 }
 
 /// Result of a successful login/setup: the session token, CSRF token, and the
@@ -21,7 +22,12 @@ pub struct AuthResult {
 
 impl AuthService {
     pub fn new(repo: Arc<dyn Repository>) -> Self {
-        Self { repo }
+        let user_repo: Arc<dyn UserRepo> = repo.clone();
+        let session_repo: Arc<dyn SessionRepo> = repo;
+        Self {
+            repo: user_repo,
+            sessions: session_repo,
+        }
     }
 
     /// Whether the very first user has been created.
@@ -46,7 +52,7 @@ impl AuthService {
             .repo
             .create_first_user(email, display_name, &hash)
             .await?;
-        let session = self.repo.create_session(user.id).await?;
+        let session = self.sessions.create_session(user.id).await?;
         Ok(AuthResult {
             user_id: user.id,
             token: session.token,
@@ -64,7 +70,7 @@ impl AuthService {
         if !crate::auth::verify_password(&user.password_hash, password) {
             return Err(ServiceError::Validation("invalid email or password".into()));
         }
-        let session = self.repo.create_session(user.id).await?;
+        let session = self.sessions.create_session(user.id).await?;
         Ok(AuthResult {
             user_id: user.id,
             token: session.token,
@@ -74,7 +80,7 @@ impl AuthService {
 
     /// Delete the session for `token` (logout).
     pub async fn logout(&self, token: &str) -> Result<(), ServiceError> {
-        self.repo.delete_session(token).await?;
+        self.sessions.delete_session(token).await?;
         Ok(())
     }
 }
