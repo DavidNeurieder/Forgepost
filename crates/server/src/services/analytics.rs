@@ -123,6 +123,7 @@ impl AnalyticsService {
             recommended_slug: parsed.recommended_slug.clone(),
             created_at_ms: now_ms(),
         };
+        tracing::info!(event_type = %parsed.event_type, slug = %slug, "recording analytics event");
         self.analytics_repo.record_analytics_event(&event).await?;
         Ok(())
     }

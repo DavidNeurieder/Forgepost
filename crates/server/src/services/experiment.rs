@@ -128,6 +128,7 @@ impl ExperimentService {
     /// Start a draft experiment.
     pub async fn start(&self, id: Uuid, owner_id: Uuid) -> Result<(), ServiceError> {
         let exp = self.verify_experiment_owner(id, owner_id).await?;
+        tracing::info!(experiment_id = %exp.id, "starting experiment");
         self.exp_repo.start_experiment(exp.id).await?;
         Ok(())
     }
@@ -135,6 +136,7 @@ impl ExperimentService {
     /// Stop a running experiment.
     pub async fn stop(&self, id: Uuid, owner_id: Uuid) -> Result<(), ServiceError> {
         let exp = self.verify_experiment_owner(id, owner_id).await?;
+        tracing::info!(experiment_id = %exp.id, "stopping experiment");
         self.exp_repo.stop_experiment(exp.id).await?;
         Ok(())
     }
@@ -146,6 +148,7 @@ impl ExperimentService {
         owner_id: Uuid,
     ) -> Result<Option<crate::experiments::DecisionOutcome>, ServiceError> {
         let exp = self.verify_experiment_owner(id, owner_id).await?;
+        tracing::info!(experiment_id = %exp.id, "deciding experiment");
         Ok(crate::experiments::decide_experiment(&*self.exp_repo, exp.id).await?)
     }
 

@@ -12,6 +12,7 @@ pub mod recommender;
 pub mod repository;
 pub mod routes;
 pub mod services;
+pub mod worker;
 
 use std::sync::Arc;
 

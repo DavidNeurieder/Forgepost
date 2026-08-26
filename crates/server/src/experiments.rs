@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::model::{ExperimentCounts, ExperimentDecision, ExperimentRecord};
-use crate::repository::{ExperimentRepo, RepositoryError};
+use crate::repository::{ExperimentRepo, Repository, RepositoryError};
 
 // ---------------------------------------------------------------------------
 // Response DTOs (mirror of `ExperimentRecord` + live report + decisions).
@@ -231,6 +231,11 @@ pub async fn decide_experiment(
 
     match outcome {
         Some(o) => {
+            tracing::info!(
+                experiment_id = %id,
+                decision = %o.decision,
+                "experiment decision applied"
+            );
             record_decision(repo, &exp, &counts, &o).await?;
             Ok(Some(o))
         }
@@ -282,6 +287,11 @@ pub async fn promote_experiment(
     };
     let outcome = winner_outcome(&exp, &counts, &best.variant_id, best.prob_beats_control)
         .ok_or_else(|| RepositoryError::InvalidInput("could not resolve winning variant".into()))?;
+    tracing::info!(
+        experiment_id = %id,
+        winner_variant_id = %best.variant_id,
+        "experiment promoted"
+    );
     record_decision(repo, &exp, &counts, &outcome).await?;
     Ok(outcome)
 }
@@ -309,6 +319,10 @@ pub async fn conclude_no_winner(
         confidence: None,
         effect_size: None,
     };
+    tracing::warn!(
+        experiment_id = %id,
+        "experiment concluded with no winner"
+    );
     record_decision(repo, &exp, &counts, &outcome).await?;
     Ok(outcome)
 }
@@ -373,4 +387,32 @@ async fn record_decision(
         &decision,
     )
     .await
+}
+
+/// Evaluate all running experiments and apply decisions.
+///
+/// Called periodically by the background worker. For each running experiment it
+/// runs the sequential-test rules; if a winner is found or the no-improvement
+/// threshold is met, the decision is recorded and applied.
+pub async fn auto_decide_all(repo: &dyn Repository) -> Result<(), RepositoryError> {
+    let ids = repo
+        .running_experiments()
+        .await?
+        .into_iter()
+        .map(|e| e.id)
+        .collect::<Vec<_>>();
+    for id in ids {
+        match decide_experiment(repo, id).await {
+            Ok(Some(outcome)) => tracing::info!(
+                experiment_id = %outcome.experiment_id,
+                decision = %outcome.decision,
+                "auto-decider applied experiment decision"
+            ),
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(experiment_id = %id, error = %err, "auto-decider failed");
+            }
+        }
+    }
+    Ok(())
 }

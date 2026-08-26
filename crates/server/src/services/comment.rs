@@ -64,6 +64,7 @@ impl CommentService {
             .get_published_by_slug(slug)
             .await?
             .ok_or_else(|| ServiceError::Validation("article not found".into()))?;
+        tracing::info!(slug = %slug, author = %author, "creating comment");
         Ok(self
             .comment_repo
             .create_comment(full.document.id, &author, &comment_body)
@@ -72,6 +73,7 @@ impl CommentService {
 
     /// Approve a pending comment.
     pub async fn approve(&self, comment_id: Uuid) -> Result<(), ServiceError> {
+        tracing::info!(comment_id = %comment_id, "approving comment");
         self.comment_repo
             .set_comment_status(comment_id, "approved")
             .await?;

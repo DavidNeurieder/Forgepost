@@ -16,8 +16,8 @@ use axum::{
 use axum_server::tls_rustls::RustlsConfig;
 use clap::{Args, Parser, Subcommand};
 use forgepost_server::analytics::RateLimiter;
-use forgepost_server::experiments;
 use forgepost_server::repository::{ExportRepo, Repository, SqliteRepository};
+use forgepost_server::worker;
 use rustls_acme::AcmeConfig;
 use rustls_acme::caches::DirCache;
 use tokio::net::TcpListener;
@@ -137,8 +137,11 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     tracing::info!(database_url = %args.database_url, "database ready");
     forgepost_server::repository::backfill_search_index(&repo).await?;
 
-    let repo = Arc::new(repo);
-    spawn_auto_decider(repo.clone());
+    let repo: Arc<dyn Repository> = Arc::new(repo);
+
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+    worker::BackgroundWorker::new(repo.clone(), shutdown_rx.clone(), 60).spawn();
 
     let mode = tls_mode(&args)?;
     let secure = matches!(mode, TlsMode::Byo { .. } | TlsMode::Acme { .. });
@@ -156,7 +159,6 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     );
     let socket_addr: std::net::SocketAddr = args.addr.parse()?;
 
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     spawn_shutdown_signal(shutdown_tx);
 
     match mode {
@@ -365,40 +367,6 @@ fn file_mtimes(
 ) -> (Option<std::time::SystemTime>, Option<std::time::SystemTime>) {
     let mtime = |p: &Path| std::fs::metadata(p).ok().and_then(|m| m.modified().ok());
     (mtime(cert), mtime(key))
-}
-
-/// Periodically evaluate running experiments and apply decisions (promote a
-/// clear winner or conclude "no improvement"). The engine's stopping rules are
-/// spending-bound corrected and gated by the per-experiment min-sample guard,
-/// so an interval poll is safe to run forever.
-fn spawn_auto_decider(repo: Arc<dyn Repository>) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(60));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            ticker.tick().await;
-            let ids = match repo.running_experiments().await {
-                Ok(list) => list.into_iter().map(|e| e.id).collect::<Vec<_>>(),
-                Err(err) => {
-                    tracing::warn!(error = %err, "auto-decider could not list experiments");
-                    continue;
-                }
-            };
-            for id in ids {
-                match experiments::decide_experiment(&*repo, id).await {
-                    Ok(Some(outcome)) => tracing::info!(
-                        experiment_id = %outcome.experiment_id,
-                        decision = %outcome.decision,
-                        "auto-decider applied experiment decision"
-                    ),
-                    Ok(None) => {}
-                    Err(err) => {
-                        tracing::warn!(experiment_id = %id, error = %err, "auto-decider failed");
-                    }
-                }
-            }
-        }
-    });
 }
 
 async fn export(args: ExportArgs) -> anyhow::Result<()> {

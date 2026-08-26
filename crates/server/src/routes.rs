@@ -357,6 +357,7 @@ pub async fn setup_status(State(state): State<AppState>) -> Result<Json<SetupSta
     Ok(Json(SetupStatus { setup_complete }))
 }
 
+#[tracing::instrument(skip(state, body))]
 pub async fn setup(
     State(state): State<AppState>,
     Json(body): Json<SetupRequest>,
@@ -382,6 +383,7 @@ pub async fn setup(
         .into_response())
 }
 
+#[tracing::instrument(skip(state, body))]
 pub async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
@@ -406,6 +408,7 @@ pub async fn login(
         .into_response())
 }
 
+#[tracing::instrument(skip(state, headers, auth))]
 pub async fn logout(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -478,6 +481,7 @@ pub async fn pending_comments(
     Ok(Json(comments.into_iter().map(comment_view).collect()))
 }
 
+#[tracing::instrument(skip(state, headers, auth, body))]
 pub async fn create_document(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -485,6 +489,7 @@ pub async fn create_document(
     Json(body): Json<CreateDocumentRequest>,
 ) -> Result<Json<DocumentView>, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
+    tracing::info!(title = %body.title, "creating document");
     let tags = body.tags.as_deref();
     let result = state
         .document_service
@@ -493,6 +498,7 @@ pub async fn create_document(
     Ok(Json(doc_view(&result.full, result.tags)))
 }
 
+#[tracing::instrument(skip(state, auth))]
 pub async fn get_document(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -504,6 +510,7 @@ pub async fn get_document(
     Ok(Json(doc_view(&full, tags)))
 }
 
+#[tracing::instrument(skip(state, headers, auth, body))]
 pub async fn update_document(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -522,6 +529,7 @@ pub async fn update_document(
     Ok(Json(doc_view(&result.full, result.tags)))
 }
 
+#[tracing::instrument(skip(state, headers, auth))]
 pub async fn publish_document(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -530,6 +538,7 @@ pub async fn publish_document(
 ) -> Result<Json<DocumentView>, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
+    tracing::info!(document_id = %id, "publishing document");
     let result = state.document_service.publish(id, auth.user.id).await?;
     Ok(Json(doc_view(&result.full, result.tags)))
 }
@@ -568,6 +577,7 @@ pub(crate) fn apply_assignments(
     }
 }
 
+#[tracing::instrument(skip(state, headers))]
 pub async fn article(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -598,6 +608,7 @@ pub async fn article(
     Ok((resp_headers, Json(view)).into_response())
 }
 
+#[tracing::instrument(skip(state))]
 pub async fn list_comments(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -606,6 +617,7 @@ pub async fn list_comments(
     Ok(Json(comments.into_iter().map(comment_view).collect()))
 }
 
+#[tracing::instrument(skip(state, body))]
 pub async fn create_comment(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -618,6 +630,7 @@ pub async fn create_comment(
     Ok((StatusCode::CREATED, Json(comment_view(comment))))
 }
 
+#[tracing::instrument(skip(state, headers, auth))]
 pub async fn approve_comment(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -706,6 +719,7 @@ pub async fn sitemap_xml(
 
 /// Collect a tracking event. Public write endpoint: rate-limited per client,
 /// payload-validated, and identity comes from the anonymous `opv` cookie.
+#[tracing::instrument(skip(state, headers, body))]
 pub async fn record_event(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -798,6 +812,7 @@ pub async fn record_event(
 
 /// Per-document analytics for the dashboard: article-level aggregates plus
 /// per-block reach/drop-off ("estimated" labeling; §5.2).
+#[tracing::instrument(skip(state, auth))]
 pub async fn document_stats(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -834,6 +849,7 @@ pub async fn list_experiments(
 }
 
 /// Admin: create an experiment overlay on a block with one or more variants.
+#[tracing::instrument(skip(state, headers, auth, body))]
 pub async fn create_experiment(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -870,6 +886,7 @@ pub async fn create_experiment(
     ))
 }
 
+#[tracing::instrument(skip(state, headers, auth))]
 pub async fn start_experiment(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -882,6 +899,7 @@ pub async fn start_experiment(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[tracing::instrument(skip(state, headers, auth))]
 pub async fn stop_experiment(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -894,6 +912,7 @@ pub async fn stop_experiment(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[tracing::instrument(skip(state, headers, auth))]
 pub async fn decide_experiment(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -906,6 +925,7 @@ pub async fn decide_experiment(
     Ok(Json(outcome))
 }
 
+#[tracing::instrument(skip(state, headers, auth))]
 pub async fn promote_experiment(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -918,6 +938,7 @@ pub async fn promote_experiment(
     Ok(Json(outcome))
 }
 
+#[tracing::instrument(skip(state, headers, auth))]
 pub async fn conclude_no_winner(
     State(state): State<AppState>,
     headers: HeaderMap,
