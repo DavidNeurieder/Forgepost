@@ -7,6 +7,7 @@ use axum::{
 };
 
 use crate::repository::RepositoryError;
+use crate::services::ServiceError;
 
 pub struct ApiError(pub RepositoryError);
 
@@ -60,6 +61,26 @@ impl ApiError {
 impl From<RepositoryError> for ApiError {
     fn from(err: RepositoryError) -> Self {
         Self(err)
+    }
+}
+
+impl From<ServiceError> for ApiError {
+    fn from(err: ServiceError) -> Self {
+        match err {
+            ServiceError::Validation(m) => Self(RepositoryError::InvalidInput(m)),
+            ServiceError::NotFound(m) => Self(RepositoryError::NotFound(m)),
+            ServiceError::Unauthorized => Self(RepositoryError::Unauthorized),
+            ServiceError::Forbidden => Self(RepositoryError::Forbidden),
+            ServiceError::Conflict(m) => Self(RepositoryError::Conflict(m)),
+            ServiceError::RateLimited => Self(RepositoryError::RateLimited),
+            ServiceError::Internal(m) => Self(RepositoryError::InvalidInput(m)),
+        }
+    }
+}
+
+impl From<ServiceError> for PageError {
+    fn from(err: ServiceError) -> Self {
+        Self(ApiError::from(err))
     }
 }
 

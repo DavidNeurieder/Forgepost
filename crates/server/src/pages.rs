@@ -1014,7 +1014,7 @@ pub(crate) async fn search_page(
 }
 
 pub(crate) async fn setup_page(State(state): State<AppState>) -> Result<Response, PageError> {
-    if state.repo.is_setup_complete().await? {
+    if state.auth_service.is_setup_complete().await? {
         return Ok(Redirect::to("/login").into_response());
     }
     let site = site(&state).await?;
@@ -1044,16 +1044,14 @@ pub(crate) async fn setup_form(
             error,
         });
     }
-    if state.repo.is_setup_complete().await? {
+    if state.auth_service.is_setup_complete().await? {
         return Ok(Redirect::to("/login").into_response());
     }
-    let hash = auth::hash_password(&body.password)?;
-    let user = state
-        .repo
-        .create_first_user(&body.email, &body.display, &hash)
+    let result = state
+        .auth_service
+        .setup(&body.email, &body.display, &body.password)
         .await?;
-    let session = state.repo.create_session(user.id).await?;
-    let cookie = auth::set_session_cookie_secure(&session.token, state.secure_cookies);
+    let cookie = auth::set_session_cookie_secure(&result.token, state.secure_cookies);
     Ok(([(header::SET_COOKIE, cookie)], Redirect::to("/admin")).into_response())
 }
 
@@ -1078,7 +1076,7 @@ pub(crate) async fn login_page(
     headers: HeaderMap,
     Query(flash): Query<FlashQuery>,
 ) -> Result<Response, PageError> {
-    if !state.repo.is_setup_complete().await? {
+    if !state.auth_service.is_setup_complete().await? {
         return Ok(Redirect::to("/setup").into_response());
     }
     if auth::session_user(&state, &headers).await.is_some() {
@@ -1099,23 +1097,23 @@ pub(crate) async fn login_form(
     State(state): State<AppState>,
     Form(body): Form<LoginForm>,
 ) -> Result<Response, PageError> {
-    let error = match state.repo.find_user_by_email(&body.email).await? {
-        Some(user) if auth::verify_password(&user.password_hash, &body.password) => {
-            let session = state.repo.create_session(user.id).await?;
-            let cookie = auth::set_session_cookie_secure(&session.token, state.secure_cookies);
-            return Ok(([(header::SET_COOKIE, cookie)], Redirect::to("/admin")).into_response());
+    match state.auth_service.login(&body.email, &body.password).await {
+        Ok(result) => {
+            let cookie = auth::set_session_cookie_secure(&result.token, state.secure_cookies);
+            Ok(([(header::SET_COOKIE, cookie)], Redirect::to("/admin")).into_response())
         }
-        _ => "invalid email or password".to_string(),
-    };
-    let site = site(&state).await?;
-    page(&LoginTemplate {
-        authed: false,
-        flash: String::new(),
-        site_name: site.name,
-        theme: site.theme,
-        year: current_year(),
-        error,
-    })
+        Err(_) => {
+            let site = site(&state).await?;
+            page(&LoginTemplate {
+                authed: false,
+                flash: String::new(),
+                site_name: site.name,
+                theme: site.theme,
+                year: current_year(),
+                error: "invalid email or password".to_string(),
+            })
+        }
+    }
 }
 
 pub(crate) async fn logout_form(
@@ -1128,7 +1126,7 @@ pub(crate) async fn logout_form(
     };
     auth::verify_csrf_form(&headers, body.csrf_token.as_deref(), &auth.csrf_token)?;
     if let Some(token) = auth::cookie(&headers, auth::SESSION_COOKIE) {
-        state.repo.delete_session(&token).await?;
+        state.auth_service.logout(&token).await?;
     }
     Ok((
         [(
@@ -1166,48 +1164,14 @@ pub(crate) async fn dashboard_page(
     let Some(auth) = require_admin(&state, &headers).await? else {
         return Ok(login_redirect());
     };
-    let docs = state.repo.list_documents(auth.user.id).await?;
-    let pending = state.repo.pending_comments().await?;
+    let dash = state.analytics_service.dashboard(auth.user.id).await?;
     let site = site(&state).await?;
-    let metrics = state.repo.dashboard_metrics(now_ms()).await?;
-    let by_id: std::collections::HashMap<Uuid, crate::model::DashboardMetric> =
-        metrics.into_iter().map(|m| (m.document_id, m)).collect();
 
-    let published: Vec<(
-        &crate::model::DocumentSummary,
-        &crate::model::DashboardMetric,
-    )> = docs
-        .iter()
-        .filter(|d| d.status == "published")
-        .filter_map(|d| by_id.get(&d.id).map(|m| (d, m)))
+    let metrics_map: std::collections::HashMap<Uuid, (i64, i64, f64)> = dash
+        .doc_metrics
+        .into_iter()
+        .map(|(id, v7d, vprev, cr)| (id, (v7d, vprev, cr)))
         .collect();
-
-    // Game-feel callout: most-read post this week.
-    let best_post = published
-        .iter()
-        .max_by(|a, b| (a.1.views_7d, a.1.views_total).cmp(&(b.1.views_7d, b.1.views_total)))
-        .filter(|(_, m)| m.views_7d > 0)
-        .map(|(d, m)| BestPost {
-            title: d.title.clone(),
-            id: d.id.to_string(),
-            views: m.views_7d,
-        });
-
-    // Improvement nudge: among posts with at least a few reads, the worst
-    // completion rate. Directs the author to the Stats page to iterate.
-    let nudge = published
-        .iter()
-        .filter(|(_, m)| m.views_total >= 5)
-        .min_by(|a, b| completion_rate(a.1).total_cmp(&completion_rate(b.1)))
-        .filter(|(_, m)| completion_rate(m) < 1.0)
-        .map(|(d, m)| {
-            format!(
-                "Only {}% of readers reach the end of “{}”. Try a variant of the opening to keep them reading.",
-                (completion_rate(m) * 100.0).round() as i64,
-                d.title,
-            )
-        })
-        .unwrap_or_default();
 
     page(&DashboardTemplate {
         authed: true,
@@ -1217,31 +1181,36 @@ pub(crate) async fn dashboard_page(
         year: current_year(),
         display_name: auth.user.display_name.clone(),
         csrf_token: auth.csrf_token.clone(),
-        best_post,
-        nudge,
-        docs: docs
+        best_post: dash.best_post.map(|bp| BestPost {
+            title: bp.title,
+            id: bp.id,
+            views: bp.views,
+        }),
+        nudge: dash.nudge,
+        docs: dash
+            .docs
             .iter()
             .map(|d| {
-                let m = by_id.get(&d.id);
+                let (views_7d, views_prev_7d, completion) =
+                    metrics_map.get(&d.id).copied().unwrap_or((0, 0, 0.0));
                 DashboardDoc {
                     id: d.id.to_string(),
                     title: d.title.clone(),
                     status: d.status.clone(),
                     created: format_date(Some(d.created_at_ms)),
                     updated: format_date(Some(d.updated_at_ms)),
-                    views_7d: m.map(|m| m.views_7d).unwrap_or(0),
-                    delta: delta_label(
-                        m.map(|m| m.views_7d).unwrap_or(0),
-                        m.map(|m| m.views_prev_7d).unwrap_or(0),
-                    ),
-                    completion: m
-                        .filter(|m| m.views_total > 0)
-                        .map(|m| format_pct(completion_rate(m)))
-                        .unwrap_or_else(|| "—".into()),
+                    views_7d,
+                    delta: delta_label(views_7d, views_prev_7d),
+                    completion: if views_7d > 0 {
+                        format_pct(completion)
+                    } else {
+                        "—".into()
+                    },
                 }
             })
             .collect(),
-        pending: pending
+        pending: dash
+            .pending
             .iter()
             .map(|c| PendingComment {
                 id: c.id.to_string(),
@@ -1251,15 +1220,6 @@ pub(crate) async fn dashboard_page(
             })
             .collect(),
     })
-}
-
-/// Lifetime fraction (0..=1) of pageviews that reached 100%.
-fn completion_rate(m: &crate::model::DashboardMetric) -> f64 {
-    if m.views_total <= 0 {
-        0.0
-    } else {
-        m.completed as f64 / m.views_total as f64
-    }
 }
 
 /// "+42%"/"−13%" vs last week; `new` for a post with no prior-window views;
@@ -1284,8 +1244,11 @@ pub(crate) async fn new_post(
         return Ok(login_redirect());
     };
     auth::verify_csrf_form(&headers, body.csrf_token.as_deref(), &auth.csrf_token)?;
-    let doc = state.repo.create_document(auth.user.id, "Untitled").await?;
-    let uri = format!("/admin/editor/{}", doc.document.id);
+    let result = state
+        .document_service
+        .create(auth.user.id, "Untitled", None, None)
+        .await?;
+    let uri = format!("/admin/editor/{}", result.full.document.id);
     Ok(Redirect::to(&uri).into_response())
 }
 
@@ -1299,14 +1262,7 @@ pub(crate) async fn editor_page(
         return Ok(login_redirect());
     };
     let id = parse_uuid(&id)?;
-    let full = state
-        .repo
-        .get_document(id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    if full.owner_id != auth.user.id {
-        return Err(ApiError::forbidden().into());
-    }
+    let full = state.document_service.get_owned(id, auth.user.id).await?;
     let tags = state.repo.document_tags(id).await?;
     let site = site(&state).await?;
     page(&EditorTemplate {
@@ -1336,29 +1292,10 @@ pub(crate) async fn editor_save(
     };
     auth::verify_csrf_form(&headers, body.csrf_token.as_deref(), &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
-    let mut full = state
-        .repo
-        .get_document(id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    if full.owner_id != auth.user.id {
-        return Err(ApiError::forbidden().into());
-    }
-    let title = body.title.trim().to_string();
-    if !title.is_empty() {
-        state.repo.update_document_title(id, &title).await?;
-        if full.status == "draft" {
-            state.repo.regenerate_draft_slug(id, &title).await?;
-        }
-    }
-    crate::routes::apply_markdown(&*state.repo, &mut full.document, &body.markdown).await?;
-    let tags: Vec<String> = body
-        .tags
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    state.repo.set_document_tags(id, &tags).await?;
+    state
+        .document_service
+        .editor_save(id, auth.user.id, &body.title, &body.markdown, &body.tags)
+        .await?;
     let uri = format!("/admin/editor/{id}?flash=saved");
     Ok(Redirect::to(&uri).into_response())
 }
@@ -1374,15 +1311,7 @@ pub(crate) async fn editor_publish(
     };
     auth::verify_csrf_form(&headers, body.csrf_token.as_deref(), &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
-    let full = state
-        .repo
-        .get_document(id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    if full.owner_id != auth.user.id {
-        return Err(ApiError::forbidden().into());
-    }
-    state.repo.publish_document(id).await?;
+    state.document_service.publish(id, auth.user.id).await?;
     let uri = format!("/admin/editor/{id}?flash=published");
     Ok(Redirect::to(&uri).into_response())
 }
@@ -1398,15 +1327,7 @@ pub(crate) async fn delete_post(
     };
     auth::verify_csrf_form(&headers, body.csrf_token.as_deref(), &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
-    let full = state
-        .repo
-        .get_document(id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    if full.owner_id != auth.user.id {
-        return Err(ApiError::forbidden().into());
-    }
-    state.repo.delete_document(id).await?;
+    state.document_service.delete(id, auth.user.id).await?;
     Ok(Redirect::to("/admin?flash=deleted").into_response())
 }
 
@@ -1421,7 +1342,7 @@ pub(crate) async fn approve_comment(
     };
     auth::verify_csrf_form(&headers, body.csrf_token.as_deref(), &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
-    state.repo.set_comment_status(id, "approved").await?;
+    state.comment_service.approve(id).await?;
     Ok(Redirect::to("/admin?flash=comment_approved").into_response())
 }
 
@@ -1458,24 +1379,14 @@ pub(crate) async fn settings_form(
         return page(&settings_template(site, auth, String::new(), error));
     }
     state
-        .repo
-        .set_setting("site.name", body.name.trim())
-        .await?;
-    state.repo.set_setting("theme", &body.theme).await?;
-    state.repo.set_setting("site.url", body.url.trim()).await?;
-    state
-        .repo
-        .set_setting("site.tagline", body.tagline.trim())
-        .await?;
-    state
-        .repo
-        .set_setting("site.image", body.image.trim())
-        .await?;
-    state
-        .repo
-        .set_setting(
-            "comments.enabled",
-            if body.comments_enabled { "1" } else { "0" },
+        .settings_service
+        .update(
+            &body.name,
+            &body.theme,
+            &body.url,
+            &body.tagline,
+            &body.image,
+            body.comments_enabled,
         )
         .await?;
     Ok(Redirect::to("/admin/settings?flash=settings_saved").into_response())
@@ -1509,38 +1420,6 @@ fn settings_template(
             .collect(),
         error,
     }
-}
-
-fn validate_settings(body: &SettingsForm) -> String {
-    if body.name.trim().is_empty() {
-        return "Enter a blog name.".into();
-    }
-    if body.name.trim().len() > 80 {
-        return "Blog name is too long.".into();
-    }
-    if !THEMES.iter().any(|(value, _)| *value == body.theme) {
-        return "Unknown theme.".into();
-    }
-    let url = body.url.trim();
-    if !(url.is_empty() || url.starts_with("http://") || url.starts_with("https://")) {
-        return "Site URL must start with http:// or https://.".into();
-    }
-    if body.tagline.trim().len() > 200 {
-        return "Tagline is too long (200 characters max).".into();
-    }
-    let image = body.image.trim();
-    if !(image.is_empty()
-        || image.starts_with('/')
-        || image.starts_with("http://")
-        || image.starts_with("https://"))
-    {
-        return "Default image must be an uploaded /media/… URL or a full http:// or https:// URL."
-            .into();
-    }
-    if image.len() > 1000 {
-        return "Default image URL is too long.".into();
-    }
-    String::new()
 }
 
 pub(crate) async fn stats_page(
@@ -1812,50 +1691,32 @@ pub(crate) async fn create_experiment_page(
     };
     auth::verify_csrf_form(&headers, body.csrf_token.as_deref(), &auth.csrf_token)?;
     let doc_id = parse_uuid(&id)?;
-    let full = state
-        .repo
-        .get_document(doc_id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    if full.owner_id != auth.user.id {
-        return Err(ApiError::forbidden().into());
-    }
     let block_id = parse_uuid(&body.block_id)?;
 
-    let mut variants = Vec::new();
-    for (content, weight) in [
-        (&body.variant_1_content, body.variant_1_weight),
-        (&body.variant_2_content, body.variant_2_weight),
-        (&body.variant_3_content, body.variant_3_weight),
-    ] {
-        if !content.trim().is_empty() {
-            variants.push(crate::model::ExperimentVariantInput {
-                content: serde_json::json!({ "text": content.trim() }),
-                weight,
-            });
-        }
-    }
-    let flash = if variants.is_empty() {
-        "variant_required".to_string()
-    } else {
-        let new_exp = crate::model::NewExperiment {
-            name: body.name.trim().to_string(),
-            goal: "completion".into(),
-            traffic_weight: body.traffic_weight,
-            confidence_threshold: 0.95,
-            min_sample_per_variant: 100,
-            no_winner_prob: 0.05,
-            max_duration_ms: 30 * 24 * 60 * 60 * 1000,
-            variants,
-        };
-        match state
-            .repo
-            .create_experiment(doc_id, block_id, &new_exp)
-            .await
-        {
-            Ok(_) => "experiment_created".to_string(),
-            Err(_) => "experiment_failed".to_string(),
-        }
+    let variant_contents: Vec<(&str, f64)> = [
+        (body.variant_1_content.as_str(), body.variant_1_weight),
+        (body.variant_2_content.as_str(), body.variant_2_weight),
+        (body.variant_3_content.as_str(), body.variant_3_weight),
+    ]
+    .iter()
+    .filter(|(content, _)| !content.trim().is_empty())
+    .copied()
+    .collect();
+
+    let flash = match state
+        .experiment_service
+        .create_from_form(
+            doc_id,
+            auth.user.id,
+            &body.name,
+            block_id,
+            body.traffic_weight,
+            &variant_contents,
+        )
+        .await
+    {
+        Ok(_) => "experiment_created".to_string(),
+        Err(_) => "experiment_failed".to_string(),
     };
     let uri = format!("/admin/stats/{doc_id}?flash={flash}");
     Ok(Redirect::to(&uri).into_response())
@@ -1878,39 +1739,70 @@ pub(crate) async fn experiment_action(
         .await?
         .ok_or_else(|| ApiError::bad_request("experiment not found"))?;
     let doc_id = exp.document_id;
-    let full = state
-        .repo
-        .get_document(doc_id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    if full.owner_id != auth.user.id {
-        return Err(ApiError::forbidden().into());
-    }
-    let flash = match action.as_str() {
-        "start" => {
-            state.repo.start_experiment(id).await?;
-            "experiment_started"
-        }
-        "stop" => {
-            state.repo.stop_experiment(id).await?;
-            "experiment_stopped"
-        }
-        "decide" => {
-            crate::experiments::decide_experiment(&*state.repo, id).await?;
-            "experiment_decided"
-        }
-        "promote" => {
-            crate::experiments::promote_experiment(&*state.repo, id).await?;
-            "experiment_decided"
-        }
-        "no-winner" => {
-            crate::experiments::conclude_no_winner(&*state.repo, id).await?;
-            "experiment_decided"
-        }
+
+    let result = match action.as_str() {
+        "start" => state
+            .experiment_service
+            .start(id, auth.user.id)
+            .await
+            .map(|_| "experiment_started"),
+        "stop" => state
+            .experiment_service
+            .stop(id, auth.user.id)
+            .await
+            .map(|_| "experiment_stopped"),
+        "decide" => state
+            .experiment_service
+            .decide(id, auth.user.id)
+            .await
+            .map(|_| "experiment_decided"),
+        "promote" => state
+            .experiment_service
+            .promote(id, auth.user.id)
+            .await
+            .map(|_| "experiment_decided"),
+        "no-winner" => state
+            .experiment_service
+            .conclude_no_winner(id, auth.user.id)
+            .await
+            .map(|_| "experiment_decided"),
         _ => return Err(ApiError::bad_request("unknown action").into()),
     };
+    let flash = result.unwrap_or("experiment_failed");
     let uri = format!("/admin/stats/{doc_id}?flash={flash}");
     Ok(Redirect::to(&uri).into_response())
+}
+
+fn validate_settings(body: &SettingsForm) -> String {
+    if body.name.trim().is_empty() {
+        return "Enter a blog name.".into();
+    }
+    if body.name.trim().len() > 80 {
+        return "Blog name is too long.".into();
+    }
+    if !THEMES.iter().any(|(value, _)| *value == body.theme) {
+        return "Unknown theme.".into();
+    }
+    let url = body.url.trim();
+    if !(url.is_empty() || url.starts_with("http://") || url.starts_with("https://")) {
+        return "Site URL must start with http:// or https://.".into();
+    }
+    if body.tagline.trim().len() > 200 {
+        return "Tagline is too long (200 characters max).".into();
+    }
+    let image = body.image.trim();
+    if !(image.is_empty()
+        || image.starts_with('/')
+        || image.starts_with("http://")
+        || image.starts_with("https://"))
+    {
+        return "Default image must be an uploaded /media/\u{2026} URL or a full http:// or https:// URL."
+            .into();
+    }
+    if image.len() > 1000 {
+        return "Default image URL is too long.".into();
+    }
+    String::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -1951,14 +1843,9 @@ pub(crate) async fn comment_form(
     if comment_body.len() > 2000 {
         return build_article_page(&state, &headers, &slug, None, "Comment too long.").await;
     }
-    let full = state
-        .repo
-        .get_published_by_slug(&slug)
-        .await?
-        .ok_or_else(|| not_found("Article not found"))?;
     state
-        .repo
-        .create_comment(full.document.id, &author, &comment_body)
+        .comment_service
+        .create(&slug, &author, &comment_body)
         .await?;
     let uri = format!("/articles/{slug}?flash=comment_pending");
     Ok(Redirect::to(&uri).into_response())

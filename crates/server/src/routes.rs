@@ -12,7 +12,6 @@ use forgepost_experiments::{ExperimentId, VariantId, assign_variant};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::analytics::{block_stats, preview_text};
 use crate::auth::{AuthUser, verify_csrf};
 use crate::error::ApiError;
 use crate::model::{AnalyticsEvent, DocumentSummary, FullDocument, User};
@@ -362,23 +361,22 @@ pub async fn setup(
     State(state): State<AppState>,
     Json(body): Json<SetupRequest>,
 ) -> Result<Response, ApiError> {
-    if state.repo.is_setup_complete().await? {
-        return Err(ApiError::conflict("already set up"));
-    }
-    validate_credentials(&body.email, &body.password)?;
-    let hash = crate::auth::hash_password(&body.password)?;
-    let user = state
-        .repo
-        .create_first_user(&body.email, &body.display_name, &hash)
+    let result = state
+        .auth_service
+        .setup(&body.email, &body.display_name, &body.password)
         .await?;
-    let session = state.repo.create_session(user.id).await?;
-    let cookie = crate::auth::set_session_cookie_secure(&session.token, state.secure_cookies);
+    let cookie = crate::auth::set_session_cookie_secure(&result.token, state.secure_cookies);
     Ok((
         StatusCode::OK,
         [(header::SET_COOKIE, cookie)],
         Json(SessionResponse {
-            user: user.into(),
-            csrf_token: session.csrf,
+            user: state
+                .repo
+                .find_user_by_id(result.user_id)
+                .await?
+                .ok_or_else(|| ApiError::bad_request("user not found"))?
+                .into(),
+            csrf_token: result.csrf,
         }),
     )
         .into_response())
@@ -388,21 +386,21 @@ pub async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
-    let user = state
-        .repo
-        .find_user_by_email(&body.email)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("invalid email or password"))?;
-    if !crate::auth::verify_password(&user.password_hash, &body.password) {
-        return Err(ApiError::bad_request("invalid email or password"));
-    }
-    let session = state.repo.create_session(user.id).await?;
-    let cookie = crate::auth::set_session_cookie_secure(&session.token, state.secure_cookies);
+    let result = state
+        .auth_service
+        .login(&body.email, &body.password)
+        .await?;
+    let cookie = crate::auth::set_session_cookie_secure(&result.token, state.secure_cookies);
     Ok((
         [(header::SET_COOKIE, cookie)],
         Json(SessionResponse {
-            user: user.into(),
-            csrf_token: session.csrf,
+            user: state
+                .repo
+                .find_user_by_id(result.user_id)
+                .await?
+                .ok_or_else(|| ApiError::bad_request("user not found"))?
+                .into(),
+            csrf_token: result.csrf,
         }),
     )
         .into_response())
@@ -416,7 +414,7 @@ pub async fn logout(
     verify_csrf(&headers, &auth.csrf_token)?;
     let token = crate::auth::cookie(&headers, crate::auth::SESSION_COOKIE);
     if let Some(token) = token {
-        state.repo.delete_session(&token).await?;
+        state.auth_service.logout(&token).await?;
     }
     Ok((
         [(
@@ -487,22 +485,12 @@ pub async fn create_document(
     Json(body): Json<CreateDocumentRequest>,
 ) -> Result<Json<DocumentView>, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
-    let title = body.title.trim().to_string();
-    if title.is_empty() {
-        return Err(ApiError::bad_request("title is required"));
-    }
-    let mut full = state.repo.create_document(auth.user.id, &title).await?;
-    if let Some(markdown) = body.markdown {
-        apply_markdown(&*state.repo, &mut full.document, &markdown).await?;
-    }
-    if let Some(tags) = body.tags {
-        state
-            .repo
-            .set_document_tags(full.document.id, &tags)
-            .await?;
-    }
-    let tags = state.repo.document_tags(full.document.id).await?;
-    Ok(Json(doc_view(&full, tags)))
+    let tags = body.tags.as_deref();
+    let result = state
+        .document_service
+        .create(auth.user.id, &body.title, body.markdown.as_deref(), tags)
+        .await?;
+    Ok(Json(doc_view(&result.full, result.tags)))
 }
 
 pub async fn get_document(
@@ -511,14 +499,7 @@ pub async fn get_document(
     Path(id): Path<String>,
 ) -> Result<Json<DocumentView>, ApiError> {
     let id = parse_uuid(&id)?;
-    let full = state
-        .repo
-        .get_document(id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    if full.owner_id != auth.user.id {
-        return Err(ApiError::forbidden());
-    }
+    let full = state.document_service.get_owned(id, auth.user.id).await?;
     let tags = state.repo.document_tags(id).await?;
     Ok(Json(doc_view(&full, tags)))
 }
@@ -532,34 +513,13 @@ pub async fn update_document(
 ) -> Result<Json<DocumentView>, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
-    let mut full = state
-        .repo
-        .get_document(id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    if full.owner_id != auth.user.id {
-        return Err(ApiError::forbidden());
-    }
-    if let Some(title) = body.title {
-        let title = title.trim().to_string();
-        if !title.is_empty() {
-            full.document.title = title.clone();
-            state.repo.update_document_title(id, &title).await?;
-        }
-    }
-    if let Some(markdown) = body.markdown {
-        apply_markdown(&*state.repo, &mut full.document, &markdown).await?;
-    }
-    if let Some(tags) = body.tags {
-        state.repo.set_document_tags(id, &tags).await?;
-    }
-    let full = state
-        .repo
-        .get_document(id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    let tags = state.repo.document_tags(id).await?;
-    Ok(Json(doc_view(&full, tags)))
+    let title = body.title.as_deref();
+    let tags = body.tags.as_deref().unwrap_or(&[]);
+    let result = state
+        .document_service
+        .save(id, auth.user.id, title, body.markdown.as_deref(), tags)
+        .await?;
+    Ok(Json(doc_view(&result.full, result.tags)))
 }
 
 pub async fn publish_document(
@@ -570,22 +530,8 @@ pub async fn publish_document(
 ) -> Result<Json<DocumentView>, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
-    let full = state
-        .repo
-        .get_document(id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    if full.owner_id != auth.user.id {
-        return Err(ApiError::forbidden());
-    }
-    state.repo.publish_document(id).await?;
-    let full = state
-        .repo
-        .get_document(id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    let tags = state.repo.document_tags(id).await?;
-    Ok(Json(doc_view(&full, tags)))
+    let result = state.document_service.publish(id, auth.user.id).await?;
+    Ok(Json(doc_view(&result.full, result.tags)))
 }
 
 /// Overlay running experiments onto a rendered article view: swap each block
@@ -656,18 +602,7 @@ pub async fn list_comments(
     State(state): State<AppState>,
     Path(slug): Path<String>,
 ) -> Result<Json<Vec<CommentView>>, ApiError> {
-    if !state.repo.site_settings().await?.comments_enabled {
-        return Ok(Json(Vec::new()));
-    }
-    let full = state
-        .repo
-        .get_published_by_slug(&slug)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("article not found"))?;
-    let comments = state
-        .repo
-        .comments_for_document(full.document.id, Some("approved"))
-        .await?;
+    let comments = state.comment_service.list_approved(&slug).await?;
     Ok(Json(comments.into_iter().map(comment_view).collect()))
 }
 
@@ -676,25 +611,9 @@ pub async fn create_comment(
     Path(slug): Path<String>,
     Json(body): Json<CommentRequest>,
 ) -> Result<(StatusCode, Json<CommentView>), ApiError> {
-    if !state.repo.site_settings().await?.comments_enabled {
-        return Err(ApiError::bad_request("comments are disabled"));
-    }
-    let full = state
-        .repo
-        .get_published_by_slug(&slug)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("article not found"))?;
-    let author = body.author_name.trim().to_string();
-    let comment_body = body.body.trim().to_string();
-    if author.is_empty() || comment_body.is_empty() {
-        return Err(ApiError::bad_request("name and comment are required"));
-    }
-    if comment_body.len() > 2000 {
-        return Err(ApiError::bad_request("comment too long"));
-    }
     let comment = state
-        .repo
-        .create_comment(full.document.id, &author, &comment_body)
+        .comment_service
+        .create(&slug, &body.author_name, &body.body)
         .await?;
     Ok((StatusCode::CREATED, Json(comment_view(comment))))
 }
@@ -707,7 +626,7 @@ pub async fn approve_comment(
 ) -> Result<StatusCode, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
-    state.repo.set_comment_status(id, "approved").await?;
+    state.comment_service.approve(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -885,42 +804,11 @@ pub async fn document_stats(
     Path(id): Path<String>,
 ) -> Result<Json<crate::analytics::DocumentStatsView>, ApiError> {
     let id = parse_uuid(&id)?;
-    let full = state
-        .repo
-        .get_document(id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    if full.owner_id != auth.user.id {
-        return Err(ApiError::forbidden());
-    }
-
-    let mut article = state.repo.article_stats(id).await?;
-    let band_reach = state.repo.band_reach(id).await?;
-    let impressions = state.repo.block_impressions(id).await?;
-    article.band_reach = band_reach.clone();
-    article.completion = band_reach
-        .iter()
-        .find(|b| b.band == 100)
-        .map(|b| b.pageviews)
-        .filter(|&completed| completed > 0)
-        .map(|completed| completed as f64 / article.views.max(1) as f64);
-
-    let mut blocks_sorted: Vec<&forgepost_content::Block> = full.document.blocks.iter().collect();
-    blocks_sorted.sort_by_key(|b| b.position);
-    let layout: Vec<(Uuid, i64, String, String)> = blocks_sorted
-        .iter()
-        .filter_map(|b| {
-            let kind = format!("{:?}", b.kind);
-            full.document
-                .current_content(b.id)
-                .map(|c| (b.id, b.position, kind.clone(), preview_text(&kind, c)))
-        })
-        .collect();
-    let blocks = block_stats(&layout, &impressions, &band_reach, article.views);
-    Ok(Json(crate::analytics::DocumentStatsView {
-        article,
-        blocks,
-    }))
+    let stats = state
+        .analytics_service
+        .document_stats(id, auth.user.id)
+        .await?;
+    Ok(Json(stats))
 }
 
 // ---------------------------------------------------------------------------
@@ -934,15 +822,10 @@ pub async fn list_experiments(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<crate::experiments::ExperimentView>>, ApiError> {
     let id = parse_uuid(&id)?;
-    let full = state
-        .repo
-        .get_document(id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    if full.owner_id != auth.user.id {
-        return Err(ApiError::forbidden());
-    }
-    let experiments = state.repo.experiments_for_document(id).await?;
+    let experiments = state
+        .experiment_service
+        .list_for_document(id, auth.user.id)
+        .await?;
     let mut views = Vec::new();
     for exp in experiments {
         views.push(crate::experiments::experiment_view(&*state.repo, &exp).await?);
@@ -958,33 +841,6 @@ pub async fn create_experiment(
     Json(body): Json<CreateExperimentRequest>,
 ) -> Result<Json<crate::experiments::ExperimentView>, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
-    let full = state
-        .repo
-        .get_document(body.document_id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    if full.owner_id != auth.user.id {
-        return Err(ApiError::forbidden());
-    }
-    let block = full
-        .document
-        .block(body.block_id)
-        .ok_or_else(|| ApiError::bad_request("block not found in document"))?;
-    if !block.kind.is_experimentable() {
-        return Err(ApiError::bad_request(
-            "this block kind cannot be tested (use a heading, paragraph, image, or CTA)",
-        ));
-    }
-    if body.variants.is_empty() {
-        return Err(ApiError::bad_request("at least one variant is required"));
-    }
-    if body.variants.iter().any(|v| v.weight <= 0.0) {
-        return Err(ApiError::bad_request("variant weights must be positive"));
-    }
-    if !(0.0..=100.0).contains(&body.traffic_weight) {
-        return Err(ApiError::bad_request("traffic weight must be 0–100"));
-    }
-
     let inputs: Vec<crate::model::ExperimentVariantInput> = body
         .variants
         .into_iter()
@@ -994,47 +850,24 @@ pub async fn create_experiment(
         })
         .collect();
     let exp = state
-        .repo
-        .create_experiment(
+        .experiment_service
+        .create(
             body.document_id,
             body.block_id,
-            &crate::model::NewExperiment {
-                name: body.name.trim().to_string(),
-                goal: body.goal,
-                traffic_weight: body.traffic_weight,
-                confidence_threshold: body.confidence_threshold,
-                min_sample_per_variant: body.min_sample_per_variant,
-                no_winner_prob: body.no_winner_prob,
-                max_duration_ms: body.max_duration_ms,
-                variants: inputs,
-            },
+            auth.user.id,
+            &body.name,
+            &body.goal,
+            body.traffic_weight,
+            body.confidence_threshold,
+            body.min_sample_per_variant,
+            body.no_winner_prob,
+            body.max_duration_ms,
+            inputs,
         )
         .await?;
     Ok(Json(
         crate::experiments::experiment_view(&*state.repo, &exp).await?,
     ))
-}
-
-/// Load an experiment and verify the caller owns its document.
-async fn owned_experiment(
-    state: &AppState,
-    auth: &AuthUser,
-    id: Uuid,
-) -> Result<crate::model::ExperimentRecord, ApiError> {
-    let exp = state
-        .repo
-        .experiment(id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("experiment not found"))?;
-    let full = state
-        .repo
-        .get_document(exp.document_id)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("document not found"))?;
-    if full.owner_id != auth.user.id {
-        return Err(ApiError::forbidden());
-    }
-    Ok(exp)
 }
 
 pub async fn start_experiment(
@@ -1045,8 +878,7 @@ pub async fn start_experiment(
 ) -> Result<StatusCode, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
-    owned_experiment(&state, &auth, id).await?;
-    state.repo.start_experiment(id).await?;
+    state.experiment_service.start(id, auth.user.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1058,13 +890,10 @@ pub async fn stop_experiment(
 ) -> Result<StatusCode, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
-    owned_experiment(&state, &auth, id).await?;
-    state.repo.stop_experiment(id).await?;
+    state.experiment_service.stop(id, auth.user.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Run the sequential-test rules now (normally the background auto-decider
-/// does this). Applies a decision if the rules fire.
 pub async fn decide_experiment(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1073,12 +902,10 @@ pub async fn decide_experiment(
 ) -> Result<Json<Option<crate::experiments::DecisionOutcome>>, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
-    owned_experiment(&state, &auth, id).await?;
-    let outcome = crate::experiments::decide_experiment(&*state.repo, id).await?;
+    let outcome = state.experiment_service.decide(id, auth.user.id).await?;
     Ok(Json(outcome))
 }
 
-/// Manual override: promote the current best variant immediately.
 pub async fn promote_experiment(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1087,12 +914,10 @@ pub async fn promote_experiment(
 ) -> Result<Json<crate::experiments::DecisionOutcome>, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
-    owned_experiment(&state, &auth, id).await?;
-    let outcome = crate::experiments::promote_experiment(&*state.repo, id).await?;
+    let outcome = state.experiment_service.promote(id, auth.user.id).await?;
     Ok(Json(outcome))
 }
 
-/// Manual override: conclude "no improvement" without promoting.
 pub async fn conclude_no_winner(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1101,8 +926,10 @@ pub async fn conclude_no_winner(
 ) -> Result<Json<crate::experiments::DecisionOutcome>, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
-    owned_experiment(&state, &auth, id).await?;
-    let outcome = crate::experiments::conclude_no_winner(&*state.repo, id).await?;
+    let outcome = state
+        .experiment_service
+        .conclude_no_winner(id, auth.user.id)
+        .await?;
     Ok(Json(outcome))
 }
 
@@ -1330,18 +1157,6 @@ fn article_html(doc: &Document) -> String {
 
 fn parse_uuid(s: &str) -> Result<Uuid, ApiError> {
     Uuid::parse_str(s).map_err(|_| ApiError::bad_request("invalid id"))
-}
-
-fn validate_credentials(email: &str, password: &str) -> Result<(), ApiError> {
-    if !email.contains('@') || !email.contains('.') {
-        return Err(ApiError::bad_request("invalid email address"));
-    }
-    if password.len() < 8 {
-        return Err(ApiError::bad_request(
-            "password must be at least 8 characters",
-        ));
-    }
-    Ok(())
 }
 
 fn xml_escape(s: &str) -> String {

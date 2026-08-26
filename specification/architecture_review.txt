@@ -1,0 +1,216 @@
+Forgepost Architecture Improvement Plan
+Goal
+
+Evolve Forgepost from a well-structured MVP into a maintainable experimentation platform by strengthening domain boundaries, event handling, and future scalability while keeping the single-binary/self-hosted model.
+
+Phase 1 — Introduce a domain layer
+
+Objective: Make core concepts independent from HTTP, SQLite, and rendering.
+
+Create:
+
+crates/
+├── domain/
+│   ├── post.rs
+│   ├── block.rs
+│   ├── event.rs
+│   ├── experiment.rs
+│   └── visitor.rs
+
+
+Move into domain:
+
+Post
+Block
+Experiment
+Variant
+Analytics Event
+Visitor/session concepts
+
+Rules:
+
+No Axum imports
+No SQL types
+No filesystem access
+Phase 2 — Add application services
+
+Objective: Separate business workflows from infrastructure.
+
+Create:
+
+crates/
+├── application/
+│   ├── publishing/
+│   ├── analytics/
+│   └── experiments/
+
+
+Examples:
+
+PublishPost()
+RecordBlockView()
+AssignExperimentVariant()
+EvaluateExperiment()
+
+
+The server becomes a thin adapter:
+
+HTTP request
+      |
+      v
+Application service
+      |
+      v
+Domain logic
+
+Phase 3 — Make analytics event-driven
+
+Objective: Avoid coupling analytics calculations to requests.
+
+Introduce:
+
+analytics_events
+
+id
+event_type
+timestamp
+post_id
+block_id
+visitor_id
+payload
+version
+
+
+Flow:
+
+Browser
+  |
+  v
+Event API
+  |
+  v
+Event store
+  |
+  v
+Aggregation
+  |
+  v
+Metrics
+
+
+Add:
+
+event versioning
+validation
+rate limiting
+Phase 4 — Isolate persistence
+
+Objective: Keep SQLite replaceable.
+
+Create:
+
+crates/
+├── persistence/
+│   ├── sqlite/
+│   └── repositories/
+
+
+Use interfaces:
+
+trait PostRepository {}
+trait EventRepository {}
+trait ExperimentRepository {}
+
+
+Benefits:
+
+easier testing
+easier Postgres migration later
+cleaner domain code
+Phase 5 — Add background processing
+
+Objective: Move expensive work away from requests.
+
+Introduce internal worker tasks:
+
+Worker
+ |
+ +-- analytics aggregation
+ |
+ +-- experiment evaluation
+ |
+ +-- cleanup jobs
+
+
+Start simple:
+
+Tokio tasks
+SQLite-backed job table
+
+Avoid Redis/queues until needed.
+
+Phase 6 — Strengthen experiment architecture
+
+Objective: Make experimentation reliable.
+
+Separate:
+
+Experiment definition
+        |
+        v
+Variant assignment
+        |
+        v
+Metric collection
+        |
+        v
+Decision engine
+
+
+Add:
+
+minimum sample thresholds
+experiment lifecycle states
+confidence reporting
+manual override
+Phase 7 — Improve observability
+
+Add:
+
+structured logs
+request IDs
+experiment IDs in logs
+metrics endpoint
+
+Track:
+
+events processed
+experiment assignments
+aggregation latency
+database size
+
+Suggested migration order
+Add domain crate
+Move models into domain
+Add repository traits
+Convert analytics to event storage
+Add background worker
+Refactor experiment engine behind application services
+Improve observability
+Target architecture
+                 Web (Axum)
+                     |
+                     v
+              Application Layer
+                     |
+                     v
+               Domain Layer
+                     |
+        +------------+------------+
+        |                         |
+        v                         v
+ Persistence                 Event Processing
+ (SQLite)                    (Workers)
+
+
+This keeps Forgepost simple to deploy while making the architecture ready for larger sites, more contributors, and more sophisticated experimentation.

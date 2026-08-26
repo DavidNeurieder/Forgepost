@@ -11,6 +11,7 @@ pub mod pages;
 pub mod recommender;
 pub mod repository;
 pub mod routes;
+pub mod services;
 
 use std::sync::Arc;
 
@@ -29,6 +30,14 @@ pub struct AppState {
     pub secure_cookies: bool,
     /// Directory where uploaded media bytes live (`/media/*` serves them).
     pub media_dir: std::path::PathBuf,
+    /// Application services — thin wrappers over the repository.
+    pub auth_service: std::sync::Arc<services::auth::AuthService>,
+    pub document_service: std::sync::Arc<services::document::DocumentService>,
+    pub comment_service: std::sync::Arc<services::comment::CommentService>,
+    pub experiment_service: std::sync::Arc<services::experiment::ExperimentService>,
+    pub settings_service: std::sync::Arc<services::settings::SettingsService>,
+    pub analytics_service: std::sync::Arc<services::analytics::AnalyticsService>,
+    pub article_service: std::sync::Arc<services::article::ArticleService>,
 }
 
 /// Build the Axum router with the default analytics rate limit. Storage is
@@ -75,11 +84,31 @@ fn app_with_config(
         Some(dir) => dir,
         None => std::env::temp_dir().join("forgepost-media"),
     };
+    let auth_service = std::sync::Arc::new(services::auth::AuthService::new(repo.clone()));
+    let document_service =
+        std::sync::Arc::new(services::document::DocumentService::new(repo.clone()));
+    let comment_service = std::sync::Arc::new(services::comment::CommentService::new(repo.clone()));
+    let experiment_service =
+        std::sync::Arc::new(services::experiment::ExperimentService::new(repo.clone()));
+    let settings_service =
+        std::sync::Arc::new(services::settings::SettingsService::new(repo.clone()));
+    let analytics_service = std::sync::Arc::new(services::analytics::AnalyticsService::new(
+        repo.clone(),
+        rate_limiter.clone(),
+    ));
+    let article_service = std::sync::Arc::new(services::article::ArticleService::new(repo.clone()));
     let state = AppState {
         repo,
         rate_limiter,
         secure_cookies,
         media_dir,
+        auth_service,
+        document_service,
+        comment_service,
+        experiment_service,
+        settings_service,
+        analytics_service,
+        article_service,
     };
     Router::new()
         // Server-rendered pages (the whole blog UI lives in the binary now).
