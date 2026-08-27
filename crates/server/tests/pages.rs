@@ -12,6 +12,8 @@ use forgepost_application::ports::SettingsRepo;
 use forgepost_infrastructure::sqlite::SqliteRepository;
 use forgepost_server::app;
 use forgepost_server::app_with_media;
+use forgepost_server::app_with_security;
+use forgepost_server::routes::ClientIpConfig;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use sqlx::sqlite::SqlitePoolOptions;
@@ -44,6 +46,31 @@ async fn test_app_with_comments() -> Router {
         .await
         .expect("enable comments");
     app(Arc::new(repo))
+}
+
+/// Like `test_app_with_comments()` but with operator-tunable rate limits and
+/// no `site.url`, so Host-header and throttling behavior are observable.
+async fn test_app_guarded(login_max: u32, comment_max: u32) -> Router {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("memory pool");
+    let repo = SqliteRepository::from_pool(pool);
+    repo.migrate().await.expect("migrations apply");
+    repo.set_setting("comments.enabled", "1")
+        .await
+        .expect("enable comments");
+    app_with_security(
+        Arc::new(repo),
+        RateLimiter::new(1000),
+        RateLimiter::new(login_max),
+        RateLimiter::new(comment_max),
+        Arc::new(ClientIpConfig::default()),
+        None,
+        false,
+        None,
+    )
 }
 
 /// Percent-encode a single form field value (URL-encoded forms).
@@ -363,6 +390,39 @@ async fn login_logout_roundtrip() {
 
     let (status, _) = send(&app, req(Method::GET, "/admin", Some(&cookie), None)).await;
     assert_eq!(status, StatusCode::SEE_OTHER, "session invalidated");
+}
+
+#[tokio::test]
+async fn login_form_is_throttled_after_repeated_failures() {
+    let app = test_app_guarded(2, 1000).await;
+    let _ = setup_owner(&app).await;
+
+    let wrong = || {
+        form_req(
+            Method::POST,
+            "/login",
+            None,
+            &[("email", "a@b.com"), ("password", "wrongpass")],
+        )
+    };
+    // Two failed attempts render the form with an error...
+    for _ in 0..2 {
+        let (status, resp) = send(&app, wrong()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body_text(resp).await.contains("invalid email or password"));
+    }
+    // ...the third is throttled, even with the correct password.
+    let (status, _) = send(
+        &app,
+        form_req(
+            Method::POST,
+            "/login",
+            None,
+            &[("email", "a@b.com"), ("password", "password123")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }
 
 // ---------------------------------------------------------------------------
@@ -960,6 +1020,27 @@ async fn comment_flow_from_public_to_approved() {
             .await
             .contains("Name and comment are required.")
     );
+}
+
+#[tokio::test]
+async fn comment_form_is_throttled_after_rapid_submissions() {
+    let app = test_app_guarded(1000, 2).await;
+    let _ = seed_published(&app).await;
+
+    let comment = || {
+        form_req(
+            Method::POST,
+            "/articles/hello-world/comments",
+            None,
+            &[("author", "Scribbler"), ("body", "Quick note.")],
+        )
+    };
+    for _ in 0..2 {
+        let (status, _) = send(&app, comment()).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "pending flash redirect");
+    }
+    let (status, _) = send(&app, comment()).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }
 
 // ---------------------------------------------------------------------------

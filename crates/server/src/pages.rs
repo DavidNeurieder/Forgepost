@@ -612,8 +612,11 @@ fn format_pct(v: f64) -> String {
     format!("{:.0}%", v * 100.0)
 }
 
-/// Absolute base URL for canonical/OG/sitemap/RSS links: the configured
-/// `site.url` when set, otherwise derived from the request Host + scheme.
+/// Absolute base URL for canonical/OG/sitemap/RSS links. Priority:
+/// `site.url` (admin setting) → `--public-host` → the request Host **only if**
+/// it is a local/private origin, otherwise a safe `localhost` default. Arbitrary
+/// public hostnames are never echoed unless explicitly configured, so a
+/// crafted `Host: attacker.example` header cannot poison generated links.
 pub(crate) fn canonical_base(state: &AppState, site: &SiteSettings, headers: &HeaderMap) -> String {
     if !site.url.is_empty() {
         return site.url.trim_end_matches('/').to_string();
@@ -623,11 +626,58 @@ pub(crate) fn canonical_base(state: &AppState, site: &SiteSettings, headers: &He
     } else {
         "http"
     };
+    if let Some(public_host) = &state.public_host {
+        return format!("{scheme}://{public_host}");
+    }
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost");
-    format!("{scheme}://{host}")
+    if host_allowed_for_links(host) {
+        format!("{scheme}://{host}")
+    } else {
+        tracing::warn!(
+            host,
+            "Host header not in the link allowlist; falling back to localhost. Set Site URL in admin, or pass --public-host."
+        );
+        format!("{scheme}://localhost")
+    }
+}
+
+/// Whether a request `Host` may be used for generated absolute URLs. Allowed:
+/// `localhost`/`.localhost`, loopback/private/link-local/unique-local IPs, and
+/// single-label (LAN/intranet) names. Dotted public hostnames must be
+/// configured via `site.url` or `--public-host`.
+fn host_allowed_for_links(host: &str) -> bool {
+    let host = host.trim();
+    // Strip an IPv6 bracketed form (`[::1]:8080`) or a `:port` suffix.
+    let host = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or_default(),
+        None => host
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .filter(|h| !h.is_empty())
+            .unwrap_or(host),
+    };
+    let host = host.to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v) => v.is_loopback() || v.is_private() || v.is_link_local(),
+            std::net::IpAddr::V6(v) => {
+                v.is_loopback() || v.is_unique_local() || v.is_unicast_link_local()
+            }
+        };
+    }
+    // Single-label names (intranet/LAN) require no configuration to trust.
+    let single_label = host.split('.').count() == 1;
+    let valid_label = !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    single_label && valid_label
 }
 
 /// Full UTC timestamp as ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`) for JSON-LD.
@@ -1095,24 +1145,37 @@ pub(crate) async fn login_page(
 
 pub(crate) async fn login_form(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(body): Form<LoginForm>,
 ) -> Result<Response, PageError> {
-    match state.auth_service.login(&body.email, &body.password).await {
+    match crate::routes::try_login(
+        &state,
+        &crate::routes::client_ip(&headers),
+        &body.email,
+        &body.password,
+    )
+    .await
+    {
         Ok(result) => {
             let cookie = auth::set_session_cookie_secure(&result.token, state.secure_cookies);
             Ok(([(header::SET_COOKIE, cookie)], Redirect::to("/admin")).into_response())
         }
-        Err(_) => {
-            let site = site(&state).await?;
-            page(&LoginTemplate {
-                authed: false,
-                flash: String::new(),
-                site_name: site.name,
-                theme: site.theme,
-                year: current_year(),
-                error: "invalid email or password".to_string(),
-            })
-        }
+        Err(err) => match err {
+            forgepost_application::services::ServiceError::RateLimited => {
+                Err(forgepost_application::services::ServiceError::RateLimited.into())
+            }
+            _ => {
+                let site = site(&state).await?;
+                page(&LoginTemplate {
+                    authed: false,
+                    flash: String::new(),
+                    site_name: site.name,
+                    theme: site.theme,
+                    year: current_year(),
+                    error: "invalid email or password".to_string(),
+                })
+            }
+        },
     }
 }
 
@@ -1830,6 +1893,10 @@ pub(crate) async fn comment_form(
     if !state.repo.site_settings().await?.comments_enabled {
         let uri = format!("/articles/{slug}?flash=comments_disabled");
         return Ok(Redirect::to(&uri).into_response());
+    }
+    let client = crate::routes::client_ip(&headers);
+    if !state.comment_rate_limiter.allow(&client, now_ms()) {
+        return Err(PageError::from(ApiError::rate_limited()));
     }
     let author = body.author.trim().to_string();
     let comment_body = body.body.trim().to_string();

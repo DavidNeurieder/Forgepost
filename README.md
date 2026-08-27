@@ -172,24 +172,63 @@ If you keep an existing nginx/Caddy as a TLS front (optional — the binary does
 not need it), run the server on loopback only:
 
 ```sh
-./forgepost serve --addr 127.0.0.1:8080
+./forgepost serve --addr 127.0.0.1:8080 --public-host example.com
 ```
 
-and proxy everything to it:
+`--public-host` sets the origin used for canonical/OG/RSS/sitemap links (you can
+also set **Site URL** under Settings in the admin UI — that takes precedence).
+Without either, an untrusted `Host` header is never echoed into those links:
+the server falls back to `localhost`, so a spoofed header can't poison SEO or
+feed output.
+
+The server refuses to serve plain HTTP on a non-loopback address unless you
+pass `--insecure-http` (session cookies lack `Secure` under plain HTTP). Keep
+the loopback setup above, or **only** use `--insecure-http` on a private LAN
+you control.
+
+To keep rate limiting per-visitor and per-account behind a reverse proxy, tell
+the server to trust the proxy's `X-Forwarded-For`:
+
+```sh
+./forgepost serve --addr 127.0.0.1:8080 --public-host example.com \
+    --trusted-proxy 127.0.0.1/32
+```
+
+with nginx:
 
 ```nginx
 server {
     listen 80;
     server_name example.com;
-    location / { proxy_pass http://127.0.0.1:8080; }
+    location / {
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_pass http://127.0.0.1:8080;
+    }
 }
 ```
+
+Forgepost never trusts a client-supplied `X-Forwarded-For`; a forged header
+cannot mint a fresh rate-limit budget.
 
 The public blog and RSS are served by the binary itself:
 
 - Public article: `http://127.0.0.1:8080/articles/your-slug`
 - RSS feed: `http://127.0.0.1:8080/rss`
 - Health check: `http://127.0.0.1:8080/health`
+
+### Security defaults
+
+- **Login throttling** (10 failed attempts per client+account per window) and
+  comment spam throttling (10 per client per window) are on by default and
+  enforced before any password or comment work happens.
+- All rate limiting keys on the socket peer, never on forwarded headers, so a
+  single attacker cannot spoof its way around a limit without a trusted proxy
+  in front.
+- The admin/setup endpoints cannot be replayed: `setup` is atomic (concurrent
+  first-login races lose), every authenticated request is CSRF-checked, and
+  passwords are Argon2-hashed.
+- Session cookies get `Secure` under HTTPS and `SameSite=Lax`; visitors get an
+  anonymized `opv` cookie for traffic counting (see privacy link in the footer).
 
 ## Workflow
 
@@ -232,6 +271,10 @@ The `forgepost` binary is configured with CLI flags or environment variables:
 | `--tls-cache-dir` / `FORGEPOST_TLS_CACHE_DIR` | `./tls` | ACME certificate cache directory |
 | `--http-redirect-port` / `FORGEPOST_HTTP_REDIRECT_PORT` | `80` | Port for the HTTP→HTTPS redirect listener |
 | `--no-http-redirect` | off | Do not start the redirect listener under TLS |
+| `--media-dir` / `FORGEPOST_MEDIA_DIR` | next to the database | Where uploaded media is stored (served at `/media`) |
+| `--public-host` / `FORGEPOST_PUBLIC_HOST` | HTTPS domain (ACME) | Origin for canonical/RSS/OG links when Site URL is unset |
+| `--trusted-proxy` / `FORGEPOST_TRUSTED_PROXY` | none | Reverse-proxy IP/CIDR whose `X-Forwarded-For` is honored for rate limiting (repeatable or comma-separated) |
+| `--insecure-http` | off | Allow plain HTTP on a non-loopback address (cookies lose `Secure`) |
 | `RUST_LOG` | `info` | Log verbosity, e.g. `debug`, `forgepost=debug` |
 
 TLS precedence: `--tls-domain` > `--tls-cert`/`--tls-key` > plain HTTP.

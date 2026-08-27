@@ -19,6 +19,7 @@ use forgepost_analytics::RateLimiter;
 use forgepost_application::ports::{ExportRepo, Repository};
 use forgepost_application::worker::BackgroundWorker;
 use forgepost_infrastructure::sqlite::SqliteRepository;
+use ipnet::IpNet;
 use rustls_acme::AcmeConfig;
 use rustls_acme::caches::DirCache;
 use tokio::net::TcpListener;
@@ -74,6 +75,19 @@ struct ServeArgs {
     /// Directory where uploaded media bytes are stored (served at /media).
     #[arg(long, env = "FORGEPOST_MEDIA_DIR")]
     media_dir: Option<PathBuf>,
+    /// Public origin used for canonical/RSS/OG links when `site.url` is unset
+    /// (e.g. `example.com`). Supplied automatically with `--tls-domain`.
+    #[arg(long, env = "FORGEPOST_PUBLIC_HOST")]
+    public_host: Option<String>,
+    /// Reverse proxy whose `x-forwarded-for` may be trusted for rate limiting
+    /// (IP or CIDR, repeatable, comma-separated via env).
+    #[arg(long, env = "FORGEPOST_TRUSTED_PROXY", value_delimiter = ',')]
+    trusted_proxy: Vec<String>,
+    /// Explicitly allow plain HTTP on a non-loopback address. Session cookies
+    /// then lack the `Secure` flag; only use behind a trusted TLS terminator
+    /// reachable exclusively over loopback, or accept the risk on your LAN.
+    #[arg(long, env = "FORGEPOST_INSECURE_HTTP")]
+    insecure_http: bool,
 }
 
 impl Default for ServeArgs {
@@ -88,6 +102,9 @@ impl Default for ServeArgs {
             no_http_redirect: false,
             http_redirect_port: 80,
             media_dir: None,
+            public_host: None,
+            trusted_proxy: Vec::new(),
+            insecure_http: false,
         }
     }
 }
@@ -152,11 +169,21 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     };
     tokio::fs::create_dir_all(&media_dir).await?;
     tracing::info!(media_dir = %media_dir.display(), "media directory ready");
-    let app = forgepost_server::app_with_media(
+    let client_ip = forgepost_server::routes::ClientIpConfig {
+        trusted_proxies: build_trusted_proxies(&args.trusted_proxy)?,
+    };
+    // `--tls-domain` implies the canonical public origin; BYO certs and plain
+    // HTTP need the operator to configure `site.url` or `--public-host`.
+    let public_host = args.public_host.clone().or_else(|| args.tls_domain.clone());
+    let app = forgepost_server::app_with_security(
         repo,
         RateLimiter::new(RateLimiter::DEFAULT_MAX),
+        RateLimiter::new(RateLimiter::DEFAULT_LOGIN_MAX),
+        RateLimiter::new(RateLimiter::DEFAULT_COMMENT_MAX),
+        Arc::new(client_ip),
+        public_host,
         secure,
-        media_dir,
+        Some(media_dir),
     );
     let socket_addr: std::net::SocketAddr = args.addr.parse()?;
 
@@ -164,13 +191,25 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     match mode {
         TlsMode::None => {
+            if !args.insecure_http && !socket_addr.ip().is_loopback() {
+                anyhow::bail!(
+                    "refusing to serve plain HTTP on a non-loopback address ({}): session \
+                     cookies would lack the Secure flag. Bind a loopback address and use a TLS \
+                     front, pass --tls-cert/--tls-key or --tls-domain for HTTPS, or confirm the \
+                     risk with --insecure-http",
+                    args.addr
+                );
+            }
             let listener = TcpListener::bind(socket_addr).await?;
             tracing::info!(addr = %args.addr, "Forgepost listening (http)");
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    shutdown_rx.changed().await.ok();
-                })
-                .await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                shutdown_rx.changed().await.ok();
+            })
+            .await?;
         }
         TlsMode::Byo { cert, key } => {
             let config = RustlsConfig::from_pem_file(&cert, &key).await?;
@@ -192,7 +231,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             spawn_handle_shutdown(shutdown_rx, handle.clone());
             axum_server::bind_rustls(socket_addr, config.clone())
                 .handle(handle)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await?;
         }
         TlsMode::Acme { domain } => {
@@ -229,11 +268,22 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
             axum_server::bind(socket_addr)
                 .handle(handle)
                 .acceptor(acceptor)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await?;
         }
     }
     Ok(())
+}
+
+/// Parse the `--trusted-proxy` values (IP or CIDR) into `IpNet`s.
+fn build_trusted_proxies(values: &[String]) -> anyhow::Result<Vec<IpNet>> {
+    values
+        .iter()
+        .map(|v| {
+            v.parse::<IpNet>()
+                .map_err(|_| anyhow::anyhow!("invalid trusted proxy address: {v:?}"))
+        })
+        .collect()
 }
 
 /// Resolve the TLS mode with the documented precedence:

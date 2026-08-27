@@ -10,17 +10,27 @@ pub mod routes;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::middleware;
 use axum::routing::{get, post};
 use forgepost_analytics::RateLimiter;
 
 use forgepost_application::ports::Repository;
 use forgepost_application::services;
+use routes::ClientIpConfig;
 
 /// Shared application state handed to every handler.
 #[derive(Clone)]
 pub struct AppState {
     pub repo: Arc<dyn Repository>,
     pub rate_limiter: RateLimiter,
+    /// Failed-login budget per client+account (avoids online brute force).
+    pub login_rate_limiter: RateLimiter,
+    /// Anonymous comment-submission budget per client.
+    pub comment_rate_limiter: RateLimiter,
+    /// Trusted reverse proxies whose `x-forwarded-for` may set the client ID.
+    pub client_ip: Arc<ClientIpConfig>,
+    /// Public origin used for canonical/RSS/OG URLs when `site.url` is unset.
+    pub public_host: Option<String>,
     /// Set once TLS is active so session/visitor cookies get the `Secure` flag.
     pub secure_cookies: bool,
     /// Directory where uploaded media bytes live (`/media/*` serves them).
@@ -39,9 +49,13 @@ pub struct AppState {
 /// behind a `Repository` trait so a Postgres implementation can later be
 /// swapped in without touching routes (§5.4). Uploads use a temp media dir.
 pub fn app(repo: Arc<dyn Repository>) -> Router {
-    app_with_config(
+    app_with_security(
         repo,
         RateLimiter::new(RateLimiter::DEFAULT_MAX),
+        RateLimiter::new(RateLimiter::DEFAULT_LOGIN_MAX),
+        RateLimiter::new(RateLimiter::DEFAULT_COMMENT_MAX),
+        Arc::new(ClientIpConfig::default()),
+        None,
         false,
         None,
     )
@@ -50,12 +64,30 @@ pub fn app(repo: Arc<dyn Repository>) -> Router {
 /// Build the router with an explicit analytics rate limiter (tests use a tight
 /// limit to exercise the 429 path).
 pub fn app_with(repo: Arc<dyn Repository>, rate_limiter: RateLimiter) -> Router {
-    app_with_config(repo, rate_limiter, false, None)
+    app_with_security(
+        repo,
+        rate_limiter,
+        RateLimiter::new(RateLimiter::DEFAULT_LOGIN_MAX),
+        RateLimiter::new(RateLimiter::DEFAULT_COMMENT_MAX),
+        Arc::new(ClientIpConfig::default()),
+        None,
+        false,
+        None,
+    )
 }
 
 /// Build the router for HTTPS serving: cookies carry the `Secure` flag.
 pub fn app_secure(repo: Arc<dyn Repository>) -> Router {
-    app_with_config(repo, RateLimiter::new(RateLimiter::DEFAULT_MAX), true, None)
+    app_with_security(
+        repo,
+        RateLimiter::new(RateLimiter::DEFAULT_MAX),
+        RateLimiter::new(RateLimiter::DEFAULT_LOGIN_MAX),
+        RateLimiter::new(RateLimiter::DEFAULT_COMMENT_MAX),
+        Arc::new(ClientIpConfig::default()),
+        None,
+        true,
+        None,
+    )
 }
 
 /// Build the router with an explicit media directory (upload handler writes
@@ -66,12 +98,29 @@ pub fn app_with_media(
     secure_cookies: bool,
     media_dir: std::path::PathBuf,
 ) -> Router {
-    app_with_config(repo, rate_limiter, secure_cookies, Some(media_dir))
+    app_with_security(
+        repo,
+        rate_limiter,
+        RateLimiter::new(RateLimiter::DEFAULT_LOGIN_MAX),
+        RateLimiter::new(RateLimiter::DEFAULT_COMMENT_MAX),
+        Arc::new(ClientIpConfig::default()),
+        None,
+        secure_cookies,
+        Some(media_dir),
+    )
 }
 
-fn app_with_config(
+/// Build the router, tuning every security knob. Tests use the tight limiters
+/// to exercise the rate-limited paths and a custom `ClientIpConfig` to verify
+/// trusted-proxy semantics.
+#[allow(clippy::too_many_arguments)]
+pub fn app_with_security(
     repo: Arc<dyn Repository>,
-    rate_limiter: RateLimiter,
+    power_limiter: RateLimiter,
+    login_limiter: RateLimiter,
+    comment_limiter: RateLimiter,
+    client_ip: Arc<ClientIpConfig>,
+    public_host: Option<String>,
     secure_cookies: bool,
     media_dir: Option<std::path::PathBuf>,
 ) -> Router {
@@ -91,12 +140,16 @@ fn app_with_config(
         std::sync::Arc::new(services::settings::SettingsService::new(repo.clone()));
     let analytics_service = std::sync::Arc::new(services::analytics::AnalyticsService::new(
         repo.clone(),
-        rate_limiter.clone(),
+        power_limiter.clone(),
     ));
     let article_service = std::sync::Arc::new(services::article::ArticleService::new(repo.clone()));
     let state = AppState {
         repo,
-        rate_limiter,
+        rate_limiter: power_limiter,
+        login_rate_limiter: login_limiter,
+        comment_rate_limiter: comment_limiter,
+        client_ip: client_ip.clone(),
+        public_host,
         secure_cookies,
         media_dir,
         auth_service,
@@ -107,6 +160,8 @@ fn app_with_config(
         analytics_service,
         article_service,
     };
+    let client_ip_layer =
+        middleware::from_fn_with_state(state.client_ip.clone(), routes::client_ip_mw);
     Router::new()
         // Server-rendered pages (the whole blog UI lives in the binary now).
         .route("/", get(pages::home_page))
@@ -199,5 +254,6 @@ fn app_with_config(
             post(routes::conclude_no_winner),
         )
         .route("/api/rss", get(routes::rss))
+        .layer(client_ip_layer)
         .with_state(state)
 }

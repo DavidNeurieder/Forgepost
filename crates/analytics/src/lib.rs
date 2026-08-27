@@ -87,7 +87,12 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     pub const WINDOW_MS: i64 = 60_000;
+    /// Public analytics writes per window (per client identity).
     pub const DEFAULT_MAX: u32 = 120;
+    /// Allowed failed logins per window per client+account key.
+    pub const DEFAULT_LOGIN_MAX: u32 = 10;
+    /// Allowed anonymous comment submissions per window per client.
+    pub const DEFAULT_COMMENT_MAX: u32 = 10;
 
     pub fn new(max_per_window: u32) -> Self {
         Self {
@@ -97,8 +102,41 @@ impl RateLimiter {
     }
 
     /// Returns `true` if a request from `key` is allowed, otherwise `false`.
+    /// Consumes one slot from the window (used for count-everything limits).
     pub fn allow(&self, key: &str, now_ms: i64) -> bool {
         let mut map = self.inner.lock().expect("rate limiter mutex");
+        let window = self.window(&mut map, key, now_ms);
+        if window.count >= self.max_per_window {
+            return false;
+        }
+        window.count += 1;
+        true
+    }
+
+    /// Returns `true` if `key` still has headroom, without consuming a slot.
+    /// Use with [`Self::record`] to count only failures (e.g. failed logins).
+    pub fn peek(&self, key: &str, now_ms: i64) -> bool {
+        let mut map = self.inner.lock().expect("rate limiter mutex");
+        let window = self.window(&mut map, key, now_ms);
+        window.count < self.max_per_window
+    }
+
+    /// Consume a slot for `key` without an allow decision. Used to record a
+    /// failure after [`Self::peek`] admitted the attempt. The count never
+    /// exceeds `max_per_window`, so repeated record calls cannot grow unbounded.
+    pub fn record(&self, key: &str, now_ms: i64) {
+        let mut map = self.inner.lock().expect("rate limiter mutex");
+        let window = self.window(&mut map, key, now_ms);
+        window.count = window.count.saturating_add(1).min(self.max_per_window);
+    }
+
+    /// The current (possibly just-reset) window for `key`.
+    fn window<'a>(
+        &self,
+        map: &'a mut std::collections::HashMap<String, Window>,
+        key: &str,
+        now_ms: i64,
+    ) -> &'a mut Window {
         let window = map.entry(key.to_string()).or_insert(Window {
             start_ms: now_ms,
             count: 0,
@@ -109,11 +147,7 @@ impl RateLimiter {
                 count: 0,
             };
         }
-        if window.count >= self.max_per_window {
-            return false;
-        }
-        window.count += 1;
-        true
+        window
     }
 }
 
@@ -517,5 +551,34 @@ mod tests {
         assert!(limiter.allow("ip", now));
         assert!(!limiter.allow("ip", now));
         assert!(limiter.allow("other", now));
+    }
+
+    #[test]
+    fn rate_limiter_peek_and_record_count_failures_only() {
+        let limiter = RateLimiter::new(3);
+        let now = 1_000;
+
+        // peek does not consume slots.
+        assert!(limiter.peek("user", now));
+        assert!(limiter.peek("user", now));
+        assert!(limiter.peek("user", now));
+
+        // Record only failures: two failed attempts exhaust the window...
+        limiter.record("user", now);
+        limiter.record("user", now);
+        assert!(limiter.peek("user", now));
+        limiter.record("user", now);
+        assert!(!limiter.peek("user", now));
+
+        // ...but successful bursts are never blocked because they don't record.
+        assert!(!limiter.peek("user", now));
+
+        // record cannot grow past the cap.
+        limiter.record("user", now);
+        limiter.record("user", now);
+        assert!(!limiter.peek("user", now));
+
+        // The window resets normally.
+        assert!(limiter.peek("user", now + RateLimiter::WINDOW_MS));
     }
 }

@@ -891,3 +891,70 @@ fn web_reader_concurrency_end_to_end() {
         handle.join().expect("concurrent reader thread completes");
     }
 }
+
+/// Refusing to serve plain HTTP on a public address without `--insecure-http`
+/// must fail closed (no listening socket), while the loopback + explicit-flag
+/// paths still start normally.
+#[test]
+fn plain_http_on_a_public_address_is_fail_closed() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let db_url = format!("sqlite://{}", tmp.path().join("nope.db").display());
+
+    // Without the flag the process exits instead of binding 0.0.0.0.
+    let port = free_port();
+    let refused = Command::new(env!("CARGO_BIN_EXE_forgepost"))
+        .args([
+            "serve",
+            "--database-url",
+            &db_url,
+            "--addr",
+            &format!("0.0.0.0:{port}"),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn without --insecure-http");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut refused = refused;
+    loop {
+        match refused.try_wait().expect("wait") {
+            Some(status) => {
+                assert!(
+                    !status.success(),
+                    "plain HTTP on a public address must refuse to start"
+                );
+                break;
+            }
+            None if Instant::now() > deadline => {
+                let _ = refused.kill();
+                panic!("server should have exited without --insecure-http");
+            }
+            None => std::thread::sleep(Duration::from_millis(200)),
+        }
+    }
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+        "no listener may be left behind on the refused address"
+    );
+
+    // With the flag the same address serves.
+    let ready_port = free_port();
+    let ready_base = format!("http://127.0.0.1:{ready_port}");
+    let child = Command::new(env!("CARGO_BIN_EXE_forgepost"))
+        .args([
+            "serve",
+            "--database-url",
+            &db_url,
+            "--addr",
+            &format!("0.0.0.0:{ready_port}"),
+            "--insecure-http",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn with --insecure-http");
+    wait_ready(&ready_base);
+    let mut child = child;
+    let _ = child.kill();
+    let _ = child.wait();
+}

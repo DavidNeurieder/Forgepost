@@ -2,8 +2,9 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode, header},
+    extract::{ConnectInfo, Path, Request, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::Next,
     response::{Html, IntoResponse, Response},
 };
 use forgepost_analytics::{DocumentStatsView, EventKind, SCROLL_BANDS};
@@ -11,6 +12,7 @@ use forgepost_application::experiments::{DecisionOutcome, ExperimentView, experi
 use forgepost_application::ports::DocumentRepo;
 use forgepost_content::{Document, now_ms, render_html};
 use forgepost_experiments::{ExperimentId, VariantId, assign_variant};
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -385,15 +387,14 @@ pub async fn setup(
         .into_response())
 }
 
-#[tracing::instrument(skip(state, body))]
+#[tracing::instrument(skip(state, headers, body))]
 pub async fn login(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
-    let result = state
-        .auth_service
-        .login(&body.email, &body.password)
-        .await?;
+    let client = client_ip(&headers);
+    let result = try_login(&state, &client, &body.email, &body.password).await?;
     let cookie = crate::auth::set_session_cookie_secure(&result.token, state.secure_cookies);
     Ok((
         [(header::SET_COOKIE, cookie)],
@@ -619,12 +620,19 @@ pub async fn list_comments(
     Ok(Json(comments.into_iter().map(comment_view).collect()))
 }
 
-#[tracing::instrument(skip(state, body))]
+#[tracing::instrument(skip(state, headers, body))]
 pub async fn create_comment(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(slug): Path<String>,
     Json(body): Json<CommentRequest>,
 ) -> Result<(StatusCode, Json<CommentView>), ApiError> {
+    if !state
+        .comment_rate_limiter
+        .allow(&client_ip(&headers), now_ms())
+    {
+        return Err(ApiError::rate_limited());
+    }
     let comment = state
         .comment_service
         .create(&slug, &body.author_name, &body.body)
@@ -1083,16 +1091,105 @@ fn parse_event(body: &EventRequest) -> Result<ParsedEvent, ApiError> {
     }
 }
 
-/// Best-effort client identity: first `x-forwarded-for` entry (Vite/dev + proxy
-/// deployments) falling back to a placeholder key.
-fn client_ip(headers: &HeaderMap) -> String {
+/// Internal header stamped by [`client_ip_mw`] with the effective client
+/// identity. Handlers read this and never trust `x-forwarded-for` directly.
+const REAL_IP_HEADER: &str = "x-real-ip";
+
+/// Which reverse proxies may supply the `x-forwarded-for` value. The peer
+/// address wins unless it is one of these, closing the "fresh bucket per
+/// forged header" bypass.
+#[derive(Debug, Clone, Default)]
+pub struct ClientIpConfig {
+    pub trusted_proxies: Vec<IpNet>,
+}
+
+impl ClientIpConfig {
+    pub fn is_trusted_proxy(&self, ip: &std::net::IpAddr) -> bool {
+        self.trusted_proxies.iter().any(|net| net.contains(ip))
+    }
+}
+
+/// Resolve the effective client identity for rate limiting. A configured
+/// trusted proxy's `x-forwarded-for` (first entry, the one the proxy set) is
+/// honored; anything else falls back to the raw peer, and without a peer to
+/// "unknown".
+pub(crate) fn resolve_client_ip(
+    cfg: &ClientIpConfig,
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+) -> String {
+    let peer_ip = peer.map(|s| s.ip());
+    match peer_ip {
+        Some(ip) if cfg.is_trusted_proxy(&ip) => headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| ip.to_string()),
+        Some(ip) => ip.to_string(),
+        None => "unknown".into(),
+    }
+}
+
+/// Stamp [`REAL_IP_HEADER`] from the socket peer (or a trusted proxy's
+/// `x-forwarded-for`) before handlers run. The header is always overwritten,
+/// so a client-supplied value carries no weight.
+pub(crate) async fn client_ip_mw(
+    State(cfg): State<std::sync::Arc<ClientIpConfig>>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0);
+    let ip = resolve_client_ip(&cfg, req.headers(), peer);
+    let value = HeaderValue::from_str(&ip).unwrap_or_else(|_| HeaderValue::from_static("unknown"));
+    req.headers_mut().insert(REAL_IP_HEADER, value);
+    next.run(req).await
+}
+
+/// Client identity for rate limiting: the `x-real-ip` header set by
+/// [`client_ip_mw`], falling back to a shared bucket.
+pub(crate) fn client_ip(headers: &HeaderMap) -> String {
     headers
-        .get("x-forwarded-for")
+        .get(REAL_IP_HEADER)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|v| v.trim().to_string())
+        .map(|v| v.to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "unknown".into())
+}
+
+/// Combined rate-limit key for a login attempt: client identity + normalized
+/// account, so a distributed attack can't spread failures across IP buckets.
+fn login_rate_key(client: &str, email: &str) -> String {
+    format!("{client}|{}", email.trim().to_ascii_lowercase())
+}
+
+/// Rate-limited login shared by the JSON API and the page form. Failed attempts
+/// consume a slot; successful logins don't, so a correct password is never
+/// self-locked out of a window.
+pub(crate) async fn try_login(
+    state: &AppState,
+    client: &str,
+    email: &str,
+    password: &str,
+) -> Result<
+    forgepost_application::services::auth::AuthResult,
+    forgepost_application::services::ServiceError,
+> {
+    let key = login_rate_key(client, email);
+    if !state.login_rate_limiter.peek(&key, now_ms()) {
+        return Err(forgepost_application::services::ServiceError::RateLimited);
+    }
+    match state.auth_service.login(email, password).await {
+        Ok(result) => Ok(result),
+        Err(err) => {
+            state.login_rate_limiter.record(&key, now_ms());
+            Err(err)
+        }
+    }
 }
 
 /// `visitor_identity`, with the option to set the `Secure` flag on the minted

@@ -1556,6 +1556,161 @@ async fn analytics_events_are_rate_limited() {
 }
 
 #[tokio::test]
+async fn x_forwarded_for_cannot_bypass_the_rate_limiter() {
+    use forgepost_analytics::RateLimiter;
+    use forgepost_server::app_with;
+
+    let pool = pool().await;
+    let repo = SqliteRepository::from_pool(pool);
+    repo.migrate().await.expect("migrations apply");
+    let app = app_with(Arc::new(repo), RateLimiter::new(3));
+    let (_, _, _, slug, _) = seed_published_article(&app).await;
+
+    let event = json!({
+        "slug": slug,
+        "session_id": "22222222-2222-2222-2222-222222222222",
+        "kind": "view",
+        "payload": {},
+    });
+    // Rotating a forged X-Forwarded-For must not mint a fresh budget: the
+    // limiter keys on the effective peer (the middleware's x-real-ip, which
+    // never trusts a client-supplied header), so all requests share one bucket.
+    for i in 0..5usize {
+        let mut request = json_req(Method::POST, "/api/events", None, None, Some(event.clone()));
+        request.headers_mut().insert(
+            axum::http::HeaderName::from_static("x-forwarded-for"),
+            axum::http::HeaderValue::from_str(&format!("203.0.113.{i}")).unwrap(),
+        );
+        let (status, _) = send(&app, request).await;
+        let expected = if i < 3 {
+            StatusCode::NO_CONTENT
+        } else {
+            StatusCode::TOO_MANY_REQUESTS
+        };
+        assert_eq!(status, expected, "request {i}");
+    }
+}
+
+#[tokio::test]
+async fn api_login_is_throttled_per_client_and_account() {
+    use forgepost_analytics::RateLimiter;
+    use forgepost_server::app_with_security;
+    use forgepost_server::routes::ClientIpConfig;
+
+    let pool = pool().await;
+    let repo = SqliteRepository::from_pool(pool);
+    repo.migrate().await.expect("migrations apply");
+    repo.create_first_user("a@b.com", "Alice", "x")
+        .await
+        .expect("create owner");
+    let app = app_with_security(
+        Arc::new(repo),
+        RateLimiter::new(1000),
+        RateLimiter::new(2),
+        RateLimiter::new(1000),
+        Arc::new(ClientIpConfig::default()),
+        None,
+        false,
+        None,
+    );
+
+    let wrong = || {
+        json_req(
+            Method::POST,
+            "/api/login",
+            None,
+            None,
+            Some(json!({ "email": "a@b.com", "password": "wrong" })),
+        )
+    };
+    for _ in 0..2 {
+        let (status, _) = send(&app, wrong()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, _) = send(&app, wrong()).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // A different account shares the client but has its own budget, so the
+    // throttle is per (client, account), not a global lockout.
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/login",
+            None,
+            None,
+            Some(json!({ "email": "b@c.com", "password": "wrong" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn api_comment_posts_are_throttled() {
+    use forgepost_analytics::RateLimiter;
+    use forgepost_server::app_with_security;
+    use forgepost_server::routes::ClientIpConfig;
+
+    let pool = pool().await;
+    let repo = SqliteRepository::from_pool(pool);
+    repo.migrate().await.expect("migrations apply");
+    repo.set_setting("comments.enabled", "1")
+        .await
+        .expect("enable comments");
+    let app = app_with_security(
+        Arc::new(repo),
+        RateLimiter::new(1000),
+        RateLimiter::new(1000),
+        RateLimiter::new(2),
+        Arc::new(ClientIpConfig::default()),
+        None,
+        false,
+        None,
+    );
+    let (_, _, _, slug, _) = seed_published_article(&app).await;
+
+    let comment = || {
+        json_req(
+            Method::POST,
+            &format!("/api/articles/{slug}/comments"),
+            None,
+            None,
+            Some(json!({ "author_name": "Reader", "body": "Nice post!" })),
+        )
+    };
+    for _ in 0..2 {
+        let (status, _) = send(&app, comment()).await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let (status, _) = send(&app, comment()).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn attacker_host_header_is_not_echoed_into_generated_links() {
+    let app = test_app().await;
+    let _ = seed_published_article(&app).await;
+
+    for path in ["/rss", "/sitemap.xml"] {
+        let mut request = json_req(Method::GET, path, None, None, None);
+        request.headers_mut().insert(
+            header::HOST,
+            axum::http::HeaderValue::from_static("attacker.example"),
+        );
+        let (status, resp) = send(&app, request).await;
+        assert_eq!(status, StatusCode::OK);
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("attacker.example"), "{path} leaked the Host");
+        assert!(
+            text.contains("http://localhost"),
+            "{path} lost the local fallback"
+        );
+    }
+}
+
+#[tokio::test]
 async fn recommendation_events_record_and_validate() {
     let app = test_app().await;
     let (cookie, csrf, _, slug, _) = seed_published_article(&app).await;

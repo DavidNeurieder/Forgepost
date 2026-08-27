@@ -19,6 +19,7 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 clap = { workspace = true }
 futures = "0.3"
 hex = { workspace = true }
+ipnet = "2"
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 forgepost-analytics = { path = "../analytics" }
 forgepost-application = { path = "../application" }

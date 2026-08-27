@@ -160,6 +160,21 @@ impl UserRepo for SqliteRepository {
         password_hash: &str,
     ) -> Result<User, RepositoryError> {
         let mut tx = self.pool.begin().await?;
+        // Claim ownership atomically: only the first writer that inserts the
+        // `setup.complete` marker (0 rows affected on conflict) may create the
+        // owner. Concurrent setup attempts race here rather than in the
+        // check-then-insert in `AuthService::setup`, and rollback undoes the
+        // marker if the user insert fails.
+        let claimed = sqlx::query(
+            "INSERT INTO settings (key, value) VALUES ('setup.complete', '1')
+             ON CONFLICT(key) DO NOTHING",
+        )
+        .execute(&mut *tx)
+        .await?;
+        if claimed.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Err(RepositoryError::Conflict("already set up".into()));
+        }
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO users (id, email, password_hash, display_name, role) VALUES (?, ?, ?, ?, 'owner')",
@@ -168,12 +183,6 @@ impl UserRepo for SqliteRepository {
         .bind(email)
         .bind(password_hash)
         .bind(display_name)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "INSERT INTO settings (key, value) VALUES ('setup.complete', '1')
-             ON CONFLICT(key) DO UPDATE SET value = '1'",
-        )
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -1926,6 +1935,30 @@ mod tests {
         assert!(!repo.is_setup_complete().await.unwrap());
         seed_user(&repo).await;
         assert!(repo.is_setup_complete().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn setup_claim_is_atomic_once_claimed() {
+        let repo = repo().await;
+        seed_user(&repo).await;
+
+        // A second race participant loses the claim and cannot create another
+        // owner, even with a different email.
+        let second = repo
+            .create_first_user("b@c.com", "Bob", "hash")
+            .await
+            .expect_err("second setup attempt must be rejected");
+        let RepositoryError::Conflict(msg) = second else {
+            panic!("expected Conflict, got {second:?}");
+        };
+        assert!(msg.contains("already set up"));
+
+        // Still exactly one owner.
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+            .fetch_one(&repo.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]
