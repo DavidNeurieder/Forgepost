@@ -53,10 +53,10 @@ impl fmt::Display for ServiceError {
 
 impl std::error::Error for ServiceError {}
 
-/// Map a [`crate::repository::RepositoryError`] into a [`ServiceError`].
-impl From<crate::repository::RepositoryError> for ServiceError {
-    fn from(err: crate::repository::RepositoryError) -> Self {
-        use crate::repository::RepositoryError;
+/// Map a [`crate::ports::RepositoryError`] into a [`ServiceError`].
+impl From<crate::ports::RepositoryError> for ServiceError {
+    fn from(err: crate::ports::RepositoryError) -> Self {
+        use crate::ports::RepositoryError;
         match err {
             RepositoryError::NotFound(m) => Self::NotFound(m),
             RepositoryError::Unauthorized => Self::Unauthorized,

@@ -4,6 +4,9 @@ members = [
     "crates/content",
     "crates/analytics",
     "crates/experiments",
+    "crates/domain",
+    "crates/application",
+    "crates/infrastructure",
     "crates/server",
 ]
 

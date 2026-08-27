@@ -2,15 +2,16 @@
 
 use std::sync::Arc;
 
-use forgepost_content::{Document, now_ms};
+use forgepost_content::{Document, merge_blocks, now_ms, parse_markdown};
 use uuid::Uuid;
 
-use crate::model::{DocumentSummary, FullDocument};
-use crate::repository::{DocumentRepo, Repository};
+use crate::ports::{DocumentRepo, OEmbedResolver, Repository};
 use crate::services::ServiceError;
+use forgepost_domain::model::{DocumentSummary, FullDocument};
 
 pub struct DocumentService {
     repo: Arc<dyn DocumentRepo>,
+    video: Arc<dyn OEmbedResolver>,
 }
 
 /// Result of saving a document: the full document (for re-rendering the view)
@@ -21,9 +22,10 @@ pub struct SaveResult {
 }
 
 impl DocumentService {
-    pub fn new(repo: Arc<dyn Repository>) -> Self {
+    pub fn new(repo: Arc<dyn Repository>, video: Arc<dyn OEmbedResolver>) -> Self {
         Self {
             repo: repo as Arc<dyn DocumentRepo>,
+            video,
         }
     }
 
@@ -46,7 +48,7 @@ impl DocumentService {
         }
         let mut full = self.repo.create_document(owner_id, title).await?;
         if let Some(md) = markdown {
-            apply_markdown(&*self.repo, &mut full.document, md).await?;
+            self.apply_markdown(&mut full.document, md).await?;
         }
         if let Some(tags) = tags {
             self.repo.set_document_tags(full.document.id, tags).await?;
@@ -86,7 +88,7 @@ impl DocumentService {
             }
         }
         if let Some(md) = markdown {
-            apply_markdown(&*self.repo, &mut full.document, md).await?;
+            self.apply_markdown(&mut full.document, md).await?;
         }
         self.repo.set_document_tags(id, tags).await?;
         let tags = self.repo.document_tags(id).await?;
@@ -116,7 +118,7 @@ impl DocumentService {
                 self.repo.regenerate_draft_slug(id, &title).await?;
             }
         }
-        apply_markdown(&*self.repo, &mut full.document, markdown).await?;
+        self.apply_markdown(&mut full.document, markdown).await?;
         let tags: Vec<String> = tags_str
             .split(',')
             .map(|s| s.trim().to_string())
@@ -145,24 +147,18 @@ impl DocumentService {
         self.repo.delete_document(id).await?;
         Ok(())
     }
-}
 
-// ---------------------------------------------------------------------------
-// Markdown application (shared by DocumentService and ArticleService)
-// ---------------------------------------------------------------------------
-
-pub(crate) async fn apply_markdown(
-    repo: &dyn DocumentRepo,
-    doc: &mut Document,
-    markdown: &str,
-) -> Result<(), ServiceError> {
-    let mut parsed = forgepost_content::parse_markdown(markdown);
-    crate::oembed::enrich_video_metadata(&mut parsed).await;
-    let merged = forgepost_content::merge_blocks(&doc.blocks, &doc.versions, parsed, now_ms());
-    let versions = merged.versions.clone();
-    repo.save_document_blocks(doc.id, &merged.blocks, &versions)
-        .await?;
-    doc.blocks = merged.blocks;
-    doc.versions.extend(versions);
-    Ok(())
+    /// Parse markdown, enrich video metadata, then merge and persist blocks.
+    async fn apply_markdown(&self, doc: &mut Document, markdown: &str) -> Result<(), ServiceError> {
+        let mut parsed = parse_markdown(markdown);
+        self.video.enrich_video_metadata(&mut parsed).await;
+        let merged = merge_blocks(&doc.blocks, &doc.versions, parsed, now_ms());
+        let versions = merged.versions.clone();
+        self.repo
+            .save_document_blocks(doc.id, &merged.blocks, &versions)
+            .await?;
+        doc.blocks = merged.blocks;
+        doc.versions.extend(versions);
+        Ok(())
+    }
 }

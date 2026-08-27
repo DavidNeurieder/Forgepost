@@ -13,11 +13,11 @@
 //! read, and blend affinity with recency and popularity. No new data
 //! collection is needed for that phase.
 
+use forgepost_application::ports::RepositoryError;
+use forgepost_domain::model::PublishedPost;
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::model::PublishedPost;
-use crate::repository::RepositoryError;
 
 /// Rank the articles to suggest after `current` (up to `limit`).
 ///
@@ -26,7 +26,7 @@ use crate::repository::RepositoryError;
 pub(crate) async fn recommend(
     state: &AppState,
     _visitor_id: Option<Uuid>,
-    current: &crate::model::FullDocument,
+    current: &forgepost_domain::model::FullDocument,
     current_tags: &[String],
     limit: usize,
 ) -> Result<Vec<PublishedPost>, RepositoryError> {
@@ -49,7 +49,7 @@ fn rank_related(
 ) -> Vec<PublishedPost> {
     let mut ranked: Vec<(usize, &PublishedPost)> = published
         .iter()
-        .filter(|p| p.id != current_id)
+        .filter(|p| p.id.0 != current_id)
         .map(|p| (shared_tag_count(&p.tags, current_tags), p))
         .collect();
     ranked.sort_by(|a, b| {
@@ -70,10 +70,11 @@ fn shared_tag_count(candidate: &[String], current: &[String]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use forgepost_domain::model::PostId;
 
     fn post(id: u32, tags: &[&str], published_at_ms: Option<i64>) -> PublishedPost {
         PublishedPost {
-            id: Uuid::from_u128(id as u128),
+            id: PostId(Uuid::from_u128(id as u128)),
             title: format!("Post {id}"),
             slug: format!("post-{id}"),
             published_at_ms,
@@ -90,7 +91,7 @@ mod tests {
             post(3, &["food"], Some(600)),
             post(4, &["tech"], Some(300)),
         ];
-        let ranked = rank_related(&published, current.id, &current.tags, 10);
+        let ranked = rank_related(&published, current.id.0, &current.tags, 10);
         let slugs: Vec<&str> = ranked.iter().map(|p| p.slug.as_str()).collect();
         // Posts 2 and 4 share one tag each (newest first: 2 then 4), post 3
         // shares none, and the current post never appears.
@@ -107,7 +108,7 @@ mod tests {
         ];
         // Tag match first (post 4), then the newer backfill (post 2), then
         // post 3; limited to the first two.
-        let ranked = rank_related(&published, current.id, &current.tags, 2);
+        let ranked = rank_related(&published, current.id.0, &current.tags, 2);
         let slugs: Vec<&str> = ranked.iter().map(|p| p.slug.as_str()).collect();
         assert_eq!(slugs, ["post-4", "post-2"]);
     }

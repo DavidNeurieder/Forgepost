@@ -1,0 +1,20 @@
+[package]
+name = "forgepost-application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Forgepost use cases: services, orchestrators, and repository ports"
+
+[dependencies]
+async-trait = { workspace = true }
+forgepost-analytics = { path = "../analytics" }
+forgepost-content = { path = "../content" }
+forgepost-domain = { path = "../domain" }
+forgepost-experiments = { path = "../experiments" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }

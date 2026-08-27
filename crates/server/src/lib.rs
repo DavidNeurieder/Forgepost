@@ -1,26 +1,20 @@
-//! Server library: application wiring, routes, and the repository layer.
+//! Server library: HTTP wiring, routes, and the application composition root.
 
-pub mod analytics;
 pub mod auth;
 pub mod error;
-pub mod experiments;
-pub mod import;
 pub mod model;
-pub mod oembed;
 pub mod pages;
 pub mod recommender;
-pub mod repository;
 pub mod routes;
-pub mod services;
-pub mod worker;
 
 use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{get, post};
+use forgepost_analytics::RateLimiter;
 
-use crate::analytics::RateLimiter;
-use crate::repository::Repository;
+use forgepost_application::ports::Repository;
+use forgepost_application::services;
 
 /// Shared application state handed to every handler.
 #[derive(Clone)]
@@ -86,8 +80,10 @@ fn app_with_config(
         None => std::env::temp_dir().join("forgepost-media"),
     };
     let auth_service = std::sync::Arc::new(services::auth::AuthService::new(repo.clone()));
-    let document_service =
-        std::sync::Arc::new(services::document::DocumentService::new(repo.clone()));
+    let document_service = std::sync::Arc::new(services::document::DocumentService::new(
+        repo.clone(),
+        std::sync::Arc::new(forgepost_infrastructure::oembed::RumbleOembed),
+    ));
     let comment_service = std::sync::Arc::new(services::comment::CommentService::new(repo.clone()));
     let experiment_service =
         std::sync::Arc::new(services::experiment::ExperimentService::new(repo.clone()));

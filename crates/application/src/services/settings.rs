@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use crate::model::SiteSettings;
-use crate::repository::{Repository, SettingsRepo};
+use crate::ports::{Repository, SettingsRepo};
 use crate::services::ServiceError;
+use forgepost_domain::model::SiteSettings;
 
 pub struct SettingsService {
     repo: Arc<dyn SettingsRepo>,

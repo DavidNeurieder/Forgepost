@@ -7,14 +7,14 @@
 //! routes.
 
 use forgepost_content::now_ms;
+use forgepost_domain::model::{ExperimentCounts, ExperimentDecision, ExperimentRecord};
 use forgepost_experiments::{
     EngineConfig, ExperimentReport, Recommendation, VariantStats, analyze,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::model::{ExperimentCounts, ExperimentDecision, ExperimentRecord};
-use crate::repository::{ExperimentRepo, Repository, RepositoryError};
+use crate::ports::{ExperimentRepo, Repository, RepositoryError};
 
 // ---------------------------------------------------------------------------
 // Response DTOs (mirror of `ExperimentRecord` + live report + decisions).
@@ -89,29 +89,16 @@ pub async fn experiment_view(
     repo: &dyn ExperimentRepo,
     exp: &ExperimentRecord,
 ) -> Result<ExperimentView, RepositoryError> {
+    let counts = repo.experiment_counts(exp.id).await?;
     let report = if exp.status == "running" {
-        let counts = repo.experiment_counts(exp.id).await?;
         Some(live_report(exp, &counts))
     } else {
         None
     };
-    let decisions = repo
-        .experiment_decisions(exp.id)
-        .await?
-        .into_iter()
-        .map(|d| ExperimentDecisionView {
-            id: d.id,
-            decided_at_ms: d.decided_at_ms,
-            decision: d.decision,
-            winner_variant_id: d.winner_variant_id,
-            promoted_version_id: d.promoted_version_id,
-            effect_size: d.effect_size,
-            confidence: d.confidence,
-        })
-        .collect();
+    let decisions = repo.experiment_decisions(exp.id).await?;
     Ok(ExperimentView {
         id: exp.id,
-        document_id: exp.document_id,
+        document_id: exp.document_id.0,
         block_id: exp.block_id,
         name: exp.name.clone(),
         status: exp.status.clone(),
@@ -138,7 +125,18 @@ pub async fn experiment_view(
             })
             .collect(),
         report,
-        decisions,
+        decisions: decisions
+            .iter()
+            .map(|d| ExperimentDecisionView {
+                id: d.id,
+                decided_at_ms: d.decided_at_ms,
+                decision: d.decision.clone(),
+                winner_variant_id: d.winner_variant_id,
+                promoted_version_id: d.promoted_version_id,
+                effect_size: d.effect_size,
+                confidence: d.confidence,
+            })
+            .collect(),
     })
 }
 

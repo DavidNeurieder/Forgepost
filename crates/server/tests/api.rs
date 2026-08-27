@@ -5,9 +5,10 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, Response, StatusCode, header};
+use forgepost_application::ports::{DocumentRepo, SettingsRepo, UserRepo};
 use forgepost_experiments::assign_variant;
+use forgepost_infrastructure::sqlite::SqliteRepository;
 use forgepost_server::app;
-use forgepost_server::repository::{DocumentRepo, SettingsRepo, SqliteRepository, UserRepo};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
@@ -1523,7 +1524,7 @@ async fn analytics_multi_visitor_dropoff() {
 
 #[tokio::test]
 async fn analytics_events_are_rate_limited() {
-    use forgepost_server::analytics::RateLimiter;
+    use forgepost_analytics::RateLimiter;
     use forgepost_server::app_with;
 
     let pool = pool().await;

@@ -20,9 +20,9 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::auth::{self, AuthUser};
 use crate::error::{ApiError, PageError};
-use crate::experiments::ExperimentView;
 use crate::model::{Media, SiteSettings};
-use crate::repository::RepositoryError;
+use forgepost_application::experiments::ExperimentView;
+use forgepost_application::ports::RepositoryError;
 
 // ---------------------------------------------------------------------------
 // Template structs
@@ -883,7 +883,7 @@ async fn build_home_posts(
     let mut posts = Vec::with_capacity(published.len());
     for p in published {
         let (excerpt, read_mins, image, image_width, image_height) =
-            match state.repo.get_document(p.id).await? {
+            match state.repo.get_document(p.id.0).await? {
                 Some(full) => {
                     let (image, image_width, image_height) = article_image(&full, base);
                     (
@@ -1192,7 +1192,7 @@ pub(crate) async fn dashboard_page(
             .iter()
             .map(|d| {
                 let (views_7d, views_prev_7d, completion) =
-                    metrics_map.get(&d.id).copied().unwrap_or((0, 0, 0.0));
+                    metrics_map.get(&d.id.0).copied().unwrap_or((0, 0, 0.0));
                 DashboardDoc {
                     id: d.id.to_string(),
                     title: d.title.clone(),
@@ -1499,8 +1499,8 @@ pub(crate) async fn stats_page(
 
     let site = site(&state).await?;
     let referrers = state.repo.referrer_counts(doc_id).await?;
-    let site_host = crate::analytics::host_of(&site.url);
-    let sources = crate::analytics::bucket_traffic_sources(&referrers, site_host.as_deref())
+    let site_host = forgepost_analytics::host_of(&site.url);
+    let sources = forgepost_analytics::bucket_traffic_sources(&referrers, site_host.as_deref())
         .into_iter()
         .map(|s| SourceRow {
             label: s.source.label().into(),
@@ -1558,7 +1558,10 @@ pub(crate) async fn stats_page(
     })
 }
 
-fn experiment_row(exp: &ExperimentView, blocks: &[crate::analytics::BlockStat]) -> ExperimentRow {
+fn experiment_row(
+    exp: &ExperimentView,
+    blocks: &[forgepost_analytics::BlockStat],
+) -> ExperimentRow {
     let name = if exp.name.is_empty() {
         "Untitled experiment".to_string()
     } else {
@@ -2124,10 +2127,13 @@ pub(crate) async fn import_post(
     let (mut markdown, _, local_images) = if is_zip {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&data))
             .map_err(|_| ApiError::bad_request("not a valid zip archive"))?;
-        let post =
-            crate::import::extract_post(&mut archive, MAX_ARCHIVE_TOTAL_BYTES, MAX_ARCHIVE_ENTRIES)
-                .map_err(|e| ApiError::bad_request(e.to_string()))?;
-        let images = crate::import::scan_local_images(
+        let post = forgepost_infrastructure::filesystem::extract_post(
+            &mut archive,
+            MAX_ARCHIVE_TOTAL_BYTES,
+            MAX_ARCHIVE_ENTRIES,
+        )
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let images = forgepost_infrastructure::filesystem::scan_local_images(
             &post.markdown,
             &post.base_dir,
             &mut archive,
@@ -2142,7 +2148,7 @@ pub(crate) async fn import_post(
         )
     };
 
-    let (front_matter, body) = crate::import::parse_front_matter(&markdown);
+    let (front_matter, body) = forgepost_infrastructure::filesystem::parse_front_matter(&markdown);
     markdown = body;
 
     // Upload every bundled image to the media store, keyed by its original URL.
@@ -2170,7 +2176,9 @@ pub(crate) async fn import_post(
     }
 
     let (markdown, _imported, unresolved) =
-        crate::import::rewrite_image_refs(&markdown, &mut |_alt, url| url_map.get(url).cloned());
+        forgepost_infrastructure::filesystem::rewrite_image_refs(&markdown, &mut |_alt, url| {
+            url_map.get(url).cloned()
+        });
     if !is_zip && unresolved > 0 {
         return Err(ApiError::bad_request(format!(
             "found {unresolved} local image reference(s) — upload a .zip with the images \

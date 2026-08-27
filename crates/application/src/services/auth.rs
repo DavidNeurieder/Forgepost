@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::repository::{Repository, SessionRepo, UserRepo};
+use crate::ports::{Repository, SessionRepo, UserRepo};
 use crate::services::ServiceError;
+use forgepost_domain::security::{hash_password, verify_password};
 
 pub struct AuthService {
     repo: Arc<dyn UserRepo>,
@@ -46,7 +47,7 @@ impl AuthService {
             return Err(ServiceError::Conflict("already set up".into()));
         }
         validate_credentials(email, password)?;
-        let hash = crate::auth::hash_password(password)
+        let hash = hash_password(password)
             .map_err(|_| ServiceError::Internal("could not hash password".into()))?;
         let user = self
             .repo
@@ -67,7 +68,7 @@ impl AuthService {
             .find_user_by_email(email)
             .await?
             .ok_or_else(|| ServiceError::Validation("invalid email or password".into()))?;
-        if !crate::auth::verify_password(&user.password_hash, password) {
+        if !verify_password(&user.password_hash, password) {
             return Err(ServiceError::Validation("invalid email or password".into()));
         }
         let session = self.sessions.create_session(user.id).await?;

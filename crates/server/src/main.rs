@@ -15,9 +15,10 @@ use axum::{
 };
 use axum_server::tls_rustls::RustlsConfig;
 use clap::{Args, Parser, Subcommand};
-use forgepost_server::analytics::RateLimiter;
-use forgepost_server::repository::{ExportRepo, Repository, SqliteRepository};
-use forgepost_server::worker;
+use forgepost_analytics::RateLimiter;
+use forgepost_application::ports::{ExportRepo, Repository};
+use forgepost_application::worker::BackgroundWorker;
+use forgepost_infrastructure::sqlite::SqliteRepository;
 use rustls_acme::AcmeConfig;
 use rustls_acme::caches::DirCache;
 use tokio::net::TcpListener;
@@ -135,13 +136,13 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let repo = SqliteRepository::connect(&args.database_url).await?;
     repo.migrate().await?;
     tracing::info!(database_url = %args.database_url, "database ready");
-    forgepost_server::repository::backfill_search_index(&repo).await?;
+    forgepost_infrastructure::sqlite::backfill_search_index(&repo).await?;
 
     let repo: Arc<dyn Repository> = Arc::new(repo);
 
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-    worker::BackgroundWorker::new(repo.clone(), shutdown_rx.clone(), 60).spawn();
+    BackgroundWorker::new(repo.clone(), shutdown_rx.clone(), 60).spawn();
 
     let mode = tls_mode(&args)?;
     let secure = matches!(mode, TlsMode::Byo { .. } | TlsMode::Acme { .. });

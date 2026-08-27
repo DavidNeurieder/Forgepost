@@ -6,16 +6,18 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
-use forgepost_analytics::EventKind;
+use forgepost_analytics::{DocumentStatsView, EventKind, SCROLL_BANDS};
+use forgepost_application::experiments::{DecisionOutcome, ExperimentView, experiment_view};
+use forgepost_application::ports::DocumentRepo;
 use forgepost_content::{Document, now_ms, render_html};
 use forgepost_experiments::{ExperimentId, VariantId, assign_variant};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::AppState;
 use crate::auth::{AuthUser, verify_csrf};
 use crate::error::ApiError;
-use crate::model::{AnalyticsEvent, DocumentSummary, FullDocument, User};
-use crate::{AppState, repository::DocumentRepo};
+use crate::model::{AnalyticsEvent, DocumentSummary, FullDocument, PostId, User, VisitorId};
 
 /// Anonymous visitor cookie used to de-duplicate unique readers.
 pub const VISITOR_COOKIE: &str = "opv";
@@ -649,7 +651,7 @@ pub async fn rss(State(state): State<AppState>, headers: HeaderMap) -> Result<Re
     let published = state.repo.list_published().await?;
     let mut items = String::new();
     for summary in published {
-        if let Some(full) = state.repo.get_document(summary.id).await? {
+        if let Some(full) = state.repo.get_document(summary.id.0).await? {
             let html = article_html(&full.document);
             let text: String = html.chars().filter(|c| !c.is_control()).take(500).collect();
             let url = format!("{base}/articles/{}", xml_escape(&summary.slug));
@@ -754,7 +756,7 @@ pub async fn record_event(
         if exp.status != "running" {
             return Err(ApiError::bad_request("experiment is not running"));
         }
-        if exp.document_id != document_id {
+        if exp.document_id.0 != document_id {
             return Err(ApiError::bad_request(
                 "experiment belongs to another article",
             ));
@@ -781,12 +783,12 @@ pub async fn record_event(
     let (visitor_id, cookie) = visitor_identity_with_secure(&headers, state.secure_cookies);
     let event = AnalyticsEvent {
         id: Uuid::new_v4(),
-        document_id,
+        document_id: PostId(document_id),
         event_type: parsed.event_type.into(),
         band: parsed.band,
         block_id: parsed.block_id,
         pageview_id: body.session_id,
-        visitor_id,
+        visitor_id: VisitorId(visitor_id),
         referrer: headers
             .get(header::REFERER)
             .and_then(|v| v.to_str().ok())
@@ -817,7 +819,7 @@ pub async fn document_stats(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<crate::analytics::DocumentStatsView>, ApiError> {
+) -> Result<Json<DocumentStatsView>, ApiError> {
     let id = parse_uuid(&id)?;
     let stats = state
         .analytics_service
@@ -835,7 +837,7 @@ pub async fn list_experiments(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<Vec<crate::experiments::ExperimentView>>, ApiError> {
+) -> Result<Json<Vec<ExperimentView>>, ApiError> {
     let id = parse_uuid(&id)?;
     let experiments = state
         .experiment_service
@@ -843,7 +845,7 @@ pub async fn list_experiments(
         .await?;
     let mut views = Vec::new();
     for exp in experiments {
-        views.push(crate::experiments::experiment_view(&*state.repo, &exp).await?);
+        views.push(experiment_view(&*state.repo, &exp).await?);
     }
     Ok(Json(views))
 }
@@ -855,7 +857,7 @@ pub async fn create_experiment(
     headers: HeaderMap,
     auth: AuthUser,
     Json(body): Json<CreateExperimentRequest>,
-) -> Result<Json<crate::experiments::ExperimentView>, ApiError> {
+) -> Result<Json<ExperimentView>, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
     let inputs: Vec<crate::model::ExperimentVariantInput> = body
         .variants
@@ -881,9 +883,7 @@ pub async fn create_experiment(
             inputs,
         )
         .await?;
-    Ok(Json(
-        crate::experiments::experiment_view(&*state.repo, &exp).await?,
-    ))
+    Ok(Json(experiment_view(&*state.repo, &exp).await?))
 }
 
 #[tracing::instrument(skip(state, headers, auth))]
@@ -918,7 +918,7 @@ pub async fn decide_experiment(
     headers: HeaderMap,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<Option<crate::experiments::DecisionOutcome>>, ApiError> {
+) -> Result<Json<Option<DecisionOutcome>>, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
     let outcome = state.experiment_service.decide(id, auth.user.id).await?;
@@ -931,7 +931,7 @@ pub async fn promote_experiment(
     headers: HeaderMap,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<crate::experiments::DecisionOutcome>, ApiError> {
+) -> Result<Json<DecisionOutcome>, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
     let outcome = state.experiment_service.promote(id, auth.user.id).await?;
@@ -944,7 +944,7 @@ pub async fn conclude_no_winner(
     headers: HeaderMap,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<crate::experiments::DecisionOutcome>, ApiError> {
+) -> Result<Json<DecisionOutcome>, ApiError> {
     verify_csrf(&headers, &auth.csrf_token)?;
     let id = parse_uuid(&id)?;
     let outcome = state
@@ -982,7 +982,7 @@ fn parse_event(body: &EventRequest) -> Result<ParsedEvent, ApiError> {
                 .get("band")
                 .and_then(|v| v.as_i64())
                 .ok_or_else(|| ApiError::bad_request("missing band"))?;
-            if !crate::analytics::SCROLL_BANDS.contains(&band) {
+            if !SCROLL_BANDS.contains(&band) {
                 return Err(ApiError::bad_request("invalid scroll band"));
             }
             Ok(ParsedEvent {
@@ -1138,7 +1138,7 @@ fn cookie_value<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
 fn comment_view(c: crate::model::Comment) -> CommentView {
     CommentView {
         id: c.id,
-        document_id: c.document_id,
+        document_id: c.document_id.0,
         author_name: c.author_name,
         body: c.body,
         status: c.status,
@@ -1152,7 +1152,7 @@ pub(crate) async fn apply_markdown(
     markdown: &str,
 ) -> Result<(), ApiError> {
     let mut parsed = forgepost_content::parse_markdown(markdown);
-    crate::oembed::enrich_video_metadata(&mut parsed).await;
+    forgepost_infrastructure::oembed::enrich_video_metadata(&mut parsed).await;
     let merged = forgepost_content::merge_blocks(
         &doc.blocks,
         &doc.versions,

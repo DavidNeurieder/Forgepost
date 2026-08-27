@@ -1,0 +1,458 @@
+Forgepost Architecture Refactor Plan
+Objective
+
+Refactor Forgepost from a feature-separated Rust application into a cleaner layered architecture while preserving:
+
+single binary deployment
+SQLite-first approach
+existing content model
+analytics pipeline
+experiment engine
+current API/UI behavior
+
+Target architecture:
+
+forgepost
+
+crates/
+├── domain/              # Business concepts, no dependencies
+├── application/         # Use cases/workflows
+├── content/             # Parsing/rendering
+├── analytics/           # Analytics logic
+├── experiments/         # Experiment engine
+├── infrastructure/      # SQLite/filesystem/external services
+└── server/              # Axum, HTTP, templates, auth
+
+
+Dependency direction:
+
+                 server
+                    |
+                    v
+              application
+                    |
+                    v
+                domain
+
+infrastructure ---> application
+content -----------> domain
+analytics ---------> domain
+experiments -------> domain
+
+Phase 1 — Establish the domain crate
+Goal
+
+Create a stable home for core business concepts.
+
+Create:
+
+crates/domain/src/
+
+├── post.rs
+├── block.rs
+├── revision.rs
+├── experiment.rs
+├── variant.rs
+├── event.rs
+└── visitor.rs
+
+
+Move:
+
+Post models
+Block models
+Block versions
+Experiment entities
+Variant definitions
+Analytics events
+
+Rules:
+
+no SQL imports
+no Axum imports
+no serialization assumptions where possible
+no filesystem access
+
+Example:
+
+Before:
+
+struct Block {
+    id: String,
+    html: String,
+}
+
+
+After:
+
+struct Block {
+    id: BlockId,
+    kind: BlockType,
+    version: BlockVersion,
+}
+
+
+Add domain IDs:
+
+PostId
+BlockId
+ExperimentId
+VisitorId
+
+
+instead of raw strings.
+
+Phase 2 — Introduce application services
+Goal
+
+Move workflows out of HTTP handlers.
+
+Create:
+
+crates/application/src/
+
+├── publishing/
+├── analytics/
+├── experiments/
+└── users/
+
+
+Examples:
+
+Publishing
+PublishPost
+CreateRevision
+UpdateBlock
+
+Analytics
+RecordEvent
+AggregateMetrics
+GetBlockPerformance
+
+Experiments
+CreateExperiment
+AssignVariant
+EvaluateExperiment
+PromoteWinner
+
+
+Server responsibility becomes:
+
+HTTP request
+
+    |
+    v
+
+application service
+
+    |
+    v
+
+domain logic
+
+Phase 3 — Add repository interfaces
+Goal
+
+Remove persistence knowledge from business logic.
+
+Create:
+
+application/ports/
+
+├── post_repository.rs
+├── event_repository.rs
+├── experiment_repository.rs
+└── user_repository.rs
+
+
+Example:
+
+trait PostRepository {
+    fn find(id: PostId) -> Result<Post>;
+    fn save(post: Post) -> Result<()>;
+}
+
+
+Application depends on the trait.
+
+It does not know SQLite exists.
+
+Phase 4 — Extract infrastructure crate
+Goal
+
+Move technical implementations out of server.
+
+Create:
+
+crates/infrastructure/
+
+├── sqlite/
+│   ├── posts.rs
+│   ├── events.rs
+│   └── experiments.rs
+│
+├── filesystem/
+├── email/
+└── migrations/
+
+
+Move:
+
+SQL queries
+database connections
+migrations
+file storage
+
+Dependency:
+
+SQLite implementation
+
+        implements
+
+Repository trait
+
+Phase 5 — Refactor analytics pipeline
+Goal
+
+Make analytics fully event-based.
+
+Target:
+
+Browser
+
+ |
+ v
+
+Event API
+
+ |
+ v
+
+Raw event storage
+
+ |
+ v
+
+Aggregation worker
+
+ |
+ v
+
+Metrics tables
+
+
+Introduce:
+
+events
+
+id
+version
+timestamp
+type
+post_id
+block_id
+visitor_id
+payload
+
+
+Add:
+
+event schema versioning
+validation
+replay capability
+
+Keep:
+
+existing block analytics
+existing article metrics
+Phase 6 — Introduce internal worker system
+Goal
+
+Move asynchronous tasks away from request paths.
+
+Create:
+
+worker/
+
+├── analytics_worker
+├── experiment_worker
+└── cleanup_worker
+
+
+Initial implementation:
+
+Tokio tasks
+SQLite job table
+
+Avoid:
+
+Redis
+external queues
+microservices
+
+Example:
+
+HTTP request
+
+creates job
+
+      |
+
+worker executes
+
+      |
+
+result stored
+
+Phase 7 — Harden experiment lifecycle
+Goal
+
+Make experiments production-safe.
+
+Add states:
+
+Draft
+ |
+Running
+ |
+Evaluating
+ |
+Completed
+ |
+Archived
+
+
+Add:
+
+minimum sample sizes
+confidence thresholds
+experiment history
+manual override
+
+Model:
+
+Experiment
+
+ ├── variants
+ ├── assignments
+ ├── metrics
+ └── decision
+
+Phase 8 — Simplify server crate
+
+After extraction, server should contain only:
+
+server/
+
+├── routes/
+├── templates/
+├── middleware/
+├── auth/
+├── configuration/
+└── startup/
+
+
+Server should not contain:
+
+business rules
+analytics calculations
+experiment decisions
+SQL queries
+Migration strategy
+
+Do this incrementally.
+
+Step 1
+
+Add new crates without moving code.
+
+domain/
+application/
+infrastructure/
+
+
+Verify build.
+
+Step 2
+
+Move models.
+
+No behavior changes.
+
+Step 3
+
+Move workflows.
+
+Replace handlers with application calls.
+
+Step 4
+
+Move database code.
+
+Replace direct SQL access with repositories.
+
+Step 5
+
+Move background jobs.
+
+Step 6
+
+Delete old paths.
+
+Testing strategy
+
+Add tests at each layer.
+
+Domain tests
+
+Pure Rust:
+
+experiment assignment
+block version rules
+variant selection
+
+Application tests
+
+Mock repositories:
+
+publish flow
+experiment creation
+analytics recording
+
+Infrastructure tests
+
+SQLite:
+
+migration tests
+repository tests
+
+End-to-end
+
+Keep:
+
+Playwright tests
+HTTP tests
+
+Completion criteria
+
+The refactor is complete when:
+
+✅ server has no business logic
+✅ domain models have no infrastructure dependencies
+✅ analytics is event-based
+✅ experiments run independently of HTTP
+✅ SQLite can be replaced without rewriting business code
+✅ background processing is separated from requests
+✅ existing features continue working
+
+Expected result
+
+After this refactor Forgepost becomes:
+
+easier for contributors to understand
+safer to extend
+easier to test
+ready for PostgreSQL or external analytics later
+better positioned as an experimentation platform rather than only a blog engine
+
+The key is to avoid changing the product architecture; the current refactor branch already has the right ideas. This plan mainly formalizes the boundaries.

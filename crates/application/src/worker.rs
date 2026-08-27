@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use crate::repository::Repository;
+use crate::experiments::auto_decide_all;
+use crate::ports::Repository;
 
 pub struct BackgroundWorker {
     repo: Arc<dyn Repository>,
@@ -33,7 +34,7 @@ impl BackgroundWorker {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        if let Err(e) = crate::experiments::auto_decide_all(&*self.repo).await {
+                        if let Err(e) = auto_decide_all(&*self.repo).await {
                             tracing::warn!(error = %e, "auto-decider tick failed");
                         }
                     }

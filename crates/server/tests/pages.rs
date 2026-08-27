@@ -7,10 +7,11 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, Response, StatusCode, header};
-use forgepost_server::analytics::RateLimiter;
+use forgepost_analytics::RateLimiter;
+use forgepost_application::ports::SettingsRepo;
+use forgepost_infrastructure::sqlite::SqliteRepository;
 use forgepost_server::app;
 use forgepost_server::app_with_media;
-use forgepost_server::repository::{SettingsRepo, SqliteRepository};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use sqlx::sqlite::SqlitePoolOptions;

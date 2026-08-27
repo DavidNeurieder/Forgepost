@@ -1,0 +1,16 @@
+[package]
+name = "forgepost-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Forgepost business concepts: entities and value objects, no infrastructure dependencies"
+
+[dependencies]
+argon2 = { workspace = true }
+forgepost-content = { path = "../content" }
+forgepost-experiments = { path = "../experiments" }
+hex = { workspace = true }
+password-hash = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }

@@ -4,9 +4,14 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::model::{ExperimentRecord, ExperimentVariantInput, NewExperiment};
-use crate::repository::{DocumentRepo, ExperimentRepo, Repository};
+use crate::experiments::{
+    DecisionOutcome, conclude_no_winner, decide_experiment, promote_experiment,
+};
+use crate::ports::{DocumentRepo, ExperimentRepo, Repository};
 use crate::services::ServiceError;
+use forgepost_domain::model::{
+    ExperimentRecord, ExperimentVariantInput, FullDocument, NewExperiment,
+};
 
 pub struct ExperimentService {
     exp_repo: Arc<dyn ExperimentRepo>,
@@ -146,20 +151,16 @@ impl ExperimentService {
         &self,
         id: Uuid,
         owner_id: Uuid,
-    ) -> Result<Option<crate::experiments::DecisionOutcome>, ServiceError> {
+    ) -> Result<Option<DecisionOutcome>, ServiceError> {
         let exp = self.verify_experiment_owner(id, owner_id).await?;
         tracing::info!(experiment_id = %exp.id, "deciding experiment");
-        Ok(crate::experiments::decide_experiment(&*self.exp_repo, exp.id).await?)
+        Ok(decide_experiment(&*self.exp_repo, exp.id).await?)
     }
 
     /// Manual override: promote the current best variant.
-    pub async fn promote(
-        &self,
-        id: Uuid,
-        owner_id: Uuid,
-    ) -> Result<crate::experiments::DecisionOutcome, ServiceError> {
+    pub async fn promote(&self, id: Uuid, owner_id: Uuid) -> Result<DecisionOutcome, ServiceError> {
         let exp = self.verify_experiment_owner(id, owner_id).await?;
-        Ok(crate::experiments::promote_experiment(&*self.exp_repo, exp.id).await?)
+        Ok(promote_experiment(&*self.exp_repo, exp.id).await?)
     }
 
     /// Manual override: conclude "no improvement".
@@ -167,9 +168,9 @@ impl ExperimentService {
         &self,
         id: Uuid,
         owner_id: Uuid,
-    ) -> Result<crate::experiments::DecisionOutcome, ServiceError> {
+    ) -> Result<DecisionOutcome, ServiceError> {
         let exp = self.verify_experiment_owner(id, owner_id).await?;
-        Ok(crate::experiments::conclude_no_winner(&*self.exp_repo, exp.id).await?)
+        Ok(conclude_no_winner(&*self.exp_repo, exp.id).await?)
     }
 
     // ------------------------------------------------------------------
@@ -181,7 +182,7 @@ impl ExperimentService {
         &self,
         document_id: Uuid,
         owner_id: Uuid,
-    ) -> Result<crate::model::FullDocument, ServiceError> {
+    ) -> Result<FullDocument, ServiceError> {
         let full = self
             .doc_repo
             .get_document(document_id)
@@ -204,7 +205,7 @@ impl ExperimentService {
             .experiment(experiment_id)
             .await?
             .ok_or_else(|| ServiceError::Validation("experiment not found".into()))?;
-        self.verify_document_owner(exp.document_id, owner_id)
+        self.verify_document_owner(exp.document_id.0, owner_id)
             .await?;
         Ok(exp)
     }

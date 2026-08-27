@@ -1,48 +1,24 @@
 //! Auth: argon2 password hashing, server-side sessions, CSRF, cookies, and the
 //! `AuthUser` request extractor.
 
-use argon2::Argon2;
-use argon2::password_hash::{
-    PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
-};
 use axum::{
     extract::FromRequestParts,
     http::{HeaderMap, HeaderValue, header, request::Parts},
 };
 use forgepost_content::now_ms;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::error::ApiError;
-use crate::model::{Session, User};
+use forgepost_domain::model::{Session, User};
 
 pub const SESSION_COOKIE: &str = "forgepost_session";
 pub const CSRF_HEADER: &str = "x-csrf-token";
-pub const SESSION_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
 
-pub fn hash_password(password: &str) -> Result<String, ApiError> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map(|h| h.to_string())
-        .map_err(|_| ApiError::bad_request("could not hash password"))
-}
-
-pub fn verify_password(hash: &str, password: &str) -> bool {
-    PasswordHash::new(hash)
-        .ok()
-        .and_then(|parsed| {
-            Argon2::default()
-                .verify_password(password.as_bytes(), &parsed)
-                .ok()
-        })
-        .is_some()
-}
-
-pub fn sha256_hex(input: &str) -> String {
-    hex::encode(Sha256::digest(input.as_bytes()))
-}
+// Password-hashing helpers live in the domain crate (shared with the
+// application and infrastructure layers); re-exported here so callers keep
+// their `crate::auth::` paths.
+pub use forgepost_domain::security::{SESSION_TTL_MS, hash_password, sha256_hex, verify_password};
 
 /// Read a cookie from a request's headers.
 pub fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {

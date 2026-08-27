@@ -6,8 +6,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::repository::RepositoryError;
-use crate::services::ServiceError;
+use forgepost_application::ports::RepositoryError;
+use forgepost_application::services::ServiceError;
 
 pub struct ApiError(pub RepositoryError);
 

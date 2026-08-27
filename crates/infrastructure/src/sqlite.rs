@@ -1,19 +1,23 @@
-//! Storage-agnostic repository layer.
+//! SQLite-backed implementation of the [`forgepost_application::ports`]
+//! repository traits (solo mode, the only MVP distribution).
 //!
-//! The domain never touches SQL. A Postgres implementation of [`Repository`]
-//! can be added later without touching routes or domain logic (§5, §5.4).
+//! The port traits are implemented here; migrations for the schema live in the
+//! workspace `migrations/` directory. The domain and application layers never
+//! touch SQL (§5, §5.4).
 
-use crate::analytics::{ArticleStats, BandReach};
-use crate::auth::{SESSION_TTL_MS, sha256_hex};
-use crate::model::{
-    AnalyticsEvent, Comment, DashboardMetric, DocumentSummary, FullDocument, Media, Session,
-    SiteSettings, User,
-};
+pub use forgepost_application::ports::*;
+
 use async_trait::async_trait;
+use forgepost_analytics::{ArticleStats, BandReach};
 use forgepost_content::{
     Block, BlockContent, BlockId, BlockKind, BlockVersion, Document, DocumentId, VersionId,
     html_escape, now_ms,
 };
+use forgepost_domain::model::{
+    AnalyticsEvent, Comment, DashboardMetric, DocumentSummary, FullDocument, Media, PostId,
+    Session, SiteSettings, User,
+};
+use forgepost_domain::security::{SESSION_TTL_MS, sha256_hex};
 use forgepost_experiments::{ExperimentId, VariantId};
 use serde_json::json;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
@@ -23,285 +27,6 @@ use uuid::Uuid;
 
 /// One week in milliseconds; the dashboard's "last 7 days" window.
 const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1000;
-
-// ---------------------------------------------------------------------------
-// Sub-traits: each service depends on the narrowest trait it needs.
-// ---------------------------------------------------------------------------
-
-#[async_trait]
-pub trait UserRepo: Send + Sync {
-    async fn is_setup_complete(&self) -> Result<bool, RepositoryError>;
-    async fn create_first_user(
-        &self,
-        email: &str,
-        display_name: &str,
-        password_hash: &str,
-    ) -> Result<User, RepositoryError>;
-    async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, RepositoryError>;
-    async fn find_user_by_id(&self, id: Uuid) -> Result<Option<User>, RepositoryError>;
-}
-
-#[async_trait]
-pub trait SessionRepo: Send + Sync {
-    async fn create_session(&self, user_id: Uuid) -> Result<Session, RepositoryError>;
-    async fn session_by_token(&self, token: &str) -> Result<Option<Session>, RepositoryError>;
-    async fn delete_session(&self, token: &str) -> Result<(), RepositoryError>;
-}
-
-#[async_trait]
-pub trait SettingsRepo: Send + Sync {
-    async fn get_setting(&self, key: &str) -> Result<Option<String>, RepositoryError>;
-    async fn set_setting(&self, key: &str, value: &str) -> Result<(), RepositoryError>;
-    /// Read the blog-wide settings, applying the defaults for any unset keys.
-    async fn site_settings(&self) -> Result<SiteSettings, RepositoryError>;
-}
-
-#[async_trait]
-pub trait DocumentRepo: Send + Sync {
-    async fn list_documents(&self, owner_id: Uuid)
-    -> Result<Vec<DocumentSummary>, RepositoryError>;
-    async fn get_document(&self, id: DocumentId) -> Result<Option<FullDocument>, RepositoryError>;
-    async fn create_document(
-        &self,
-        owner_id: Uuid,
-        title: &str,
-    ) -> Result<FullDocument, RepositoryError>;
-    async fn update_document_title(
-        &self,
-        id: DocumentId,
-        title: &str,
-    ) -> Result<(), RepositoryError>;
-    /// Regenerate the slug from `title` while the document is still a draft;
-    /// once published the slug is stable, so this is a no-op for published
-    /// documents. Returns true when the slug changed.
-    async fn regenerate_draft_slug(
-        &self,
-        id: DocumentId,
-        title: &str,
-    ) -> Result<bool, RepositoryError>;
-    async fn save_document_blocks(
-        &self,
-        id: DocumentId,
-        blocks: &[Block],
-        versions: &[BlockVersion],
-    ) -> Result<(), RepositoryError>;
-    async fn publish_document(&self, id: DocumentId) -> Result<(), RepositoryError>;
-    /// Permanently remove a document. Cascades clear its blocks, block
-    /// versions, tags, comments, experiments, and search index rows; analytics
-    /// events survive with their `document_id` set to NULL.
-    async fn delete_document(&self, id: DocumentId) -> Result<(), RepositoryError>;
-    async fn get_published_by_slug(
-        &self,
-        slug: &str,
-    ) -> Result<Option<FullDocument>, RepositoryError>;
-    async fn list_published(&self) -> Result<Vec<DocumentSummary>, RepositoryError>;
-    /// Published documents with their tags, newest first (blog home page).
-    async fn list_published_with_tags(
-        &self,
-    ) -> Result<Vec<crate::model::PublishedPost>, RepositoryError>;
-    /// Published documents tagged `tag`, newest first, with their tags
-    /// (per-tag listing page).
-    async fn list_published_with_tag(
-        &self,
-        tag: &str,
-    ) -> Result<Vec<crate::model::PublishedPost>, RepositoryError>;
-    /// All non-deleted documents regardless of status (used by `export`).
-    async fn list_all_documents(&self) -> Result<Vec<DocumentSummary>, RepositoryError>;
-    async fn set_document_tags(
-        &self,
-        id: DocumentId,
-        tags: &[String],
-    ) -> Result<(), RepositoryError>;
-    async fn document_tags(&self, id: DocumentId) -> Result<Vec<String>, RepositoryError>;
-}
-
-#[async_trait]
-pub trait CommentRepo: Send + Sync {
-    async fn create_comment(
-        &self,
-        document_id: DocumentId,
-        author_name: &str,
-        body: &str,
-    ) -> Result<Comment, RepositoryError>;
-    async fn comments_for_document(
-        &self,
-        document_id: DocumentId,
-        status: Option<&str>,
-    ) -> Result<Vec<Comment>, RepositoryError>;
-    async fn pending_comments(&self) -> Result<Vec<Comment>, RepositoryError>;
-    async fn set_comment_status(&self, id: Uuid, status: &str) -> Result<(), RepositoryError>;
-}
-
-#[async_trait]
-pub trait AnalyticsRepo: Send + Sync {
-    async fn record_analytics_event(&self, event: &AnalyticsEvent) -> Result<(), RepositoryError>;
-    async fn article_stats(&self, document_id: DocumentId)
-    -> Result<ArticleStats, RepositoryError>;
-    /// Distinct pageviews whose deepest scroll reached each band (cumulative).
-    async fn band_reach(&self, document_id: DocumentId) -> Result<Vec<BandReach>, RepositoryError>;
-    /// Distinct pageviews that rendered each block.
-    async fn block_impressions(
-        &self,
-        document_id: DocumentId,
-    ) -> Result<std::collections::HashMap<Uuid, i64>, RepositoryError>;
-    /// Per-referrer distinct view pageviews for a document (Stats "traffic
-    /// sources" table). Referrers are bucketed in `analytics::bucket_traffic_sources`.
-    async fn referrer_counts(
-        &self,
-        document_id: DocumentId,
-    ) -> Result<Vec<(Option<String>, i64)>, RepositoryError>;
-    /// Per-document dashboard metrics for the last two 7-day windows plus
-    /// lifetime views and completions. `now_ms` pins the window boundary so
-    /// tests can drive results deterministically.
-    async fn dashboard_metrics(&self, now_ms: i64)
-    -> Result<Vec<DashboardMetric>, RepositoryError>;
-}
-
-#[async_trait]
-pub trait ExperimentRepo: Send + Sync {
-    /// Create an experiment as an overlay on a block. Control is the block's
-    /// current version; each variant writes a fresh immutable version to the
-    /// shared pool without touching the block's canonical `current_version_id`.
-    async fn create_experiment(
-        &self,
-        document_id: DocumentId,
-        block_id: BlockId,
-        new: &crate::model::NewExperiment,
-    ) -> Result<crate::model::ExperimentRecord, RepositoryError>;
-    async fn experiment(
-        &self,
-        id: forgepost_experiments::ExperimentId,
-    ) -> Result<Option<crate::model::ExperimentRecord>, RepositoryError>;
-    async fn experiments_for_document(
-        &self,
-        document_id: DocumentId,
-    ) -> Result<Vec<crate::model::ExperimentRecord>, RepositoryError>;
-    /// Experiments currently running for a document (article render overlay).
-    async fn running_experiments_for_document(
-        &self,
-        document_id: DocumentId,
-    ) -> Result<Vec<crate::model::ExperimentRecord>, RepositoryError>;
-    /// All experiments with status `running` across every document (auto-decider).
-    async fn running_experiments(
-        &self,
-    ) -> Result<Vec<crate::model::ExperimentRecord>, RepositoryError>;
-    async fn start_experiment(
-        &self,
-        id: forgepost_experiments::ExperimentId,
-    ) -> Result<(), RepositoryError>;
-    async fn stop_experiment(
-        &self,
-        id: forgepost_experiments::ExperimentId,
-    ) -> Result<(), RepositoryError>;
-    /// Repoint the block to `version_id` (promotion). Canonical content changes
-    /// only here; the version pool itself is never mutated.
-    async fn promote_block_version(
-        &self,
-        block_id: BlockId,
-        version_id: VersionId,
-    ) -> Result<(), RepositoryError>;
-    /// Append a decision row and update the experiment status atomically.
-    async fn conclude_experiment(
-        &self,
-        id: forgepost_experiments::ExperimentId,
-        decision: &str,
-        winning_variant_id: Option<forgepost_experiments::VariantId>,
-        promoted_version_id: Option<VersionId>,
-        stats: &crate::model::ExperimentDecision,
-    ) -> Result<(), RepositoryError>;
-    /// Per-variant sample counts for a running experiment (deduped by visitor).
-    async fn experiment_counts(
-        &self,
-        id: forgepost_experiments::ExperimentId,
-    ) -> Result<Vec<crate::model::ExperimentCounts>, RepositoryError>;
-    async fn experiment_decisions(
-        &self,
-        id: forgepost_experiments::ExperimentId,
-    ) -> Result<Vec<crate::model::ExperimentDecision>, RepositoryError>;
-    /// Confirm an experiment is running and that `variant_id` belongs to it.
-    async fn experiment_variant_belongs(
-        &self,
-        id: forgepost_experiments::ExperimentId,
-        variant_id: forgepost_experiments::VariantId,
-    ) -> Result<bool, RepositoryError>;
-}
-
-#[async_trait]
-pub trait SearchRepo: Send + Sync {
-    /// Search published documents, ranked by BM25. `query` is a plain string;
-    /// the last token is treated as a prefix (as-you-type matching).
-    async fn search_documents(
-        &self,
-        query: &str,
-        limit: i64,
-    ) -> Result<Vec<crate::model::SearchHit>, RepositoryError>;
-    /// Re-index a single document (published only; drafts drop out of search).
-    /// Safe to call any time; no-ops for missing documents.
-    async fn refresh_search_index(&self, document_id: DocumentId) -> Result<(), RepositoryError>;
-    /// Rebuild the index from scratch for every published document.
-    async fn rebuild_search_index_all(&self) -> Result<(), RepositoryError>;
-}
-
-#[async_trait]
-pub trait MediaRepo: Send + Sync {
-    /// Record an uploaded file. The caller writes the bytes to the media
-    /// directory itself; this only persists the metadata row.
-    async fn insert_media(&self, media: &Media) -> Result<(), RepositoryError>;
-    /// Fetch media metadata by the on-disk name (e.g. `<uuid>.png`).
-    async fn media_by_disk_name(&self, disk_name: &str) -> Result<Option<Media>, RepositoryError>;
-}
-
-#[async_trait]
-pub trait ExportRepo: Send + Sync {
-    async fn export_json(&self) -> Result<serde_json::Value, RepositoryError>;
-}
-
-// ---------------------------------------------------------------------------
-// Composite trait: the full storage surface used by AppState and route
-// handlers that touch multiple domains. Services should depend on the
-// narrowest sub-trait instead.
-// ---------------------------------------------------------------------------
-
-#[async_trait]
-pub trait Repository:
-    UserRepo
-    + SessionRepo
-    + SettingsRepo
-    + DocumentRepo
-    + CommentRepo
-    + AnalyticsRepo
-    + ExperimentRepo
-    + SearchRepo
-    + MediaRepo
-    + ExportRepo
-    + Send
-    + Sync
-{
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum RepositoryError {
-    #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("migration error: {0}")]
-    Migration(#[from] sqlx::migrate::MigrateError),
-    #[error("not found: {0}")]
-    NotFound(String),
-    #[error("unauthorized")]
-    Unauthorized,
-    #[error("forbidden")]
-    Forbidden,
-    #[error("invalid input: {0}")]
-    InvalidInput(String),
-    #[error("conflict: {0}")]
-    Conflict(String),
-    #[error("invalid uuid: {0}")]
-    Uuid(#[from] uuid::Error),
-    #[error("rate limited")]
-    RateLimited,
-}
 
 /// SQLite-backed repository (solo mode, the only MVP distribution).
 pub struct SqliteRepository {
@@ -350,7 +75,7 @@ fn row_to_user(row: &sqlx::sqlite::SqliteRow) -> User {
 
 fn row_to_document_summary(row: &sqlx::sqlite::SqliteRow) -> DocumentSummary {
     DocumentSummary {
-        id: Uuid::from_str(&row.get::<String, _>("id")).unwrap_or_default(),
+        id: PostId(Uuid::from_str(&row.get::<String, _>("id")).unwrap_or_default()),
         title: row.get("title"),
         slug: row.get("slug"),
         status: row.get("status"),
@@ -613,7 +338,7 @@ impl DocumentRepo for SqliteRepository {
 
     async fn list_published_with_tags(
         &self,
-    ) -> Result<Vec<crate::model::PublishedPost>, RepositoryError> {
+    ) -> Result<Vec<forgepost_domain::model::PublishedPost>, RepositoryError> {
         let rows = sqlx::query(
             "SELECT d.id, d.title, d.slug, d.published_at_ms,
                     (SELECT json_group_array(t.slug) FROM tags t
@@ -627,8 +352,8 @@ impl DocumentRepo for SqliteRepository {
         .await?;
         Ok(rows
             .iter()
-            .map(|row| crate::model::PublishedPost {
-                id: Uuid::from_str(&row.get::<String, _>("id")).unwrap_or_default(),
+            .map(|row| forgepost_domain::model::PublishedPost {
+                id: PostId(Uuid::from_str(&row.get::<String, _>("id")).unwrap_or_default()),
                 title: row.get("title"),
                 slug: row.get("slug"),
                 published_at_ms: row.get("published_at_ms"),
@@ -643,7 +368,7 @@ impl DocumentRepo for SqliteRepository {
     async fn list_published_with_tag(
         &self,
         tag: &str,
-    ) -> Result<Vec<crate::model::PublishedPost>, RepositoryError> {
+    ) -> Result<Vec<forgepost_domain::model::PublishedPost>, RepositoryError> {
         let rows = sqlx::query(
             "SELECT d.id, d.title, d.slug, d.published_at_ms,
                     (SELECT json_group_array(t2.slug) FROM tags t2
@@ -660,8 +385,8 @@ impl DocumentRepo for SqliteRepository {
         .await?;
         Ok(rows
             .iter()
-            .map(|row| crate::model::PublishedPost {
-                id: Uuid::from_str(&row.get::<String, _>("id")).unwrap_or_default(),
+            .map(|row| forgepost_domain::model::PublishedPost {
+                id: PostId(Uuid::from_str(&row.get::<String, _>("id")).unwrap_or_default()),
                 title: row.get("title"),
                 slug: row.get("slug"),
                 published_at_ms: row.get("published_at_ms"),
@@ -1036,7 +761,7 @@ impl CommentRepo for SqliteRepository {
         .await?;
         Ok(Comment {
             id,
-            document_id,
+            document_id: PostId::from(document_id),
             author_name: author_name.to_string(),
             body: body.to_string(),
             status: "pending".into(),
@@ -1071,7 +796,9 @@ impl CommentRepo for SqliteRepository {
             .iter()
             .map(|r| Comment {
                 id: Uuid::from_str(&r.get::<String, _>("id")).unwrap_or_default(),
-                document_id: Uuid::from_str(&r.get::<String, _>("document_id")).unwrap_or_default(),
+                document_id: PostId(
+                    Uuid::from_str(&r.get::<String, _>("document_id")).unwrap_or_default(),
+                ),
                 author_name: r.get("author_name"),
                 body: r.get("body"),
                 status: r.get("status"),
@@ -1103,7 +830,9 @@ impl CommentRepo for SqliteRepository {
             .iter()
             .map(|r| Comment {
                 id: Uuid::from_str(&r.get::<String, _>("id")).unwrap_or_default(),
-                document_id: Uuid::from_str(&r.get::<String, _>("document_id")).unwrap_or_default(),
+                document_id: PostId(
+                    Uuid::from_str(&r.get::<String, _>("document_id")).unwrap_or_default(),
+                ),
                 author_name: r.get("author_name"),
                 body: r.get("body"),
                 status: r.get("status"),
@@ -1134,7 +863,7 @@ impl ExportRepo for SqliteRepository {
         let summaries = self.list_all_documents().await?;
         let mut documents = Vec::new();
         for summary in summaries {
-            if let Some(full) = self.get_document(summary.id).await? {
+            if let Some(full) = self.get_document(summary.id.0).await? {
                 let doc = &full.document;
                 let tags = self.document_tags(doc.id).await?;
                 let blocks: Vec<serde_json::Value> = doc
@@ -1415,7 +1144,7 @@ impl AnalyticsRepo for SqliteRepository {
                 let id = Uuid::from_str(&id).ok()?;
                 let (views_total, completed) = totals.remove(&id).unwrap_or((0, 0));
                 Some(DashboardMetric {
-                    document_id: id,
+                    document_id: PostId::from(id),
                     views_7d: r.get("cur"),
                     views_prev_7d: r.get("prev"),
                     views_total,
@@ -1432,8 +1161,8 @@ impl ExperimentRepo for SqliteRepository {
         &self,
         document_id: DocumentId,
         block_id: BlockId,
-        new: &crate::model::NewExperiment,
-    ) -> Result<crate::model::ExperimentRecord, RepositoryError> {
+        new: &forgepost_domain::model::NewExperiment,
+    ) -> Result<forgepost_domain::model::ExperimentRecord, RepositoryError> {
         let mut tx = self.pool.begin().await?;
 
         let control_row =
@@ -1516,7 +1245,7 @@ impl ExperimentRepo for SqliteRepository {
             .bind(input.weight)
             .execute(&mut *tx)
             .await?;
-            variant_rows.push(crate::model::ExperimentVariantRecord {
+            variant_rows.push(forgepost_domain::model::ExperimentVariantRecord {
                 id: variant_id,
                 block_id,
                 version_id,
@@ -1527,7 +1256,7 @@ impl ExperimentRepo for SqliteRepository {
 
         tx.commit().await?;
 
-        let mut variants_all = vec![crate::model::ExperimentVariantRecord {
+        let mut variants_all = vec![forgepost_domain::model::ExperimentVariantRecord {
             id: control_variant_id,
             block_id,
             version_id: control_version_id,
@@ -1535,9 +1264,9 @@ impl ExperimentRepo for SqliteRepository {
             is_control: true,
         }];
         variants_all.extend(variant_rows);
-        Ok(crate::model::ExperimentRecord {
+        Ok(forgepost_domain::model::ExperimentRecord {
             id,
-            document_id,
+            document_id: PostId::from(document_id),
             block_id,
             name: new.name.clone(),
             status: "draft".into(),
@@ -1560,14 +1289,14 @@ impl ExperimentRepo for SqliteRepository {
     async fn experiment(
         &self,
         id: forgepost_experiments::ExperimentId,
-    ) -> Result<Option<crate::model::ExperimentRecord>, RepositoryError> {
+    ) -> Result<Option<forgepost_domain::model::ExperimentRecord>, RepositoryError> {
         load_experiment(&self.pool, &id).await
     }
 
     async fn experiments_for_document(
         &self,
         document_id: DocumentId,
-    ) -> Result<Vec<crate::model::ExperimentRecord>, RepositoryError> {
+    ) -> Result<Vec<forgepost_domain::model::ExperimentRecord>, RepositoryError> {
         let rows = sqlx::query(
             "SELECT id FROM experiments WHERE document_id = ? ORDER BY created_at_ms DESC",
         )
@@ -1587,7 +1316,7 @@ impl ExperimentRepo for SqliteRepository {
     async fn running_experiments_for_document(
         &self,
         document_id: DocumentId,
-    ) -> Result<Vec<crate::model::ExperimentRecord>, RepositoryError> {
+    ) -> Result<Vec<forgepost_domain::model::ExperimentRecord>, RepositoryError> {
         let rows = sqlx::query(
             "SELECT id FROM experiments
              WHERE document_id = ? AND status = 'running' ORDER BY created_at_ms ASC",
@@ -1607,7 +1336,7 @@ impl ExperimentRepo for SqliteRepository {
 
     async fn running_experiments(
         &self,
-    ) -> Result<Vec<crate::model::ExperimentRecord>, RepositoryError> {
+    ) -> Result<Vec<forgepost_domain::model::ExperimentRecord>, RepositoryError> {
         let rows = sqlx::query("SELECT id FROM experiments WHERE status = 'running'")
             .fetch_all(&self.pool)
             .await?;
@@ -1693,7 +1422,7 @@ impl ExperimentRepo for SqliteRepository {
         decision: &str,
         winning_variant_id: Option<forgepost_experiments::VariantId>,
         promoted_version_id: Option<VersionId>,
-        stats: &crate::model::ExperimentDecision,
+        stats: &forgepost_domain::model::ExperimentDecision,
     ) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
@@ -1745,7 +1474,7 @@ impl ExperimentRepo for SqliteRepository {
     async fn experiment_counts(
         &self,
         id: forgepost_experiments::ExperimentId,
-    ) -> Result<Vec<crate::model::ExperimentCounts>, RepositoryError> {
+    ) -> Result<Vec<forgepost_domain::model::ExperimentCounts>, RepositoryError> {
         let rows = sqlx::query(
             "SELECT variant_id,
                     COUNT(DISTINCT CASE WHEN event_type = 'experiment_impression' THEN visitor_id END) AS impressions,
@@ -1759,7 +1488,7 @@ impl ExperimentRepo for SqliteRepository {
         .await?;
         Ok(rows
             .iter()
-            .map(|r| crate::model::ExperimentCounts {
+            .map(|r| forgepost_domain::model::ExperimentCounts {
                 variant_id: Uuid::from_str(&r.get::<String, _>("variant_id")).unwrap_or_default(),
                 impressions: r.get("impressions"),
                 conversions: r.get("conversions"),
@@ -1770,7 +1499,7 @@ impl ExperimentRepo for SqliteRepository {
     async fn experiment_decisions(
         &self,
         id: forgepost_experiments::ExperimentId,
-    ) -> Result<Vec<crate::model::ExperimentDecision>, RepositoryError> {
+    ) -> Result<Vec<forgepost_domain::model::ExperimentDecision>, RepositoryError> {
         let rows = sqlx::query(
             "SELECT id, experiment_id, decided_at_ms, decision, winner_variant_id, promoted_version_id,
                     effect_size, confidence, control_impressions, control_conversions,
@@ -1782,7 +1511,7 @@ impl ExperimentRepo for SqliteRepository {
         .await?;
         Ok(rows
             .iter()
-            .map(|r| crate::model::ExperimentDecision {
+            .map(|r| forgepost_domain::model::ExperimentDecision {
                 id: Uuid::from_str(&r.get::<String, _>("id")).unwrap_or_default(),
                 experiment_id: id,
                 decided_at_ms: r.get("decided_at_ms"),
@@ -1825,7 +1554,7 @@ impl SearchRepo for SqliteRepository {
         &self,
         query: &str,
         limit: i64,
-    ) -> Result<Vec<crate::model::SearchHit>, RepositoryError> {
+    ) -> Result<Vec<forgepost_domain::model::SearchHit>, RepositoryError> {
         let match_expr = fts_match_expr(query);
         if match_expr.is_empty() {
             return Ok(Vec::new());
@@ -1851,8 +1580,10 @@ impl SearchRepo for SqliteRepository {
         .await?;
         Ok(rows
             .iter()
-            .map(|r| crate::model::SearchHit {
-                document_id: Uuid::from_str(&r.get::<String, _>("document_id")).unwrap_or_default(),
+            .map(|r| forgepost_domain::model::SearchHit {
+                document_id: PostId(
+                    Uuid::from_str(&r.get::<String, _>("document_id")).unwrap_or_default(),
+                ),
                 slug: r.get("slug"),
                 title: r.get("title"),
                 published_at_ms: r.get("published_at_ms"),
@@ -1955,7 +1686,7 @@ impl SearchRepo for SqliteRepository {
         tx.commit().await?;
         let published = self.list_published().await?;
         for doc in published {
-            self.refresh_search_index(doc.id).await?;
+            self.refresh_search_index(doc.id.0).await?;
         }
         Ok(())
     }
@@ -2096,7 +1827,7 @@ fn fts_match_expr(query: &str) -> String {
 async fn load_experiment(
     pool: &SqlitePool,
     id: &ExperimentId,
-) -> Result<Option<crate::model::ExperimentRecord>, RepositoryError> {
+) -> Result<Option<forgepost_domain::model::ExperimentRecord>, RepositoryError> {
     let mut tx = pool.begin().await?;
     load_experiment_tx(&mut tx, id).await
 }
@@ -2106,7 +1837,7 @@ async fn load_experiment(
 async fn load_experiment_tx(
     tx: &mut Transaction<'_, sqlx::sqlite::Sqlite>,
     id: &ExperimentId,
-) -> Result<Option<crate::model::ExperimentRecord>, RepositoryError> {
+) -> Result<Option<forgepost_domain::model::ExperimentRecord>, RepositoryError> {
     let row = sqlx::query(
         "SELECT id, document_id, block_id, name, status, control_version_id, goal,
                 traffic_weight, confidence_threshold, min_sample_per_variant,
@@ -2131,7 +1862,7 @@ async fn load_experiment_tx(
 
     let variants = variant_rows
         .iter()
-        .map(|r| crate::model::ExperimentVariantRecord {
+        .map(|r| forgepost_domain::model::ExperimentVariantRecord {
             id: Uuid::from_str(&r.get::<String, _>("id")).unwrap_or_default(),
             block_id: Uuid::from_str(&r.get::<String, _>("block_id")).unwrap_or_default(),
             version_id: Uuid::from_str(&r.get::<String, _>("version_id")).unwrap_or_default(),
@@ -2140,9 +1871,11 @@ async fn load_experiment_tx(
         })
         .collect();
 
-    Ok(Some(crate::model::ExperimentRecord {
+    Ok(Some(forgepost_domain::model::ExperimentRecord {
         id: *id,
-        document_id: Uuid::from_str(&row.get::<String, _>("document_id")).unwrap_or_default(),
+        document_id: PostId(
+            Uuid::from_str(&row.get::<String, _>("document_id")).unwrap_or_default(),
+        ),
         block_id: Uuid::from_str(&row.get::<String, _>("block_id")).unwrap_or_default(),
         name: row.get("name"),
         status: row.get("status"),
@@ -2168,6 +1901,7 @@ async fn load_experiment_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use forgepost_domain::model::VisitorId;
 
     async fn repo() -> SqliteRepository {
         let pool = SqlitePoolOptions::new()
@@ -2601,7 +2335,7 @@ mod tests {
         repo.create_experiment(
             doc_id,
             block_id,
-            &crate::model::NewExperiment {
+            &forgepost_domain::model::NewExperiment {
                 name: "Headline test".into(),
                 goal: "completion".into(),
                 traffic_weight: 50.0,
@@ -2609,7 +2343,7 @@ mod tests {
                 min_sample_per_variant: 100,
                 no_winner_prob: 0.1,
                 max_duration_ms: 7 * 86_400_000,
-                variants: vec![crate::model::ExperimentVariantInput {
+                variants: vec![forgepost_domain::model::ExperimentVariantInput {
                     content: json!("new headline"),
                     weight: 50.0,
                 }],
@@ -2621,12 +2355,12 @@ mod tests {
         // Analytics event (document-scoped) and media (document-independent).
         repo.record_analytics_event(&AnalyticsEvent {
             id: Uuid::new_v4(),
-            document_id: doc_id,
+            document_id: PostId(doc_id),
             event_type: "view".into(),
             band: None,
             block_id: Some(block_id),
             pageview_id: Uuid::new_v4(),
-            visitor_id: Uuid::new_v4(),
+            visitor_id: VisitorId(Uuid::new_v4()),
             referrer: None,
             user_agent: None,
             read_time_ms: None,
@@ -2715,12 +2449,12 @@ mod tests {
 
         repo.record_analytics_event(&AnalyticsEvent {
             id: Uuid::new_v4(),
-            document_id: doc_id,
+            document_id: PostId(doc_id),
             event_type: "recommendation_click".into(),
             band: None,
             block_id: None,
             pageview_id: Uuid::new_v4(),
-            visitor_id: Uuid::new_v4(),
+            visitor_id: VisitorId(Uuid::new_v4()),
             referrer: None,
             user_agent: None,
             read_time_ms: None,
@@ -2748,9 +2482,9 @@ mod tests {
         let full = repo.create_document(user.id, "Sources").await.unwrap();
         let doc_id = full.document.id;
 
-        let view = |pv: Uuid, visitor: Uuid, referrer: Option<&str>| AnalyticsEvent {
+        let view = |pv: Uuid, visitor: VisitorId, referrer: Option<&str>| AnalyticsEvent {
             id: Uuid::new_v4(),
-            document_id: doc_id,
+            document_id: PostId(doc_id),
             event_type: "view".into(),
             band: None,
             block_id: None,
@@ -2767,26 +2501,26 @@ mod tests {
 
         repo.record_analytics_event(&view(
             Uuid::new_v4(),
-            Uuid::new_v4(),
+            VisitorId(Uuid::new_v4()),
             Some("https://www.google.com/"),
         ))
         .await
         .unwrap();
         repo.record_analytics_event(&view(
             Uuid::new_v4(),
-            Uuid::new_v4(),
+            VisitorId(Uuid::new_v4()),
             Some("https://www.google.com/"),
         ))
         .await
         .unwrap();
-        repo.record_analytics_event(&view(Uuid::new_v4(), Uuid::new_v4(), None))
+        repo.record_analytics_event(&view(Uuid::new_v4(), VisitorId(Uuid::new_v4()), None))
             .await
             .unwrap();
         // Non-view events must be ignored.
         repo.record_analytics_event(&AnalyticsEvent {
             event_type: "banded_scroll".into(),
             band: Some(100),
-            ..view(Uuid::new_v4(), Uuid::new_v4(), None)
+            ..view(Uuid::new_v4(), VisitorId(Uuid::new_v4()), None)
         })
         .await
         .unwrap();
@@ -2817,12 +2551,12 @@ mod tests {
 
         let event = |event_type: &str, band: Option<i64>, pv: Uuid, at: i64| AnalyticsEvent {
             id: Uuid::new_v4(),
-            document_id: doc_id,
+            document_id: PostId(doc_id),
             event_type: event_type.into(),
             band,
             block_id: None,
             pageview_id: pv,
-            visitor_id: Uuid::new_v4(),
+            visitor_id: VisitorId(Uuid::new_v4()),
             referrer: None,
             user_agent: None,
             read_time_ms: None,

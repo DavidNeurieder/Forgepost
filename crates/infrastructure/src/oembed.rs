@@ -10,13 +10,25 @@
 
 use std::time::Duration;
 
+use async_trait::async_trait;
+use forgepost_application::ports::OEmbedResolver;
 use forgepost_content::{BlockKind, ParsedBlock, video_needs_metadata};
 use serde_json::Value;
 
 const OEMBED_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Rumble oEmbed resolver: implements the application layer's oEmbed port.
+pub struct RumbleOembed;
+
+#[async_trait]
+impl OEmbedResolver for RumbleOembed {
+    async fn enrich_video_metadata(&self, parsed: &mut [ParsedBlock]) {
+        enrich_video_metadata(parsed).await;
+    }
+}
+
 /// Fill in `title`/`thumbnail` for Rumble video blocks that still lack them.
-pub(crate) async fn enrich_video_metadata(parsed: &mut [ParsedBlock]) {
+pub async fn enrich_video_metadata(parsed: &mut [ParsedBlock]) {
     let pending: Vec<(usize, String)> = parsed
         .iter()
         .enumerate()

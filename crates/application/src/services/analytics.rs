@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 
+use forgepost_analytics::{DocumentStatsView, RateLimiter, block_stats, preview_text};
 use forgepost_content::now_ms;
+use forgepost_domain::model::{
+    AnalyticsEvent, Comment, DashboardMetric, DocumentSummary, PostId, VisitorId,
+};
 use uuid::Uuid;
 
-use crate::analytics::{RateLimiter, block_stats, preview_text};
-use crate::model::{AnalyticsEvent, DashboardMetric};
-use crate::repository::{AnalyticsRepo, CommentRepo, DocumentRepo, ExperimentRepo, Repository};
+use crate::ports::{AnalyticsRepo, CommentRepo, DocumentRepo, ExperimentRepo, Repository};
 use crate::services::ServiceError;
 
 pub struct AnalyticsService {
@@ -82,7 +84,7 @@ impl AnalyticsService {
             if exp.status != "running" {
                 return Err(ServiceError::Validation("experiment is not running".into()));
             }
-            if exp.document_id != document_id {
+            if exp.document_id.0 != document_id {
                 return Err(ServiceError::Validation(
                     "experiment belongs to another article".into(),
                 ));
@@ -109,12 +111,12 @@ impl AnalyticsService {
 
         let event = AnalyticsEvent {
             id: Uuid::new_v4(),
-            document_id,
+            document_id: PostId(document_id),
             event_type: parsed.event_type.into(),
             band: parsed.band,
             block_id: parsed.block_id,
             pageview_id,
-            visitor_id,
+            visitor_id: VisitorId(visitor_id),
             referrer,
             user_agent,
             read_time_ms: parsed.read_time_ms,
@@ -133,7 +135,7 @@ impl AnalyticsService {
         &self,
         document_id: Uuid,
         owner_id: Uuid,
-    ) -> Result<crate::analytics::DocumentStatsView, ServiceError> {
+    ) -> Result<DocumentStatsView, ServiceError> {
         let full = self
             .doc_repo
             .get_document(document_id)
@@ -167,7 +169,7 @@ impl AnalyticsService {
             })
             .collect();
         let blocks = block_stats(&layout, &impressions, &band_reach, article.views);
-        Ok(crate::analytics::DocumentStatsView { article, blocks })
+        Ok(DocumentStatsView { article, blocks })
     }
 
     /// Dashboard metrics: best post, nudge, and per-document metrics.
@@ -175,12 +177,12 @@ impl AnalyticsService {
         let docs = self.doc_repo.list_documents(owner_id).await?;
         let metrics = self.analytics_repo.dashboard_metrics(now_ms()).await?;
         let by_id: std::collections::HashMap<Uuid, DashboardMetric> =
-            metrics.into_iter().map(|m| (m.document_id, m)).collect();
+            metrics.into_iter().map(|m| (m.document_id.0, m)).collect();
 
-        let published: Vec<(&crate::model::DocumentSummary, &DashboardMetric)> = docs
+        let published: Vec<(&DocumentSummary, &DashboardMetric)> = docs
             .iter()
             .filter(|d| d.status == "published")
-            .filter_map(|d| by_id.get(&d.id).map(|m| (d, m)))
+            .filter_map(|d| by_id.get(&d.id.0).map(|m| (d, m)))
             .collect();
 
         let best_post = published
@@ -210,13 +212,13 @@ impl AnalyticsService {
         let doc_metrics: Vec<(Uuid, i64, i64, f64)> = docs
             .iter()
             .map(|d| {
-                let m = by_id.get(&d.id);
+                let m = by_id.get(&d.id.0);
                 let views_7d = m.map(|m| m.views_7d).unwrap_or(0);
                 let views_prev_7d = m.map(|m| m.views_prev_7d).unwrap_or(0);
                 let completed = m.map(|m| m.completed).unwrap_or(0);
                 let views_total = m.map(|m| m.views_total).unwrap_or(0);
                 (
-                    d.id,
+                    d.id.0,
                     views_7d,
                     views_prev_7d,
                     if views_total > 0 {
@@ -249,8 +251,8 @@ pub struct BestPost {
 }
 
 pub struct DashboardResult {
-    pub docs: Vec<crate::model::DocumentSummary>,
-    pub pending: Vec<crate::model::Comment>,
+    pub docs: Vec<DocumentSummary>,
+    pub pending: Vec<Comment>,
     pub best_post: Option<BestPost>,
     pub nudge: String,
     /// Per-document metrics: (document_id, views_7d, views_prev_7d, completion_rate).

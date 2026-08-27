@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::model::Comment;
-use crate::repository::{CommentRepo, DocumentRepo, Repository, SettingsRepo};
+use crate::ports::{CommentRepo, DocumentRepo, Repository, SettingsRepo};
 use crate::services::ServiceError;
+use forgepost_domain::model::Comment;
 
 pub struct CommentService {
     comment_repo: Arc<dyn CommentRepo>,

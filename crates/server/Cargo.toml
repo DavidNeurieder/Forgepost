@@ -21,8 +21,11 @@ futures = "0.3"
 hex = { workspace = true }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 forgepost-analytics = { path = "../analytics" }
+forgepost-application = { path = "../application" }
 forgepost-content = { path = "../content" }
+forgepost-domain = { path = "../domain" }
 forgepost-experiments = { path = "../experiments" }
+forgepost-infrastructure = { path = "../infrastructure" }
 password-hash = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rustls = { version = "0.23", features = ["aws_lc_rs"] }

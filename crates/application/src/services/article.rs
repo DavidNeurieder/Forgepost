@@ -5,8 +5,11 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::repository::{DocumentRepo, ExperimentRepo, Repository, UserRepo};
+use crate::ports::{DocumentRepo, ExperimentRepo, Repository, UserRepo};
 use crate::services::ServiceError;
+use forgepost_domain::model::{
+    DocumentSummary, ExperimentRecord, FullDocument, PublishedPost, User,
+};
 
 pub struct ArticleService {
     doc_repo: Arc<dyn DocumentRepo>,
@@ -24,10 +27,7 @@ impl ArticleService {
     }
 
     /// Load a published article by slug.
-    pub async fn get_by_slug(
-        &self,
-        slug: &str,
-    ) -> Result<crate::model::FullDocument, ServiceError> {
+    pub async fn get_by_slug(&self, slug: &str) -> Result<FullDocument, ServiceError> {
         self.doc_repo
             .get_published_by_slug(slug)
             .await?
@@ -35,7 +35,7 @@ impl ArticleService {
     }
 
     /// Load a document by id (any status).
-    pub async fn get_by_id(&self, id: Uuid) -> Result<crate::model::FullDocument, ServiceError> {
+    pub async fn get_by_id(&self, id: Uuid) -> Result<FullDocument, ServiceError> {
         self.doc_repo
             .get_document(id)
             .await?
@@ -51,7 +51,7 @@ impl ArticleService {
     pub async fn running_experiments(
         &self,
         document_id: Uuid,
-    ) -> Result<Vec<crate::model::ExperimentRecord>, ServiceError> {
+    ) -> Result<Vec<ExperimentRecord>, ServiceError> {
         Ok(self
             .exp_repo
             .running_experiments_for_document(document_id)
@@ -59,19 +59,17 @@ impl ArticleService {
     }
 
     /// User by id (for author name fallback).
-    pub async fn user_by_id(&self, id: Uuid) -> Result<Option<crate::model::User>, ServiceError> {
+    pub async fn user_by_id(&self, id: Uuid) -> Result<Option<User>, ServiceError> {
         Ok(self.user_repo.find_user_by_id(id).await?)
     }
 
     /// All published posts (RSS, sitemap).
-    pub async fn list_published(&self) -> Result<Vec<crate::model::DocumentSummary>, ServiceError> {
+    pub async fn list_published(&self) -> Result<Vec<DocumentSummary>, ServiceError> {
         Ok(self.doc_repo.list_published().await?)
     }
 
     /// All published posts with tags (blog home page).
-    pub async fn list_published_with_tags(
-        &self,
-    ) -> Result<Vec<crate::model::PublishedPost>, ServiceError> {
+    pub async fn list_published_with_tags(&self) -> Result<Vec<PublishedPost>, ServiceError> {
         Ok(self.doc_repo.list_published_with_tags().await?)
     }
 
@@ -79,7 +77,7 @@ impl ArticleService {
     pub async fn list_published_with_tag(
         &self,
         tag: &str,
-    ) -> Result<Vec<crate::model::PublishedPost>, ServiceError> {
+    ) -> Result<Vec<PublishedPost>, ServiceError> {
         Ok(self.doc_repo.list_published_with_tag(tag).await?)
     }
 
