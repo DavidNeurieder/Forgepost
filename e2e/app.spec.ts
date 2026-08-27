@@ -352,7 +352,10 @@ test('the owner can delete a post', async ({ browser }) => {
 	await row.getByRole('button', { name: 'Delete' }).click();
 	await expect(page.getByText('Post deleted.')).toBeVisible();
 	await expect(page.getByText('Deletable E2E Post')).toHaveCount(0);
-	await expect(page.getByText(TITLE)).toBeVisible();
+
+	// The shared post still shows in the posts table (the widget and the nudge
+	// also render its title, so scope the assertion to the table row link).
+	await expect(page.getByRole('table').getByRole('link', { name: TITLE })).toBeVisible();
 
 	// The URL now 404s and the dashboard still shows the shared post.
 	const gone = await page.request.get(`/articles/${slug}`);
@@ -371,6 +374,6 @@ test('the owner can log out and log back in', async ({ browser }) => {
 	await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
 	await page.getByRole('button', { name: 'Log in' }).click();
 	await expect(page).toHaveURL(/\/admin$/);
-	await expect(page.getByText(TITLE)).toBeVisible();
+	await expect(page.getByRole('table').getByRole('link', { name: TITLE })).toBeVisible();
 	await page.context().close();
 });
