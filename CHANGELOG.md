@@ -35,6 +35,26 @@ surfaces.
   `<iframe>` snippet and inserts it at the cursor; the blocks↔markdown
   round-trip preserves video blocks.
 - Videos are not experimentable (their content is a single immutable URL).
+- **Backup & restore** — `forgepost backup create` seals the database (a
+  `VACUUM INTO` snapshot) and every media file into a single `.fpb` ZIP archive
+  (`manifest.json` with format/schema versions, `checksums.sha256`), then
+  self-verifies the result (integrity check + checksum pass). `backup verify`
+  reports an archive's manifest, schema, checksums, and database integrity;
+  `backup restore` merges media additively, replaces the live database, keeps
+  the pre-restore database as `<name>.before-restore-<timestamp>`, refuses to
+  write without `--yes`, and supports `--dry-run`. Archive format is versioned
+  (`format_version`) so a future schema bump can refuse a mismatched restore.
+  New `BackupRepo`/`BackupGateway` ports, `BackupService`, and the
+  `ArchiveBackup` gateway (`crates/application`, `crates/infrastructure`), with
+  disaster-recovery roundtrip tests in `crates/infrastructure/tests/backup_roundtrip.rs`.
+- **Bundled demo blog** — `forgepost demo` installs a ready-made blog from the
+  committed `demo/forgepost-demo.fpb` archive (it is an ordinary backup): six
+  published articles with tags and bundled images, seeded analytics views, and
+  a **live A/B experiment** on the "Tracking Every Headline" headline with
+  40 assignment-consistent impressions. Fixed login
+  `admin@example.com` / `demo-password`. The artifact is validated on every
+  test run by `crates/server/tests/demo.rs` (restore + assert) and rebuilt
+  deterministically with `FORGEPOST_REGEN_DEMO=1`.
 - **Show/hide password** — an eye toggle reveals/obscures the password on
   `/login` and on both `/setup` password fields (`password` and `confirm`),
   with `aria-pressed`/`aria-label` state and a keyboard-visible focus ring.
@@ -77,6 +97,7 @@ surfaces.
 - Extracted the monolithic server into `domain`/`application`/`infrastructure`
   crates (repository traits, service layer) and pinned e2e dashboard
   assertions to the posts table.
+- `crates/server/src/main.rs` grows `backup` and `demo` subcommands.
 
 ## [0.1.0] - 2026-08-14
 

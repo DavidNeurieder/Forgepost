@@ -7,6 +7,7 @@
 pub mod analytics;
 pub mod article;
 pub mod auth;
+pub mod backup;
 pub mod comment;
 pub mod document;
 pub mod experiment;

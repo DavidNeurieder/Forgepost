@@ -17,7 +17,9 @@ use axum_server::tls_rustls::RustlsConfig;
 use clap::{Args, Parser, Subcommand};
 use forgepost_analytics::RateLimiter;
 use forgepost_application::ports::{ExportRepo, Repository};
+use forgepost_application::services::backup::BackupService;
 use forgepost_application::worker::BackgroundWorker;
+use forgepost_infrastructure::backup::ArchiveBackup;
 use forgepost_infrastructure::sqlite::SqliteRepository;
 use ipnet::IpNet;
 use rustls_acme::AcmeConfig;
@@ -25,6 +27,11 @@ use rustls_acme::caches::DirCache;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
+
+/// Fixed login for the bundled demo blog (`forgepost demo`).
+const DEMO_ADMIN_EMAIL: &str = "admin@example.com";
+const DEMO_ADMIN_PASSWORD: &str = "demo-password";
+const DEMO_ARTIFACT: &[u8] = include_bytes!("../../../demo/forgepost-demo.fpb");
 
 #[derive(Parser)]
 #[command(
@@ -43,6 +50,10 @@ enum Command {
     Serve(ServeArgs),
     /// Export the entire database as JSON (backups / migration).
     Export(ExportArgs),
+    /// Create, verify, or restore a `.fpb` backup archive.
+    Backup(BackupArgs),
+    /// Install the bundled demo blog into an empty database.
+    Demo(DemoArgs),
 }
 
 #[derive(Args)]
@@ -119,6 +130,61 @@ struct ExportArgs {
     output: Option<String>,
 }
 
+#[derive(Args)]
+struct BackupArgs {
+    /// SQLite database URL or file path.
+    #[arg(long, env = "DATABASE_URL", default_value = "sqlite://forgepost.db")]
+    database_url: String,
+    /// Directory where uploaded media bytes live (default: `media/` next to
+    /// the database).
+    #[arg(long, env = "FORGEPOST_MEDIA_DIR")]
+    media_dir: Option<PathBuf>,
+    #[command(subcommand)]
+    command: BackupCommand,
+}
+
+#[derive(Subcommand)]
+enum BackupCommand {
+    /// Seal the database + media into a `.fpb` archive and verify the result.
+    Create {
+        /// Write the archive to this file.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Check an archive's manifest, checksums, and database integrity.
+    Verify {
+        /// Path to the `.fpb` archive.
+        path: PathBuf,
+    },
+    /// Replace the live database with an archive (the pre-restore database is
+    /// preserved as a rollback; media files are merged additively).
+    Restore {
+        /// Path to the `.fpb` archive.
+        path: PathBuf,
+        /// Validate the archive and report, but write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Confirm that the live database may be replaced.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Args)]
+struct DemoArgs {
+    /// SQLite database URL or file path to install the demo into.
+    #[arg(
+        long,
+        env = "DATABASE_URL",
+        default_value = "sqlite://forgepost-demo.db"
+    )]
+    database_url: String,
+    /// Directory where media files are written (default: `media/` next to the
+    /// database).
+    #[arg(long, env = "FORGEPOST_MEDIA_DIR")]
+    media_dir: Option<PathBuf>,
+}
+
 enum TlsMode {
     None,
     Byo { cert: PathBuf, key: PathBuf },
@@ -136,6 +202,8 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let args = match cli.command {
         Some(Command::Export(args)) => return export(args).await,
+        Some(Command::Backup(args)) => return backup(args).await,
+        Some(Command::Demo(args)) => return demo(args).await,
         Some(Command::Serve(args)) => args,
         None => ServeArgs::default(),
     };
@@ -432,5 +500,117 @@ async fn export(args: ExportArgs) -> anyhow::Result<()> {
         }
         None => println!("{pretty}"),
     }
+    Ok(())
+}
+
+/// Open a migrated repository handle (the CLI only manages one database).
+async fn open_repo(database_url: &str) -> anyhow::Result<Arc<dyn Repository>> {
+    let repo = SqliteRepository::connect(database_url).await?;
+    repo.migrate().await?;
+    Ok(Arc::new(repo))
+}
+
+/// Default archive name for `backup create` without `--output`.
+fn default_backup_dest() -> PathBuf {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    PathBuf::from(format!("forgepost-{secs}.fpb"))
+}
+
+async fn backup(args: BackupArgs) -> anyhow::Result<()> {
+    let media_dir = match &args.media_dir {
+        Some(dir) => dir.clone(),
+        None => default_media_dir(&args.database_url),
+    };
+    let repo = open_repo(&args.database_url).await?;
+    let svc = BackupService::new(repo, Arc::new(ArchiveBackup));
+
+    match args.command {
+        BackupCommand::Create { output } => {
+            let dest = output.unwrap_or_else(default_backup_dest);
+            let report = svc.create(&args.database_url, &media_dir, &dest).await?;
+            println!("created {}", report.path.display());
+            for line in report.summary_lines() {
+                println!("  {line}");
+            }
+            println!("  integrity: OK (each archive self-verifies on creation)");
+        }
+        BackupCommand::Verify { path } => {
+            let report = svc.verify(&path).await?;
+            for line in report.summary_lines() {
+                println!("  {line}");
+            }
+            if report.ok {
+                println!("verdict: OK — archive is intact and compatible");
+            } else {
+                println!("verdict: NOT COMPATIBLE — do not restore without the matching version");
+            }
+        }
+        BackupCommand::Restore { path, dry_run, yes } => {
+            if !dry_run && !yes {
+                anyhow::bail!(
+                    "refusing to replace the live database without --yes (inspect with --dry-run first)"
+                );
+            }
+            let report = svc
+                .restore(&path, &args.database_url, &media_dir, dry_run)
+                .await?;
+            for line in report.summary_lines() {
+                println!("  {line}");
+            }
+            if dry_run {
+                println!("verdict: OK — a real restore would replace the database");
+            } else {
+                println!(
+                    "restored {} into {} (pre-restore database kept as a rollback file)",
+                    report.path.display(),
+                    args.database_url
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn demo(args: DemoArgs) -> anyhow::Result<()> {
+    let media_dir = match &args.media_dir {
+        Some(dir) => dir.clone(),
+        None => default_media_dir(&args.database_url),
+    };
+    if !args.database_url.trim().starts_with("sqlite://") {
+        anyhow::bail!("the demo needs a local SQLite database URL");
+    }
+
+    let tmp = std::env::temp_dir().join(format!(
+        "forgepost-demo-{}.fpb",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::write(&tmp, DEMO_ARTIFACT)?;
+
+    let repo = open_repo(&args.database_url).await?;
+    let svc = BackupService::new(repo, Arc::new(ArchiveBackup));
+    let report = svc
+        .restore(&tmp, &args.database_url, &media_dir, false)
+        .await?;
+    std::fs::remove_file(&tmp).ok();
+
+    println!("demo installed into {}", args.database_url);
+    println!("  articles: 6 demo posts with real content");
+    println!(
+        "  media:    4 bundled images restored to {}",
+        media_dir.display()
+    );
+    println!("  action:   a live A/B experiment on 'Tracking Every Headline'");
+    for line in report.summary_lines() {
+        println!("  {line}");
+    }
+    println!(
+        "login:     {DEMO_ADMIN_EMAIL} / {DEMO_ADMIN_PASSWORD} at http://127.0.0.1:8080/admin"
+    );
     Ok(())
 }

@@ -60,6 +60,14 @@ impl SqliteRepository {
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+
+    /// Highest applied migration (0 when no migrations have run yet).
+    pub async fn applied_schema_version(&self) -> Result<i64, RepositoryError> {
+        let row = sqlx::query("SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get(0))
+    }
 }
 
 fn row_to_user(row: &sqlx::sqlite::SqliteRow) -> User {
@@ -140,6 +148,13 @@ async fn next_slug(
 
 #[async_trait]
 impl Repository for SqliteRepository {}
+
+#[async_trait]
+impl BackupRepo for SqliteRepository {
+    async fn schema_version(&self) -> Result<i64, RepositoryError> {
+        self.applied_schema_version().await
+    }
+}
 
 #[async_trait]
 impl UserRepo for SqliteRepository {

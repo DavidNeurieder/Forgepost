@@ -53,6 +53,11 @@ Version **0.2.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
   session cookies, CSRF protection, rate-limited analytics API,
   `forgepost export` for backups, and in-process HTTPS (Let's Encrypt
   auto-renewal or bring-your-own certificates).
+- **Backup & restore** — `forgepost backup create` seals the database and every
+  media file into a single self-verifying `.fpb` archive (`forgepost backup
+  verify` / `restore`, with a same-destination rollback of the pre-restore
+  database). A bundled **demo blog** (six articles, images, and a live A/B
+  experiment) installs in one command with `forgepost demo`.
 
 ## Project layout
 
@@ -289,6 +294,42 @@ TLS precedence: `--tls-domain` > `--tls-cert`/`--tls-key` > plain HTTP.
 The export covers the full database, including experiments and their
 decisions, and is the intended backup/migration path.
 
+### Backup & restore
+
+```sh
+./target/release/forgepost backup create                      # forgepost-<ts>.fpb
+./target/release/forgepost backup verify forgepost-<ts>.fpb   # integrity report
+./target/release/forgepost backup restore forgepost-<ts>.fpb --yes
+```
+
+Point any command at a different database or media directory with
+`--database-url` / `--media-dir` (both also come from `DATABASE_URL` and
+`FORGEPOST_MEDIA_DIR`). A `.fpb` archive contains a `manifest.json`
+(format/schema versions), a `VACUUM INTO`-taken snapshot of the database, the
+media files, and a `checksums.sha256`; it always self-verifies after creation.
+
+`restore` replaces the live database and merges media files into the media
+directory, then verifies the result. **Stop the server first** — a backup taken
+while the server is writing is still crash-safe, but restoring a live database
+under a running server is not supported. A real restore refuses to run without
+`--yes` (`--dry-run` reports what a restore would do); the pre-restore database
+is preserved next to it as `<name>.before-restore-<timestamp>`.
+
+### The demo blog
+
+```sh
+./target/release/forgepost demo
+```
+
+installs a ready-made blog into `forgepost-demo.db` (override with
+`--database-url`): six articles with real content and the bundled demo images,
+per-post tags, analytics views, and a **live A/B experiment** on the
+"Tracking Every Headline" headline with a populated report. Log in at
+http://127.0.0.1:8080/admin with **admin@example.com / demo-password**
+(after `forgepost serve --database-url sqlite://forgepost-demo.db`). The demo
+is an ordinary backup archive, so `backup restore` of `demo/forgepost-demo.fpb`
+is identical to `demo`.
+
 ## Testing
 
 ```sh
@@ -300,7 +341,12 @@ cargo fmt --all --check
 The Rust suite covers the repository, every `/api/*` endpoint, all
 server-rendered pages (`tests/pages.rs`), the full creator journey over a real
 socket (`tests/system.rs`), and TLS in the binary with a self-signed certificate
-(`tests/tls.rs`). The `experiments` crate's correctness tests are golden
+(`tests/tls.rs`). Backup roundtrips are covered in
+`crates/infrastructure/tests/backup_roundtrip.rs`, and the bundled demo archive
+(`demo/forgepost-demo.fpb`) is validated on every test run by restoring it and
+asserting its content — rebuild it with `FORGEPOST_REGEN_DEMO=1 cargo test
+-p forgepost-server --test demo`. The `experiments` crate's correctness tests
+are golden
 (hand-computed beta probabilities) plus property tests (posterior sanity,
 sample-size concentration, no-winner/stop correctness, assignment honesty).
 

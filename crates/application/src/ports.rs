@@ -4,6 +4,10 @@
 //! (e.g. the SQLite one in `forgepost-infrastructure`) is injected at the
 //! edges so routes and use cases never depend on a concrete backend (§5, §5.4).
 
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
 use forgepost_analytics::{ArticleStats, BandReach};
 use forgepost_content::{Block, BlockId, BlockVersion, DocumentId, ParsedBlock, VersionId};
 use forgepost_domain::model::{
@@ -264,6 +268,7 @@ pub trait Repository:
     + SearchRepo
     + MediaRepo
     + ExportRepo
+    + BackupRepo
     + Send
     + Sync
 {
@@ -291,4 +296,77 @@ pub enum RepositoryError {
     Uuid(#[from] uuid::Error),
     #[error("rate limited")]
     RateLimited,
+}
+
+// ---------------------------------------------------------------------------
+// Backup: versioned snapshot archives (`.fpb`).
+// ---------------------------------------------------------------------------
+
+/// The manifest sealed into every backup archive (`manifest.json`). The
+/// `format_version` is bumped when the archive layout changes; new versions
+/// get their own migration policy, the reader never guesses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupManifest {
+    pub format_version: u32,
+    pub forgepost_version: String,
+    pub schema_version: i64,
+    pub created_at_ms: i64,
+    /// Entry name of the database snapshot inside the archive.
+    pub database: String,
+    /// Media entry names inside the archive (whitelisted restore targets).
+    pub media: Vec<String>,
+}
+
+impl BackupManifest {
+    pub const CURRENT_FORMAT_VERSION: u32 = 1;
+    pub const DATABASE_ENTRY: &'static str = "database.sqlite";
+    pub const MANIFEST_ENTRY: &'static str = "manifest.json";
+    pub const CHECKSUM_ENTRY: &'static str = "checksums.sha256";
+}
+
+/// Applied-schema introspection the backup service needs to decide whether an
+/// archive is compatible with the current database.
+#[async_trait::async_trait]
+pub trait BackupRepo: Send + Sync {
+    /// Highest applied migration version (0 on a fresh, unmigrated database).
+    async fn schema_version(&self) -> Result<i64, RepositoryError>;
+}
+
+/// Format-level backup primitives (SQLite snapshots, archives, checksums,
+/// media filesystem). The application service orchestrates; nothing else in
+/// the stack touches archive internals.
+#[async_trait::async_trait]
+pub trait BackupGateway: Send + Sync {
+    /// Consistent snapshot of an open SQLite database (`database_url`) into a
+    /// fresh file at `dest`. Never a raw `fs::copy` of a live database.
+    async fn snapshot_database(
+        &self,
+        database_url: &str,
+        dest: &Path,
+    ) -> Result<(), RepositoryError>;
+    /// Run `PRAGMA integrity_check` over a SQLite file. Errors when corrupt.
+    async fn integrity_check(&self, file: &Path) -> Result<(), RepositoryError>;
+    /// Every (relative archive name, bytes) under `media_dir` (name = `media/<file>`).
+    fn read_media_dir(&self, media_dir: &Path) -> Result<Vec<(String, Vec<u8>)>, RepositoryError>;
+    /// Seal archive entries into a deflated zip at `dest`.
+    fn write_archive(&self, dest: &Path, entries: &[(&str, &[u8])]) -> Result<(), RepositoryError>;
+    /// Unpack a zip archive's entries (name, bytes).
+    fn read_archive(&self, path: &Path) -> Result<Vec<(String, Vec<u8>)>, RepositoryError>;
+    /// Verify every entry against the `checksums.sha256` entry. Errors on
+    /// missing checksums, malformed lines, or any hash mismatch.
+    fn verify_checksums(&self, entries: &[(String, Vec<u8>)]) -> Result<(), RepositoryError>;
+    /// sha256 of `bytes` as lowercase hex (used to build `checksums.sha256`).
+    fn sha256_hex(&self, bytes: &[u8]) -> String;
+    /// Write one media file into `media_dir` (temp + rename, additive).
+    fn write_media_file(
+        &self,
+        media_dir: &Path,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<(), RepositoryError>;
+    /// Atomically replace `dest` with `bytes` (temp in same dir + fsync +
+    /// rename), clearing stale `-wal`/`-shm` files first.
+    fn replace_database(&self, dest: &Path, bytes: &[u8]) -> Result<(), RepositoryError>;
+    /// Whether `path` currently exists on disk.
+    fn path_exists(&self, path: &Path) -> bool;
 }
