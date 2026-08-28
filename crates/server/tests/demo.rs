@@ -1,13 +1,17 @@
 //! The demo installation: a seedable, versioned backup (`demo/forgepost-demo.fpb`)
 //! of a small blog with real content, media, and a running A/B experiment — the
-//! thing `forgepost demo` restores.
+//! thing `forgepost demo` installs (and, by default, serves).
 //!
-//! The committed artifact is *always validated* by restoring it into a scratch
-//! installation and asserting the demo invariants (admin login, published
-//! posts + tags, media on disk, running experiment with live counts). Setting
+//! The article prose lives as Markdown sources in `demo/posts/*.md`; the
+//! builder embeds them with `include_str!`, substituting `{{img:KEY:ALT}}`
+//! tokens with the runtime media disk names. The committed artifact is *always
+//! validated* by restoring it into a scratch installation and asserting the
+//! demo invariants (admin login, published posts + tags, per-article
+//! substantiality, media on disk, running experiment with live counts). Setting
 //! `FORGEPOST_REGEN_DEMO=1` first rebuilds the content and overwrites the
 //! artifact, so the artifact can be regenerated deterministically on demand.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -69,6 +73,31 @@ async fn register_media(
     (disk_name, rel.to_string())
 }
 
+/// Replace `{{img:KEY:ALT}}` tokens in a `demo/posts/*.md` source with the
+/// runtime media disk names (`![ALT](/media/<uuid>.png)`). Tokens without an
+/// alt text fall back to the key.
+fn render_markdown(src: &str, media: &BTreeMap<&str, &str>) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while let Some(start) = rest.find("{{img:") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + "{{img:".len()..];
+        let end = after.find("}}").expect("unterminated demo img token");
+        let token = &after[..end];
+        let (key, alt) = match token.split_once(':') {
+            Some((key, alt)) => (key, alt),
+            None => (token, token),
+        };
+        let disk = media
+            .get(key)
+            .unwrap_or_else(|| panic!("unknown demo img token {key:?}"));
+        out.push_str(&format!("![{alt}](/media/{disk})"));
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Create + publish one article; returns its document id.
 async fn article(
     documents: &DocumentService,
@@ -127,19 +156,23 @@ async fn build_archive(database_url: &str, media_dir: &Path, dest: &Path) {
     let archive = register_media(&repo, media_dir, "archive.png").await;
     let cards = register_media(&repo, media_dir, "cards.png").await;
 
-    let img = |alt: &str, disk: &str| format!("![{alt}](/media/{disk})");
+    let mut media = BTreeMap::new();
+    for (key, disk) in [
+        ("header", &header.0),
+        ("chart", &chart.0),
+        ("archive", &archive.0),
+        ("cards", &cards.0),
+    ] {
+        media.insert(key, disk.as_str());
+    }
 
     article(
         &documents,
         admin,
         "Welcome to Forgepost",
-        format!(
-            "# Welcome to Forgepost\n\n\
-             Forgepost is a self-hosted blog with A/B testing built in at the *block* level.\n\n\
-             {}\n\n\
-             Every headline, image, and call-to-action can be tested against \
-             alternatives — the losing versions disappear without you rebuilding anything.\n",
-            img("Welcome banner", &header.0)
+        render_markdown(
+            include_str!("../../../demo/posts/welcome-to-forgepost.md"),
+            &media,
         ),
         &["welcome", "intro"],
     )
@@ -149,13 +182,10 @@ async fn build_archive(database_url: &str, media_dir: &Path, dest: &Path) {
         &documents,
         admin,
         "Tracking Every Headline",
-        "# Tracking every headline\n\n\
-         Readers scan the title before they read the article. Forgepost lets you run a real \
-         experiment on it:\n\n\
-         - two variants, one goal\n\
-         - the winner gets promoted automatically\n\
-         - the loser just goes away\n\n\
-         The admin panel shows the live report while the test runs.\n",
+        render_markdown(
+            include_str!("../../../demo/posts/tracking-every-headline.md"),
+            &media,
+        ),
         &["experiments", "tutorial"],
     )
     .await;
@@ -164,10 +194,10 @@ async fn build_archive(database_url: &str, media_dir: &Path, dest: &Path) {
         &documents,
         admin,
         "Videos Without the Trackers",
-        "# Videos Without the Trackers\n\n\
-         Embed YouTube videos without leaking your readers' data:\n\n\
-         https://www.youtube.com/watch?v=dQw4w9WgXcQ\n\n\
-         The player is served from youtube-nocookie.com and loads only after a click.\n",
+        render_markdown(
+            include_str!("../../../demo/posts/videos-without-the-trackers.md"),
+            &media,
+        ),
         &["privacy", "video"],
     )
     .await;
@@ -176,14 +206,9 @@ async fn build_archive(database_url: &str, media_dir: &Path, dest: &Path) {
         &documents,
         admin,
         "Your Words, Your Rules",
-        format!(
-            "# Your Words, Your Rules\n\n\
-             Blog without a backup is a recipe for heartbreak.\n\n\
-             > A backup you cannot restore is not a backup.\n\n\
-             {}\n\n\
-             `forgepost backup create` seals the database and every media file into a single \
-             `.fpb` archive, then verifies the result before you ship it anywhere.\n",
-            img("Archive unlocked", &archive.0)
+        render_markdown(
+            include_str!("../../../demo/posts/your-words-your-rules.md"),
+            &media,
         ),
         &["backup", "self-hosting"],
     )
@@ -193,20 +218,9 @@ async fn build_archive(database_url: &str, media_dir: &Path, dest: &Path) {
         &documents,
         admin,
         "Anatomy of the Content Model",
-        format!(
-            "# Anatomy of the Content Model\n\n\
-             {}\n\n\
-             Every block is versioned and immutable; experiments overlay a fresh version:\n\n\
-             ```\n\
-             document\n\
-               └─ blocks[]\n\
-                    ├─ heading   (test this)\n\
-                    ├─ paragraph (test this)\n\
-                    └─ version pool (append-only)\n\
-             ```\n\n\
-             Promotion happens in exactly one place, so a test can never leave \
-             content half-updated.\n",
-            img("Content cards", &cards.0)
+        render_markdown(
+            include_str!("../../../demo/posts/anatomy-of-the-content-model.md"),
+            &media,
         ),
         &["architecture"],
     )
@@ -216,14 +230,9 @@ async fn build_archive(database_url: &str, media_dir: &Path, dest: &Path) {
         &documents,
         admin,
         "Crafting the Perfect CTA",
-        format!(
-            "# Crafting the Perfect CTA\n\n\
-             {}\n\n\
-             Test the words, not your gut:\n\
-             1. set a goal (subscribe, share, or click)\n\
-             2. let traffic split automatically\n\
-             3. keep the winner\n",
-            img("A/B results", &chart.0)
+        render_markdown(
+            include_str!("../../../demo/posts/crafting-the-perfect-cta.md"),
+            &media,
         ),
         &["writing", "cta"],
     )
@@ -343,7 +352,7 @@ async fn build_archive(database_url: &str, media_dir: &Path, dest: &Path) {
                 visitor_id: VisitorId(Uuid::from_u128(81_000u128 + i as u128 * 10 + k as u128)),
                 referrer: None,
                 user_agent: Some("Mozilla/5.0 (X11; Linux x86_64) Forgepost Demo".into()),
-                read_time_ms: Some(18_000),
+                read_time_ms: Some(120_000),
                 experiment_id: None,
                 variant_id: None,
                 version_id: None,
@@ -428,6 +437,31 @@ async fn assert_demo_invariant(artifact: &Path) {
         .expect("experiment article");
     let tags = repo.document_tags(exp_summary.id.0).await.expect("tags");
     assert_eq!(tags, vec!["experiments", "tutorial"]);
+
+    // The articles must be *substantial* — a regression that shortens the
+    // demo posts silently would otherwise still produce a valid archive.
+    let documents_full = DocumentService::new(repo.clone(), Arc::new(RumbleOembed));
+    const MIN_BLOCK_TEXT_CHARS: usize = 2_000;
+    for summary in &owned {
+        let full = documents_full
+            .get_owned(summary.id.0, admin_user.id)
+            .await
+            .expect("get full doc");
+        let text_chars: usize = full
+            .document
+            .blocks
+            .iter()
+            .filter_map(|b| full.document.versions.iter().find(|v| v.id == b.version_id))
+            .filter_map(|v| v.content.get("text").and_then(|t| t.as_str()))
+            .map(|s| s.chars().count())
+            .sum();
+        assert!(
+            text_chars >= MIN_BLOCK_TEXT_CHARS,
+            "{} is too thin ({} text chars across blocks)",
+            summary.title,
+            text_chars
+        );
+    }
 
     // Media rows + the actual files exist on disk.
     let media_pool = sqlx::sqlite::SqlitePoolOptions::new()

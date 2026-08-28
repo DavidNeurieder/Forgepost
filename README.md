@@ -315,20 +315,23 @@ under a running server is not supported. A real restore refuses to run without
 `--yes` (`--dry-run` reports what a restore would do); the pre-restore database
 is preserved next to it as `<name>.before-restore-<timestamp>`.
 
-### The demo blog
+### The demo blog (one command)
 
 ```sh
 ./target/release/forgepost demo
 ```
 
-installs a ready-made blog into `forgepost-demo.db` (override with
-`--database-url`): six articles with real content and the bundled demo images,
-per-post tags, analytics views, and a **live A/B experiment** on the
-"Tracking Every Headline" headline with a populated report. Log in at
-http://127.0.0.1:8080/admin with **admin@example.com / demo-password**
-(after `forgepost serve --database-url sqlite://forgepost-demo.db`). The demo
-is an ordinary backup archive, so `backup restore` of `demo/forgepost-demo.fpb`
-is identical to `demo`.
+installs a ready-made blog into `forgepost-demo.db` and **starts the server on
+http://127.0.0.1:8080** — that single command is the whole quick start. The
+demo ships six long-form articles (Markdown sources live in `demo/posts/`), the
+bundled demo images, per-post tags, seeded analytics views, and a **live A/B
+experiment** on the "Tracking Every Headline" headline with a populated report.
+Log in at http://127.0.0.1:8080/admin with **admin@example.com / demo-password**.
+
+`forgepost demo --no-serve` installs the content without starting the server;
+`--addr 0.0.0.0:8080` (or `FORGEPOST_ADDR`) moves the listener. The demo is an
+ordinary backup archive, so `backup restore` of `demo/forgepost-demo.fpb` is
+identical to `demo --no-serve`.
 
 ## Testing
 

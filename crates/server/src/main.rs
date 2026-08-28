@@ -183,6 +183,12 @@ struct DemoArgs {
     /// database).
     #[arg(long, env = "FORGEPOST_MEDIA_DIR")]
     media_dir: Option<PathBuf>,
+    /// Address to bind when serving the demo.
+    #[arg(long, env = "FORGEPOST_ADDR", default_value = "127.0.0.1:8080")]
+    addr: String,
+    /// Install the demo content without starting the server.
+    #[arg(long)]
+    no_serve: bool,
 }
 
 enum TlsMode {
@@ -600,7 +606,7 @@ async fn demo(args: DemoArgs) -> anyhow::Result<()> {
     std::fs::remove_file(&tmp).ok();
 
     println!("demo installed into {}", args.database_url);
-    println!("  articles: 6 demo posts with real content");
+    println!("  articles: 6 long-form demo posts (see demo/posts/)");
     println!(
         "  media:    4 bundled images restored to {}",
         media_dir.display()
@@ -610,7 +616,19 @@ async fn demo(args: DemoArgs) -> anyhow::Result<()> {
         println!("  {line}");
     }
     println!(
-        "login:     {DEMO_ADMIN_EMAIL} / {DEMO_ADMIN_PASSWORD} at http://127.0.0.1:8080/admin"
+        "login:     {DEMO_ADMIN_EMAIL} / {DEMO_ADMIN_PASSWORD} at http://{}/admin",
+        args.addr
     );
-    Ok(())
+
+    if args.no_serve {
+        return Ok(());
+    }
+
+    let serve_args = ServeArgs {
+        database_url: args.database_url,
+        media_dir: Some(media_dir),
+        addr: args.addr,
+        ..ServeArgs::default()
+    };
+    serve(serve_args).await
 }

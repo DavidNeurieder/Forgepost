@@ -47,13 +47,15 @@ surfaces.
   New `BackupRepo`/`BackupGateway` ports, `BackupService`, and the
   `ArchiveBackup` gateway (`crates/application`, `crates/infrastructure`), with
   disaster-recovery roundtrip tests in `crates/infrastructure/tests/backup_roundtrip.rs`.
-- **Bundled demo blog** — `forgepost demo` installs a ready-made blog from the
-  committed `demo/forgepost-demo.fpb` archive (it is an ordinary backup): six
-  published articles with tags and bundled images, seeded analytics views, and
-  a **live A/B experiment** on the "Tracking Every Headline" headline with
-  40 assignment-consistent impressions. Fixed login
-  `admin@example.com` / `demo-password`. The artifact is validated on every
-  test run by `crates/server/tests/demo.rs` (restore + assert) and rebuilt
+- **Bundled demo blog** — `forgepost demo` installs **and serves** a ready-made
+  blog in one command from the committed `demo/forgepost-demo.fpb` archive (it
+  is an ordinary backup): six **long-form** articles (Markdown sources in
+  `demo/posts/`, ~1000 words each, with `##` subsections and bundled images),
+  seeded analytics views, and a **live A/B experiment** on the "Tracking Every
+  Headline" headline with 40 assignment-consistent impressions. Fixed login
+  `admin@example.com` / `demo-password`. `--no-serve` installs only. The
+  artifact is validated on every test run by `crates/server/tests/demo.rs`
+  (restore + assert, including a per-article content-length floor) and rebuilt
   deterministically with `FORGEPOST_REGEN_DEMO=1`.
 - **Show/hide password** — an eye toggle reveals/obscures the password on
   `/login` and on both `/setup` password fields (`password` and `confirm`),
