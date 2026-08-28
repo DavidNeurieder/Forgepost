@@ -438,4 +438,103 @@ mod tests {
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].url, "images/a.png");
     }
+
+    // -------------------------------------------------------------------------
+    // No-panic / round-trip properties over generated input spaces (proptest).
+    // -------------------------------------------------------------------------
+    use proptest::{prop_assert, prop_assert_eq};
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+        #[test]
+        fn front_matter_parse_never_panics(
+            source in proptest::collection::vec(proptest::char::any(), 0..4096),
+        ) {
+            let source: String = source.into_iter().collect();
+            let (meta, body) = parse_front_matter(&source);
+            match meta {
+                // No well-formed block: source must be returned untouched.
+                None => prop_assert_eq!(body, source),
+                // Otherwise the body is a strict suffix-derived remainder and
+                // the keys are unescaped strings bounded by the input length.
+                Some(_) => {
+                    prop_assert!(body.len() <= source.len());
+                    prop_assert!(source.contains(&body) || body.len() == source.len());
+                }
+            }
+        }
+
+        #[test]
+        fn rewrite_with_no_successful_resolution_is_lossless(
+            source in proptest::collection::vec(proptest::char::any(), 0..4096),
+        ) {
+            let source: String = source.into_iter().collect();
+            let mut resolver = |_alt: &str, _url: &str| None::<String>;
+            let (out, imported, unresolved) = rewrite_image_refs(&source, &mut resolver);
+            prop_assert_eq!(imported, 0);
+            prop_assert_eq!(&out, &source);
+            // Unresolved refs cannot exceed the number of image references.
+            prop_assert!(unresolved <= source.matches("![").count());
+        }
+
+        #[test]
+        fn extract_post_never_panics_and_base_dir_is_safe(
+            name in "[a-zA-Z0-9._/ -]{1,80}",
+            extra in proptest::collection::vec(proptest::char::any(), 0..300),
+            data in proptest::collection::vec(0u8..255, 0..256),
+        ) {
+            let extra: String = extra.into_iter().collect();
+            let mut owned = vec![(name.clone(), data)];
+            if !extra.is_empty() {
+                owned.push((format!("extra-{extra}.md"), b"# extra".to_vec()));
+            }
+            let refs: Vec<(&str, &[u8])> = owned
+                .iter()
+                .map(|(n, d)| (n.as_str(), d.as_slice()))
+                .collect();
+            let bytes = zip_with(&refs);
+            let mut archive = ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+            match extract_post(&mut archive, 1024 * 64, 512) {
+                Ok(post) => {
+                    // A base dir derived from an archive entry name is never a
+                    // drive root; the import layer only ever uses it as a
+                    // prefix looked up inside the archive itself.
+                    prop_assert!(!post.base_dir.starts_with('/'));
+                }
+                Err(e) => {
+                    prop_assert!(matches!(
+                        e,
+                        ImportError::NoMarkdown
+                            | ImportError::MultipleMarkdown(_)
+                            | ImportError::TooLarge
+                            | ImportError::TooManyEntries
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extract_post_rejects_oversized_and_overpopulated_archives() {
+        let big = vec![0u8; 1024];
+        let bytes = zip_with(&[("big.md", big.as_slice())]);
+        let mut archive = ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        assert!(matches!(
+            extract_post(&mut archive, 512, 10),
+            Err(ImportError::TooLarge)
+        ));
+        let many: Vec<(String, Vec<u8>)> = (0..100)
+            .map(|i| (format!("f{i:03}.md"), b"x".to_vec()))
+            .collect();
+        let refs: Vec<(&str, &[u8])> = many
+            .iter()
+            .map(|(n, d)| (n.as_str(), d.as_slice()))
+            .collect();
+        let bytes = zip_with(&refs);
+        let mut archive = ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        assert!(matches!(
+            extract_post(&mut archive, 1024 * 1024, 50),
+            Err(ImportError::TooManyEntries)
+        ));
+    }
 }

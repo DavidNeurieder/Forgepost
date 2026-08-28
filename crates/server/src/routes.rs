@@ -1284,3 +1284,119 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
+
+#[cfg(test)]
+mod ip_tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    fn cfg(proxy_prefix: &str) -> ClientIpConfig {
+        ClientIpConfig {
+            trusted_proxies: vec![proxy_prefix.parse().expect("valid net")],
+        }
+    }
+
+    fn headers(xff: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(v) = xff {
+            h.insert("x-forwarded-for", v.parse().unwrap());
+        }
+        h
+    }
+
+    fn peer(ip: &str) -> Option<std::net::SocketAddr> {
+        Some(std::net::SocketAddr::new(ip.parse().unwrap(), 54321))
+    }
+
+    #[test]
+    fn no_peer_resolves_to_unknown_even_with_a_forged_header() {
+        assert_eq!(
+            resolve_client_ip(&cfg("0.0.0.0/0"), &headers(Some("203.0.113.9")), None),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn untrusted_peer_ignores_forged_x_forwarded_for() {
+        let config = ClientIpConfig::default();
+        assert_eq!(
+            resolve_client_ip(&config, &headers(Some("203.0.113.9")), peer("198.51.100.7")),
+            "198.51.100.7",
+            "a spoofed header must never override the peer"
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_uses_first_forwarded_entry() {
+        let config = cfg("192.0.2.0/24");
+        assert_eq!(
+            resolve_client_ip(
+                &config,
+                &headers(Some("203.0.113.9, 10.0.0.1")),
+                peer("192.0.2.1")
+            ),
+            "203.0.113.9",
+            "first xff entry is the one the proxy appended last"
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_normalizes_whitespace_and_handles_trailing_commas() {
+        let config = cfg("192.0.2.0/24");
+        assert_eq!(
+            resolve_client_ip(
+                &config,
+                &headers(Some(" 203.0.113.9 , 10.0.0.1 ")),
+                peer("192.0.2.1")
+            ),
+            "203.0.113.9",
+            "leading/trailing whitespace trimmed"
+        );
+        assert_eq!(
+            resolve_client_ip(&config, &headers(Some("203.0.113.9,")), peer("192.0.2.1")),
+            "203.0.113.9",
+            "trailing comma with empty entry tolerated"
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_without_header_falls_back_to_proxy_ip() {
+        assert_eq!(
+            resolve_client_ip(&cfg("192.0.2.0/24"), &headers(None), peer("192.0.2.1")),
+            "192.0.2.1"
+        );
+    }
+
+    #[test]
+    fn proxy_matching_is_prefix_based_not_host_based() {
+        // Peer outside the trusted range is treated as untrusted.
+        assert_eq!(
+            resolve_client_ip(
+                &cfg("192.0.2.0/24"),
+                &headers(Some("203.0.113.9")),
+                peer("198.51.100.8")
+            ),
+            "198.51.100.8"
+        );
+    }
+
+    #[test]
+    fn ipv6_peer_is_preserved_verbatim() {
+        let config = ClientIpConfig::default();
+        assert_eq!(
+            resolve_client_ip(&config, &headers(Some("203.0.113.9")), peer("2001:db8::a")),
+            "2001:db8::a"
+        );
+    }
+
+    #[test]
+    fn realistic_chain_keeps_originating_address() {
+        let config = cfg("10.0.0.0/8");
+        let chain = "198.51.100.23, 203.0.113.5, 10.0.0.1";
+        assert_eq!(
+            resolve_client_ip(&config, &headers(Some(chain)), peer("10.0.0.1")),
+            "198.51.100.23",
+            "must walk the chain to the real client"
+        );
+    }
+}

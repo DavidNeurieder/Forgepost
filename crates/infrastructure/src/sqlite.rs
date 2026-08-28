@@ -2711,4 +2711,39 @@ mod tests {
                 .unwrap();
         assert_eq!(live, vec![(0,), (1,), (2,)]);
     }
+
+    // -------------------------------------------------------------------------
+    // slugify invariants over generated input spaces (proptest).
+    // -------------------------------------------------------------------------
+    use proptest::{prop_assert, prop_assert_eq};
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(128))]
+        #[test]
+        fn slugify_produces_safe_url_component_for_any_title(
+            title in proptest::collection::vec(proptest::char::any(), 0..256),
+        ) {
+            let title: String = title.into_iter().collect();
+            let slug = slugify(&title);
+            // Never empty: either a usable slug or the fallback.
+            prop_assert!(!slug.is_empty());
+            // Only (Unicode) alphanumerics and dashes survive — no whitespace,
+            // punctuation, symbols, or URL-hostile characters.
+            for c in slug.chars() {
+                prop_assert!(c.is_alphanumeric() || c == '-');
+            }
+            // No leading/trailing dash, no double dash.
+            prop_assert!(!slug.starts_with('-'));
+            prop_assert!(!slug.ends_with('-'));
+            prop_assert!(!slug.contains("--"));
+            // Deterministic.
+            prop_assert_eq!(&slug, &slugify(&title));
+            // The fallback is reserved for titles with no alphanumerics.
+            if slug == "untitled" {
+                prop_assert!(title.chars().all(|c| !c.is_alphanumeric()));
+            } else {
+                prop_assert!(slug.chars().any(|c| c.is_alphanumeric()));
+            }
+        }
+    }
 }

@@ -304,6 +304,15 @@ socket (`tests/system.rs`), and TLS in the binary with a self-signed certificate
 (hand-computed beta probabilities) plus property tests (posterior sanity,
 sample-size concentration, no-winner/stop correctness, assignment honesty).
 
+Security testing is layered: a deterministic regression suite
+(`tests/security.rs` in `crates/server`, covering the authorization matrix,
+CSRF table, session/cookie lifecycle, proxy/IP handling, and upload
+hardening) backed by proptest invariants over the rate limiter, markdown
+rendering, slugs, and ZIP import. Everything maps back to the plan in
+[docs/security-testing.md](docs/security-testing.md); CI also runs
+`cargo audit` so a dependency vulnerability fails a merge instead of
+surfacing later.
+
 ### End-to-end tests
 
 `npm run test:e2e` drives a real headless browser through the full creator

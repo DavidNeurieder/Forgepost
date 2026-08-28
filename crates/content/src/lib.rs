@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 pub use diff::merge_blocks;
 pub use markdown::{
-    html_escape, parse_markdown, render_html, video_embed_url, video_identity,
+    html_escape, is_safe_url, parse_markdown, render_html, video_embed_url, video_identity,
     video_needs_metadata, video_thumbnail,
 };
 

@@ -839,6 +839,31 @@ pub fn html_escape(s: &str) -> String {
     out
 }
 
+/// Whether a URL is allowed into an `href`/`src` attribute. Executable schemes
+/// (`javascript:`, `vbscript:`, `file:`, `data:` carrying HTML/script) are
+/// rejected so attacker-controlled Markdown can never plant a click-to-run
+/// payload; http(s), protocol-relative, relative, anchor, and inert
+/// `data:image/...` references remain allowed.
+///
+/// Browsers strip ASCII tab/newline/carriage-return from URLs before scheme
+/// detection, so those are removed up front: `java\nscript:` must not slip
+/// past a naive string comparison.
+pub fn is_safe_url(url: &str) -> bool {
+    let url = url.trim().trim_start_matches('\u{200B}');
+    let normalized: String = url
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    let lower = normalized.to_ascii_lowercase();
+    !(lower.starts_with("javascript:")
+        || lower.starts_with("vbscript:")
+        || lower.starts_with("file:")
+        || lower.starts_with("data:text/html")
+        || lower.starts_with("data:text/javascript")
+        || lower.starts_with("data:application/xhtml")
+        || lower.starts_with("data:image/svg"))
+}
+
 /// Render blocks to HTML. Inline Markdown (`**bold**`, `*italic*`,
 /// `` `code` ``, `[links](url)`) is rendered by [`render_inline`]; text is
 /// escaped first so user input can never inject markup.
@@ -886,6 +911,13 @@ pub fn render_html<'a>(blocks: impl IntoIterator<Item = (BlockKind, &'a BlockCon
             BlockKind::Image => {
                 let src = content.get("src").and_then(|v| v.as_str()).unwrap_or("");
                 let alt = content.get("alt").and_then(|v| v.as_str()).unwrap_or("");
+                if !is_safe_url(src) {
+                    out.push_str(&format!(
+                        "<p><strong>Blocked link:</strong> {}</p>\n",
+                        html_escape(alt)
+                    ));
+                    continue;
+                }
                 let size = content.get("size").and_then(|v| v.as_str()).unwrap_or("");
                 let href = content.get("href").and_then(|v| v.as_str()).unwrap_or("");
                 let img = format!(
@@ -894,7 +926,7 @@ pub fn render_html<'a>(blocks: impl IntoIterator<Item = (BlockKind, &'a BlockCon
                     html_escape(alt),
                     image_size_attrs(size)
                 );
-                if href.is_empty() {
+                if href.is_empty() || !is_safe_url(href) {
                     out.push_str(&format!("<p>{img}</p>\n"));
                 } else {
                     out.push_str(&format!(
@@ -995,9 +1027,15 @@ fn inline_spans(s: &str) -> String {
         }
         // Links before italics so `[*x*](y)` still works.
         if let Some((label, url, after)) = link(rest) {
-            out.push_str(&format!("<a href=\"{url}\">"));
-            out.push_str(&inline_spans(label));
-            out.push_str("</a>");
+            if is_safe_url(url) {
+                out.push_str(&format!("<a href=\"{url}\">"));
+                out.push_str(&inline_spans(label));
+                out.push_str("</a>");
+            } else {
+                // Executable scheme: keep the label as plain text so nothing
+                // click-to-run ever reaches the document.
+                out.push_str(&inline_spans(label));
+            }
             rest = after;
             continue;
         }
@@ -1608,5 +1646,122 @@ mod tests {
         assert!(video_needs_metadata(
             &json!({ "provider": "iframe", "url": "x" })
         ));
+    }
+
+    // -------------------------------------------------------------------------
+    // Safety properties over generated input spaces (proptest).
+    // -------------------------------------------------------------------------
+    use crate::{merge_blocks, parse_markdown, render_html};
+    use proptest::prop_assert;
+
+    #[test]
+    fn executable_url_schemes_are_blocked_at_the_renderer() {
+        for url in [
+            "javascript:alert(1)",
+            "  javascript:alert(1)",
+            "JAVASCRIPT:alert(1)",
+            "java\nscript:alert(1)",
+            "java\tscript:alert(1)",
+            "vbscript:msgbox(1)",
+            "file:///etc/passwd",
+            "data:text/html,<script>alert(1)</script>",
+            "data:text/html;base64,PHNjcmlwdD4=",
+            "data:image/svg+xml,<svg onload=alert(1)>",
+        ] {
+            let md = format!("[click me]({url})");
+            let html = html_of(&parse_markdown(&md));
+            assert!(
+                !html.contains(&format!("href=\"{url}\"")),
+                "scheme must not reach an href: {url}"
+            );
+            assert!(
+                !html.contains("<a href="),
+                "no anchor at all for an executable scheme: {url}"
+            );
+            let img_md = format!("![]({url})");
+            let img_html = html_of(&parse_markdown(&img_md));
+            assert!(
+                !img_html.contains(&format!("src=\"{url}\"")),
+                "scheme must not reach an img src: {url}"
+            );
+        }
+        // Encoded-colon tricks: the whole URL is entity-escaped before the
+        // scheme check, so a raw `javascript:` (colon intact) must never
+        // appear anywhere — any leftover is a harmless relative URL.
+        let encoded = html_of(&parse_markdown("[x](javascript&#58;alert(1))"));
+        assert!(
+            !encoded.contains("javascript:"),
+            "entity-obfuscated scheme must not form a live attribute"
+        );
+        // The safe surface keeps working.
+        let ok = html_of(&parse_markdown(
+            "[a](https://example.com) [b](/relative/path) ![](data:image/png;base64,AAAA)",
+        ));
+        assert!(ok.contains("href=\"https://example.com\""));
+        assert!(ok.contains("href=\"/relative/path\""));
+        // Standalone image line lifts into an Image block with an inert
+        // data:image src.
+        let img = html_of(&parse_markdown("![c](data:image/png;base64,AAAA)"));
+        assert!(
+            img.contains("src=\"data:image/png;base64,AAAA\""),
+            "inert data:image src survives"
+        );
+    }
+
+    // The rendered HTML for *arbitrary* Markdown never contains live markup:
+    // every `<` is emitted by the renderer (user input is always escaped), and
+    // no executable-scheme attribute can appear. A raw `href="javascript:...`
+    // or `onload="...` substring can only be authored by our own attribute
+    // writers, so testing for their absence pins the sanitizer policy exactly.
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(128))]
+        #[test]
+        fn render_of_arbitrary_markdown_never_injects_live_markup(
+            source in proptest::collection::vec(proptest::char::any(), 0..2048),
+        ) {
+            let source: String = source.into_iter().collect();
+            let blocks = parse_markdown(&source);
+            let html = html_of(&blocks);
+
+            // No unescaped HTML element that could run scripts.
+            for forbidden in ["<script", "<iframe", "<object", "<embed", "<svg", "<form", "<meta"] {
+                prop_assert!(!html.contains(forbidden), "output contains {forbidden}");
+            }
+            // No event-handler attribute written with a raw `"`.
+            for forbidden in ["onload=", "onerror=", "onclick=", "onmouseover=", "onfocus="] {
+                prop_assert!(!html.contains(forbidden), "output contains {forbidden}");
+            }
+            // No executable scheme can surface as a real attribute value.
+            prop_assert!(!html.contains("href=\"javascript:"), "javascript: reached an href");
+            prop_assert!(!html.contains("src=\"javascript:"), "javascript: reached an src");
+            prop_assert!(!html.contains("href=\"data:text/html"), "data:text/html reached an href");
+            // The escape pipeline is total: every literal `<` from user input
+            // became `&lt;`, so the raw characters survive only from writers.
+            prop_assert!(!html.contains("</script>"), "closing script tag leaked");
+        }
+    }
+
+    // Parsing and the diff/merge machinery must never panic, no matter how
+    // adversarial the source text. Merge is exercised round-trip: create,
+    // re-parse, merge again.
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+        #[test]
+        fn parse_and_merge_never_panic_on_arbitrary_source(
+            a in proptest::collection::vec(proptest::char::any(), 0..2048),
+            b in proptest::collection::vec(proptest::char::any(), 0..2048),
+            now in 0i64..1_000_000,
+        ) {
+            let a: String = a.into_iter().collect();
+            let b: String = b.into_iter().collect();
+            let parsed_a = parse_markdown(&a);
+            let parsed_b = parse_markdown(&b);
+            // Fresh document from the first parse, then merge the second, then
+            // merge an empty edit on top.
+            let first = merge_blocks(&[], &[], parsed_a, now);
+            let second = merge_blocks(&first.blocks, &first.versions, parsed_b, now);
+            let third = merge_blocks(&second.blocks, &second.versions, Vec::new(), now + 1);
+            prop_assert!(third.blocks.len() <= second.blocks.len());
+        }
     }
 }

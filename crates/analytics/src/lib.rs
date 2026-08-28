@@ -141,7 +141,9 @@ impl RateLimiter {
             start_ms: now_ms,
             count: 0,
         });
-        if now_ms - window.start_ms >= Self::WINDOW_MS {
+        // Saturating so adversarial/backwards clock values can never overflow
+        // and panic the process.
+        if now_ms.saturating_sub(window.start_ms) >= Self::WINDOW_MS {
             *window = Window {
                 start_ms: now_ms,
                 count: 0,
@@ -580,5 +582,113 @@ mod tests {
 
         // The window resets normally.
         assert!(limiter.peek("user", now + RateLimiter::WINDOW_MS));
+    }
+
+    // -------------------------------------------------------------------------
+    // Rate-limiter invariants over generated input spaces (proptest).
+    // -------------------------------------------------------------------------
+    use proptest::prop_assert;
+
+    // Property A: for any limit N ≥ 1, the first N requests from a key are
+    // allowed and request N+1 is denied, regardless of ordering of interleaved
+    // requests from other keys.
+    proptest::proptest! {
+        #[test]
+        fn rate_limiter_first_n_allowed_then_denied(n in 1u32..200, now in 0i64..1_000_000) {
+            let limiter = RateLimiter::new(n);
+            for _ in 0..n {
+                prop_assert!(limiter.allow("a", now), "request within the limit must pass");
+            }
+            prop_assert!(!limiter.allow("a", now), "request past the limit must fail");
+            // Interleaving other keys never changes key A's budget.
+            for _ in 0..n * 3 {
+                let _ = limiter.allow("other", now);
+            }
+            prop_assert!(!limiter.allow("a", now), "other keys must not interfere");
+            prop_assert!(limiter.allow("untouched", now), "fresh key unaffected");
+        }
+    }
+
+    // Property B: keys are fully isolated — exhausting one never touches
+    // another, even when the same window time is shared.
+    proptest::proptest! {
+        #[test]
+        fn rate_limiter_keys_are_isolated(now in 0i64..1_000_000) {
+            let limiter = RateLimiter::new(4);
+            for c in 'a'..='z' {
+                for _ in 0..4 {
+                    prop_assert!(limiter.allow(&c.to_string(), now));
+                }
+                prop_assert!(!limiter.allow(&c.to_string(), now));
+            }
+            // Every key is independently exhausted; no cross-talk at all.
+            for c in 'a'..='z' {
+                prop_assert!(!limiter.allow(&c.to_string(), now));
+            }
+        }
+    }
+
+    // Property C: expired windows become usable again exactly once the window
+    // boundary has passed, and only for the key that expired.
+    proptest::proptest! {
+        #[test]
+        fn rate_limiter_window_expires(now in 0i64..1_000_000, drift in 1i64..RateLimiter::WINDOW_MS) {
+            let limiter = RateLimiter::new(2);
+            // Exhaust both keys.
+            limiter.allow("a", now);
+            limiter.allow("a", now);
+            limiter.allow("b", now);
+            limiter.allow("b", now);
+            // A step smaller than the window keeps both blocked...
+            prop_assert!(!limiter.allow("a", now + drift));
+            prop_assert!(!limiter.allow("b", now + drift));
+            // ...exactly at the boundary both reset.
+            let later = now + RateLimiter::WINDOW_MS;
+            prop_assert!(limiter.allow("a", later));
+            prop_assert!(limiter.allow("b", later));
+        }
+    }
+
+    // Property D: no clock value — forward, backward, or at the i64 extremes —
+    // may panic the limiter, even when the stored window start is far away.
+    proptest::proptest! {
+        #[test]
+        fn rate_limiter_never_panics_on_any_clock(now in i64::MIN..=i64::MAX, key in "[a-z]{0,16}") {
+            let limiter = RateLimiter::new(3);
+            // Exercise the subtraction across the full range, including the
+            // value farthest from `now` (the mirror of i64::MIN).
+            let far = now.wrapping_add(i64::MAX);
+            let _ = limiter.allow(&key, now);
+            let _ = limiter.peek(&key, now);
+            limiter.record(&key, now);
+            let _ = limiter.allow(&key, far);
+            let _ = limiter.allow(&key, far.wrapping_neg());
+            let _ = limiter.allow(&key, i64::MIN);
+            let _ = limiter.allow(&key, i64::MAX);
+        }
+    }
+
+    // Property E: per-key record counts saturate at the cap (never grow
+    // unbounded), and huge keys exercise the map without panics. Bounded size
+    // so the property stays fast under the default case count.
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+        #[test]
+        fn rate_limiter_record_saturates_and_huge_keys_are_safe(
+            huge in proptest::collection::vec(proptest::char::any(), 0..1024),
+            now in 0i64..1_000_000,
+        ) {
+            let limiter = RateLimiter::new(7);
+            let key: String = huge.iter().collect();
+            for _ in 0..1_000 {
+                limiter.record(&key, now);
+            }
+            // After the cap the key reports exhausted, and record never
+            // inflated a per-key counter past the cap.
+            prop_assert!(!limiter.peek(&key, now));
+            // A second huge key coexists with the first without interfering.
+            limiter.record(&key, now);
+            prop_assert!(!limiter.peek(&key, now));
+        }
     }
 }
