@@ -11,8 +11,7 @@ e2e/.auth.json
 
 # Local databases
 *.db
-*.db-shm
-*.db-wal
+*.db-*
 *.sqlite3
 
 # TLS / secrets

@@ -4,7 +4,7 @@
 // load, and per-block impressions from an IntersectionObserver. Events are
 // sent to the public `/api/events` endpoint; the server mints the anonymous
 // visitor cookie. All writes use `sendBeacon`/`keepalive` so they survive
-// navigation. "Keep reading" recommendations report one impression per card
+// navigation. "Read next" recommendations report one impression per card
 // (when visible) and a click event per card opened, feeding the future
 // personalized recommendation engine.
 (function () {
@@ -189,9 +189,9 @@
 		};
 	}
 
-	// Track the "Keep reading" recommendations: one impression per card when a
+	// Track the "Read next" recommendations: one impression per card when a
 	// meaningful part is on screen, and a click event when a card is opened.
-	// `container` is the `#keep-reading` section (missing when there are no
+	// `container` is the `#read-next` section (missing when there are no
 	// recommendations). Each card is an `li[data-recommended-slug]`.
 	function trackRecommendations(slug, container) {
 		if (!container) return;

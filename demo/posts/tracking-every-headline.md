@@ -16,7 +16,7 @@ A headline test in this system needs four pieces:
    this article.
 2. A **goal** — the action that counts as success. In the product model of the
    MVP, a "completion" is a visitor who scrolled to the end of the article.
-   This demo install configures its goal as clicks on the *Keep reading*
+   This demo install configures its goal as clicks on the *Read next*
    recommendation cards after the article, so the experiment measures real
    onward behavior rather than a synthetic signal.
 3. One or more **variants** — replacement content for the block. Control is

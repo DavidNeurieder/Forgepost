@@ -38,7 +38,7 @@ Version **0.2.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
   **Bayesian sequential test**: exact `P(beats control)`, credible intervals, a
   spending-bound-corrected confidence threshold, a no-winner stopping rule, and
   automatic promotion of the winning variant.
-- **Keep reading** — after each article, up to three related-post cards ranked
+- **Read next** — after each article, up to three related-post cards ranked
   by shared tags (the most recent posts backfill the list). Impressions and
   clicks are tracked into analytics to feed a future personalized
   recommendation engine.

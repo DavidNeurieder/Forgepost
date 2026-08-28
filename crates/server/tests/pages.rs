@@ -2193,7 +2193,7 @@ async fn tag_pages_list_published_posts_only() {
 }
 
 // ---------------------------------------------------------------------------
-// Keep reading recommendations
+// Read next recommendations
 // ---------------------------------------------------------------------------
 
 async fn publish_with(app: &Router, cookie: &str, csrf: &str, title: &str, tags: &str) -> String {
@@ -2245,7 +2245,7 @@ async fn article_page_recommends_related_posts() {
     assert_eq!(status, StatusCode::OK);
     let html = body_text(resp).await;
 
-    assert!(html.contains("Keep reading"), "related section present");
+    assert!(html.contains("Read next"), "related section present");
     let tech_two = html.find("Tech Two").expect("tag match ranked first");
     let food_one = html.find("Food One").expect("backfill listed");
     let food_two = html.find("Food Two").expect("backfill listed");
@@ -2266,13 +2266,13 @@ async fn article_page_recommends_related_posts() {
 }
 
 #[tokio::test]
-async fn article_page_without_other_posts_has_no_keep_reading() {
+async fn article_page_without_other_posts_has_no_read_next() {
     let app = test_app().await;
     let _ = seed_published(&app).await;
 
     let (status, resp) = send(&app, req(Method::GET, "/articles/hello-world", None, None)).await;
     assert_eq!(status, StatusCode::OK);
     let html = body_text(resp).await;
-    assert!(!html.contains("Keep reading"));
+    assert!(!html.contains("Read next"));
     assert!(!html.contains("data-recommended-slug"));
 }

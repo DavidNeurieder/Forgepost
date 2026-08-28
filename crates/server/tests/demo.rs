@@ -251,7 +251,7 @@ async fn build_archive(database_url: &str, media_dir: &Path, dest: &Path) {
             block_id,
             admin,
             "Headline A/B: 'Tracking' vs 'Testing'",
-            "clicks on the Keep reading link",
+            "clicks on the Read next link",
             100.0,
             0.95,
             30,

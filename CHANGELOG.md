@@ -145,7 +145,7 @@ single binary.
   scroll-depth funnel) and a per-block drop-off dashboard.
 - Estimated numbers are explicitly labeled: blockers and JS-disabled readers
   are undercounted by design.
-- **"Keep reading" recommendations** — every article ends with up to three
+- **"Read next" recommendations** — every article ends with up to three
   related-post cards (before the comments), ranked by shared tags with the most
   recent posts as backfill. New `recommendation_impression` /
   `recommendation_click` events record what readers are shown and open

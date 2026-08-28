@@ -288,7 +288,7 @@ pub struct EventRequest {
     experiment_id: Option<Uuid>,
     #[serde(default)]
     variant_id: Option<Uuid>,
-    /// Slug of the article shown/clicked in "Keep reading" (only for
+    /// Slug of the article shown/clicked in "Read next" (only for
     /// `recommendation_impression` / `recommendation_click`).
     #[serde(default)]
     recommended_slug: Option<String>,

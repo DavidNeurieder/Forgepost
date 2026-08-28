@@ -99,7 +99,7 @@ model are already shaped for it.
 
 ## 6. Recommendations & scaling
 
-"Keep reading" (`crates/server/src/recommender.rs`) adds three costs to watch.
+"Read next" (`crates/server/src/recommender.rs`) adds three costs to watch.
 All are fine at blog scale and cheap to fix later; none blocks the current
 design.
 

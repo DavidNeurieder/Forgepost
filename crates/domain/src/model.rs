@@ -161,7 +161,7 @@ pub struct AnalyticsEvent {
     /// The exact immutable block version the visitor was served (attached to
     /// validated experiment events; the version the assigned variant points at).
     pub version_id: Option<Uuid>,
-    /// Slug of the article shown/clicked in "Keep reading"
+    /// Slug of the article shown/clicked in "Read next"
     /// (`recommendation_impression` / `recommendation_click` only).
     pub recommended_slug: Option<String>,
     pub created_at_ms: i64,

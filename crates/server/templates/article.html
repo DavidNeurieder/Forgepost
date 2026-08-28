@@ -68,8 +68,8 @@
 {% if !related.is_empty() %}
 <hr class="sep">
 
-<section id="keep-reading">
-  <h2>Keep reading</h2>
+<section id="read-next">
+  <h2>Read next</h2>
   <ul class="post-cards">
   {% for p in related %}
     <li data-recommended-slug="{{ p.slug }}">
@@ -129,7 +129,7 @@
       window.ForgepostTracker.trackArticle('{{ slug }}');
       window.ForgepostTracker.trackRecommendations(
         '{{ slug }}',
-        document.getElementById('keep-reading')
+        document.getElementById('read-next')
       );
       window.ForgepostTracker.trackShare(
         '{{ slug }}',
