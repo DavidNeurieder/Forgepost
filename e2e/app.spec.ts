@@ -372,6 +372,11 @@ test('the owner can log out and log back in', async ({ browser }) => {
 
 	await page.getByLabel('Email', { exact: true }).fill(EMAIL);
 	await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
+	await expect(page.locator('#password')).toHaveAttribute('type', 'password');
+	await page.getByRole('button', { name: 'Show password' }).click();
+	await expect(page.locator('#password')).toHaveAttribute('type', 'text');
+	await page.getByRole('button', { name: 'Hide password' }).click();
+	await expect(page.locator('#password')).toHaveAttribute('type', 'password');
 	await page.getByRole('button', { name: 'Log in' }).click();
 	await expect(page).toHaveURL(/\/admin$/);
 	await expect(page.getByRole('table').getByRole('link', { name: TITLE })).toBeVisible();
