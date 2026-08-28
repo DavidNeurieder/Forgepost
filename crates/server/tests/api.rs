@@ -2384,6 +2384,266 @@ async fn experiment_concludes_no_winner() {
     assert!(rb["experiment_id"].is_null());
 }
 
+/// The experiment attribute firewall: the server derives the assignment from
+/// the visitor cookie, so a browser cannot report a variant it was not given.
+#[tokio::test]
+async fn experiment_events_require_assigned_variant() {
+    let pool = pool().await;
+    let repo = SqliteRepository::from_pool(pool.clone());
+    repo.migrate().await.expect("migrations apply");
+    let app = app(Arc::new(repo));
+    let (cookie, csrf, id, slug, block_ids) = seed_published_article(&app).await;
+    let exp = seed_running_experiment(&app, &cookie, &csrf, &id, &block_ids[0], 100).await;
+    let exp_id = Uuid::from_str(exp["id"].as_str().unwrap()).unwrap();
+    let exp_id_str = exp_id.to_string();
+    let (control_id, variant_id) = variant_ids(&exp);
+    let test_version_id = exp["variants"][1]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A visitor assigned control is refused a variant impression/conversion.
+    let control_visitor = visitors_for(
+        exp_id,
+        Uuid::from_str(&control_id).unwrap(),
+        Uuid::from_str(&variant_id).unwrap(),
+        false,
+        1,
+    )[0];
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/events",
+            Some(&format!("opv={control_visitor}")),
+            None,
+            Some(json!({
+                "slug": slug,
+                "session_id": Uuid::new_v4(),
+                "kind": "experiment_impression",
+                "experiment_id": exp_id_str,
+                "variant_id": variant_id,
+                "payload": {},
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "forged impression rejected"
+    );
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/events",
+            Some(&format!("opv={control_visitor}")),
+            None,
+            Some(json!({
+                "slug": slug,
+                "session_id": Uuid::new_v4(),
+                "kind": "experiment_conversion",
+                "experiment_id": exp_id_str,
+                "variant_id": variant_id,
+                "payload": {},
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "forged conversion rejected"
+    );
+
+    // A visitor assigned the variant records impression + conversion.
+    let variant_visitor = visitors_for(
+        exp_id,
+        Uuid::from_str(&control_id).unwrap(),
+        Uuid::from_str(&variant_id).unwrap(),
+        true,
+        1,
+    )[0];
+    post_experiment_event(&app, &slug, variant_visitor, &exp_id_str, &variant_id, true).await;
+
+    // The recorded event carries the exact version the variant pointed at.
+    let (version,): (Option<String>,) = sqlx::query_as(
+        "SELECT version_id FROM analytics_events
+         WHERE event_type = 'experiment_conversion' AND experiment_id = ?",
+    )
+    .bind(&exp_id_str)
+    .fetch_one(&pool)
+    .await
+    .expect("conversion event persisted");
+    assert_eq!(version.as_deref(), Some(test_version_id.as_str()));
+}
+
+/// A block is assigned at most one running experiment: starting a second one
+/// on the same block violates the one-running-per-block invariant and is a 409.
+#[tokio::test]
+async fn experiment_rejects_second_running_on_block() {
+    let app = test_app().await;
+    let (cookie, csrf, id, slug, block_ids) = seed_published_article(&app).await;
+    let _first = seed_running_experiment(&app, &cookie, &csrf, &id, &block_ids[0], 100).await;
+
+    let second: Value = body_json(
+        send(
+            &app,
+            json_req(
+                Method::POST,
+                "/api/experiments",
+                Some(&cookie),
+                Some(&csrf),
+                Some(json!({
+                    "document_id": id,
+                    "block_id": block_ids[0],
+                    "name": "Second test",
+                    "traffic_weight": 50,
+                    "variants": [ { "content": { "text": "Also new" }, "weight": 50 } ],
+                })),
+            ),
+        )
+        .await
+        .1,
+    )
+    .await;
+    let second_id = second["id"].as_str().unwrap().to_string();
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/experiments/{second_id}/start"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "second running experiment blocked"
+    );
+
+    // The first experiment is untouched and still running.
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/documents/{id}/experiments"),
+            Some(&cookie),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let list = body_json(resp).await;
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    let running = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["status"] == "running")
+        .count();
+    assert_eq!(running, 1, "exactly one running experiment");
+    let _ = slug;
+}
+
+/// Concluding is a latched transaction: a second decide/promote after the
+/// first success is a 409 and never appends a second decision row.
+#[tokio::test]
+async fn experiment_conclude_is_idempotent() {
+    let app = test_app().await;
+    let (cookie, csrf, id, slug, block_ids) = seed_published_article(&app).await;
+    let exp = seed_running_experiment(&app, &cookie, &csrf, &id, &block_ids[0], 2).await;
+    let exp_id = Uuid::from_str(exp["id"].as_str().unwrap()).unwrap();
+    let exp_id_str = exp_id.to_string();
+    let (control_id, variant_id) = variant_ids(&exp);
+
+    // Clear winner: variant converts, control does not.
+    for v in visitors_for(
+        exp_id,
+        Uuid::from_str(&control_id).unwrap(),
+        Uuid::from_str(&variant_id).unwrap(),
+        false,
+        5,
+    ) {
+        post_experiment_event(&app, &slug, v, &exp_id_str, &control_id, false).await;
+    }
+    for v in visitors_for(
+        exp_id,
+        Uuid::from_str(&control_id).unwrap(),
+        Uuid::from_str(&variant_id).unwrap(),
+        true,
+        5,
+    ) {
+        post_experiment_event(&app, &slug, v, &exp_id_str, &variant_id, true).await;
+    }
+
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/experiments/{exp_id_str}/decide"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "first decide succeeds");
+
+    // Deciding again is a no-op at the service layer (status latch) and must
+    // not append a second decision row.
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/experiments/{exp_id_str}/decide"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "second decide is a no-op");
+    assert!(body_json(resp).await.is_null());
+
+    // Promoting again is refused (only running experiments promote).
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::POST,
+            &format!("/api/experiments/{exp_id_str}/promote"),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "second promote refused");
+    let body = body_json(resp).await;
+    assert_eq!(body["error"], "only running experiments can be promoted");
+
+    let (status, resp) = send(
+        &app,
+        json_req(
+            Method::GET,
+            &format!("/api/documents/{id}/experiments"),
+            Some(&cookie),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let list = body_json(resp).await;
+    let e = &list.as_array().unwrap()[0];
+    assert_eq!(e["decisions"].as_array().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn experiment_manual_stop_and_manual_promote() {
     let app = test_app().await;

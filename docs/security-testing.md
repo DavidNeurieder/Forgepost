@@ -79,6 +79,26 @@ already lives in `crates/server/tests/api.rs`.
 | Serving     | `served_media_has_sniffed_type_and_nosniff`                 | `X-Content-Type-Options: nosniff` + sniffed type on read-back |
 | Names       | `adversarial_media_names_are_404`                           | traversal/double-extension names → 404 |
 
+### Experiment attribution (M3, analytics review)
+
+Attribution is server-derived, not client-asserted: the assignment is
+deterministic per (experiment, visitor), so the events endpoint recomputes it
+from the visitor cookie and rejects anything the browser reports that it was
+not actually given. Validated experiment events also carry `version_id`, the
+exact immutable version the assigned variant pointed at, so conversion history
+can be reproduced against the version pool.
+
+| Boundary            | Test                                            | Assertion |
+|---------------------|-------------------------------------------------|-----------|
+| Assignment firewall | `experiment_events_require_assigned_variant`    | unassigned variant impression/conversion → 400; valid event 204 and its row records `version_id` |
+| One-per-block guard | `experiment_rejects_second_running_on_block`    | starting a second experiment on a block with a running one → 409 (partial unique index) |
+| Idempotent conclude | `experiment_conclude_is_idempotent`             | second decide is a no-op; second promote → 409; exactly one decision row |
+
+The system-level `creator_journey_end_to_end` test posts only assignment-aware
+visitors and asserts the live report counts impressions/conversions per variant;
+`visitor_assignment` asserts the served DOM `variant_id` equals the deterministic
+assignment.
+
 ## Layer 2 — Property tests (proptest)
 
 ### Rate limiter — `crates/analytics/src/lib.rs`

@@ -19,6 +19,9 @@ use reqwest::Method;
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_TYPE, COOKIE, SET_COOKIE};
 use serde_json::{Value, json};
+use uuid::Uuid;
+
+use forgepost_experiments::assign_variant;
 
 const PASSWORD: &str = "correct horse battery staple";
 const CSRF_HEADER: &str = "x-csrf-token";
@@ -574,6 +577,10 @@ fn creator_journey_end_to_end() {
     let _ = visitor_assignment(base, &slug, promoted_visitor, &exp_id);
 
     // 12. Readers see impressions and conversions; the live report counts them.
+    // Assignment is deterministic per (experiment, visitor) and the endpoint
+    // now refuses anything that was not actually assigned, so pick visitors by
+    // the exact split the server will compute for them (traffic 50 / variant 50
+    // → control share 0.5, mirroring `assign_variant`).
     let convert = |opv: &str, sid: u32, variant: &str, does: bool| {
         let v = Visitor::new(base, opv);
         v.event(
@@ -595,11 +602,25 @@ fn creator_journey_end_to_end() {
             );
         }
     };
+    let exp_uuid: Uuid = Uuid::parse_str(&exp_id).unwrap();
+    let control_uuid = Uuid::parse_str(&control_id).unwrap();
+    let test_uuid = Uuid::parse_str(&test_id).unwrap();
+    let mut counter = 0u128;
+    let split = |counter: &mut u128, want_test: bool| -> String {
+        loop {
+            *counter += 1;
+            let v = Uuid::from_u128(*counter);
+            let chosen = assign_variant(&exp_uuid, &v, control_uuid, 0.5, &[(test_uuid, 50.0)]);
+            if (chosen == test_uuid) == want_test {
+                return v.to_string();
+            }
+        }
+    };
     // Three conversions on the test variant, none on control.
-    for (i, visitor) in [v1, v2, promoted_visitor].iter().enumerate() {
-        convert(visitor, 40 + i as u32, &test_id, true);
+    for i in 0..3 {
+        convert(&split(&mut counter, true), 40 + i as u32, &test_id, true);
     }
-    convert(v3, 43, &control_id, false);
+    convert(&split(&mut counter, false), 43, &control_id, false);
 
     let (status, list) = creator.get(&format!("/api/documents/{id}/experiments"));
     assert_eq!(status, 200);

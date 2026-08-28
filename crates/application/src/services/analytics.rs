@@ -122,6 +122,7 @@ impl AnalyticsService {
             read_time_ms: parsed.read_time_ms,
             experiment_id: parsed.experiment_id,
             variant_id: parsed.variant_id,
+            version_id: None,
             recommended_slug: parsed.recommended_slug.clone(),
             created_at_ms: now_ms(),
         };

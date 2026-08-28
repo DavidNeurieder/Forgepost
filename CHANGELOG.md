@@ -58,6 +58,19 @@ surfaces.
   limiter, markdown rendering, slugify, and ZIP import. See
   `docs/security-testing.md`; CI now runs `cargo audit` so a dependency
   vulnerability fails a merge.
+- **Server-verified experiment assignment** — attribution is derived, never
+  client-asserted: the events endpoint recomputes the deterministic variant
+  assignment from the visitor cookie and rejects a variant the visitor was not
+  actually given (400). Validated experiment events now record `version_id`,
+  the exact immutable version the assigned variant pointed at, so conversion
+  history is reproducible against the version pool.
+- **One running experiment per block** — a partial unique index forbids
+  starting a second experiment on a block that already has a running one; the
+  server maps the violation to a clean `409 Conflict`.
+- **Latch-guarded conclusions** — `conclude_experiment` transitions status in
+  the same transaction that records the decision and rolls back if the latch
+  is already closed, so a racy or double conclusion can never append a second
+  decision row (the API already short-circuits at the service layer).
 
 ### Internal
 

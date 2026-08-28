@@ -158,6 +158,9 @@ pub struct AnalyticsEvent {
     pub read_time_ms: Option<i64>,
     pub experiment_id: Option<Uuid>,
     pub variant_id: Option<Uuid>,
+    /// The exact immutable block version the visitor was served (attached to
+    /// validated experiment events; the version the assigned variant points at).
+    pub version_id: Option<Uuid>,
     /// Slug of the article shown/clicked in "Keep reading"
     /// (`recommendation_impression` / `recommendation_click` only).
     pub recommended_slug: Option<String>,

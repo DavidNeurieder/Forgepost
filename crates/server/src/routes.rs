@@ -740,6 +740,10 @@ pub async fn record_event(
         return Err(ApiError::rate_limited());
     }
 
+    // The visitor identity drives the deterministic experiment assignment, so
+    // resolve it before validating any experiment/variant pair below.
+    let (visitor_id, cookie) = visitor_identity_with_secure(&headers, state.secure_cookies);
+
     let full = state
         .repo
         .get_published_by_slug(&body.slug)
@@ -754,7 +758,13 @@ pub async fn record_event(
         return Err(ApiError::bad_request("unknown block"));
     }
     // Experiment events must reference a running experiment that owns the
-    // variant and belongs to this article.
+    // variant and belongs to this article — and the visitor must actually have
+    // been assigned that variant. Assignment is deterministic per
+    // (experiment, visitor), so the server recomputes it exactly as the
+    // article render did and rejects anything the browser made up. The exact
+    // immutable version the visitor saw is attached to the event for
+    // provenance.
+    let mut experiment_context: Option<(Uuid, Uuid)> = None; // (version_id, block_id)
     if let (Some(exp_id), Some(variant_id)) = (parsed.experiment_id, parsed.variant_id) {
         let exp = state
             .repo
@@ -769,6 +779,24 @@ pub async fn record_event(
                 "experiment belongs to another article",
             ));
         }
+        let control = exp
+            .variants
+            .iter()
+            .find(|v| v.is_control)
+            .ok_or_else(|| ApiError::bad_request("experiment has no control variant"))?;
+        let others: Vec<(VariantId, f64)> = exp
+            .variants
+            .iter()
+            .filter(|v| !v.is_control)
+            .map(|v| (v.id, v.weight))
+            .collect();
+        let control_share = 1.0 - (exp.traffic_weight / 100.0).clamp(0.0, 1.0);
+        let assigned = assign_variant(&exp.id, &visitor_id, control.id, control_share, &others);
+        if assigned != variant_id {
+            return Err(ApiError::bad_request(
+                "visitor was not assigned this variant",
+            ));
+        }
         if !state
             .repo
             .experiment_variant_belongs(exp_id, variant_id)
@@ -778,6 +806,11 @@ pub async fn record_event(
                 "variant does not belong to experiment",
             ));
         }
+        experiment_context = exp
+            .variants
+            .iter()
+            .find(|v| v.id == variant_id)
+            .map(|v| (v.version_id, exp.block_id));
     }
 
     // Recommendation events must name a published article other than the one
@@ -788,13 +821,16 @@ pub async fn record_event(
         return Err(ApiError::bad_request("recommended article not found"));
     }
 
-    let (visitor_id, cookie) = visitor_identity_with_secure(&headers, state.secure_cookies);
+    let (version_id, block_id) = match experiment_context {
+        Some((version, block)) => (Some(version), Some(block)),
+        None => (None, parsed.block_id),
+    };
     let event = AnalyticsEvent {
         id: Uuid::new_v4(),
         document_id: PostId(document_id),
         event_type: parsed.event_type.into(),
         band: parsed.band,
-        block_id: parsed.block_id,
+        block_id,
         pageview_id: body.session_id,
         visitor_id: VisitorId(visitor_id),
         referrer: headers
@@ -808,6 +844,7 @@ pub async fn record_event(
         read_time_ms: parsed.read_time_ms,
         experiment_id: parsed.experiment_id,
         variant_id: parsed.variant_id,
+        version_id,
         recommended_slug: parsed.recommended_slug,
         created_at_ms: now_ms(),
     };

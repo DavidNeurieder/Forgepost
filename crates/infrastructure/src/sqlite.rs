@@ -964,9 +964,9 @@ impl AnalyticsRepo for SqliteRepository {
         sqlx::query(
             "INSERT INTO analytics_events
                 (id, document_id, event_type, band, block_id, pageview_id, visitor_id,
-                 referrer, user_agent, read_time_ms, experiment_id, variant_id,
+                 referrer, user_agent, read_time_ms, experiment_id, variant_id, version_id,
                  recommended_slug, created_at_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(event.id.to_string())
         .bind(event.document_id.to_string())
@@ -980,6 +980,7 @@ impl AnalyticsRepo for SqliteRepository {
         .bind(event.read_time_ms)
         .bind(event.experiment_id.map(|e| e.to_string()))
         .bind(event.variant_id.map(|v| v.to_string()))
+        .bind(event.version_id.map(|v| v.to_string()))
         .bind(&event.recommended_slug)
         .bind(event.created_at_ms)
         .execute(&self.pool)
@@ -1371,13 +1372,17 @@ impl ExperimentRepo for SqliteRepository {
         .bind(now)
         .bind(id.to_string())
         .execute(&self.pool)
-        .await?;
-        if result.rows_affected() == 0 {
-            return Err(RepositoryError::Conflict(
+        .await;
+        match result {
+            Err(err) if is_unique_violation(&err) => Err(RepositoryError::Conflict(
+                "a running experiment already exists on this block".into(),
+            )),
+            Err(err) => Err(err.into()),
+            Ok(result) if result.rows_affected() == 0 => Err(RepositoryError::Conflict(
                 "only draft experiments can start".into(),
-            ));
+            )),
+            Ok(_) => Ok(()),
         }
-        Ok(())
     }
 
     async fn stop_experiment(
@@ -1455,7 +1460,7 @@ impl ExperimentRepo for SqliteRepository {
         .bind(stats.variant_conversions)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
+        let marked = sqlx::query(
             "UPDATE experiments SET status = 'decided', decided_at_ms = ?, decision = ?, winning_variant_id = ?
              WHERE id = ? AND status = 'running'",
         )
@@ -1465,6 +1470,15 @@ impl ExperimentRepo for SqliteRepository {
         .bind(id.to_string())
         .execute(&mut *tx)
         .await?;
+        // The status transition is the idempotency latch: if no running row was
+        // updated (already decided/stopped), roll everything back instead of
+        // appending a second decision row for the same experiment.
+        if marked.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Err(RepositoryError::Conflict(
+                "experiment is not running; no decision recorded".into(),
+            ));
+        }
         if let Some(pid) = promoted_version_id {
             let exp = load_experiment_tx(&mut tx, &id)
                 .await?
@@ -1830,6 +1844,15 @@ fn fts_match_expr(query: &str) -> String {
         }
     }
     out
+}
+
+/// True when `err` is a SQLite UNIQUE constraint violation (e.g. the partial
+/// index that forbids a second running experiment per block).
+fn is_unique_violation(err: &sqlx::Error) -> bool {
+    matches!(
+        err,
+        sqlx::Error::Database(db) if db.is_unique_violation()
+    )
 }
 
 /// Load an experiment with its variants (read path: fresh snapshot).
@@ -2399,6 +2422,7 @@ mod tests {
             read_time_ms: None,
             experiment_id: None,
             variant_id: None,
+            version_id: None,
             recommended_slug: None,
             created_at_ms: now_ms(),
         })
@@ -2493,6 +2517,7 @@ mod tests {
             read_time_ms: None,
             experiment_id: None,
             variant_id: None,
+            version_id: None,
             recommended_slug: Some("next-post".into()),
             created_at_ms: now_ms(),
         })
@@ -2528,6 +2553,7 @@ mod tests {
             read_time_ms: None,
             experiment_id: None,
             variant_id: None,
+            version_id: None,
             recommended_slug: None,
             created_at_ms: now_ms(),
         };
@@ -2595,6 +2621,7 @@ mod tests {
             read_time_ms: None,
             experiment_id: None,
             variant_id: None,
+            version_id: None,
             recommended_slug: None,
             created_at_ms: at,
         };
