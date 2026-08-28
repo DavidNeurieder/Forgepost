@@ -23,7 +23,7 @@ surfaces.
   thumbnail and a play badge and *no iframe*, so the reader's browser never
   contacts the provider until they choose to play. Clicking swaps in the
   iframe via the new `/static/embed.js` (privacy-host YouTube embeds,
-  `referrerpolicy="no-referrer"`, `allowfullscreen`).
+  `referrerpolicy="strict-origin-when-cross-origin"`, `allowfullscreen`).
 - **Thumbnails** — YouTube's thumbnail is derived from the video id
   (`i.ytimg.com/vi/<id>/hqdefault.jpg`); Rumble's title and thumbnail are
   fetched once, best-effort, from Rumble's oEmbed endpoint at save time (3s

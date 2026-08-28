@@ -59,8 +59,8 @@ block:
 - **Safe embedding domains.** YouTube embeds are served from
   `youtube-nocookie.com`, the privacy mode variant that is explicit about its
   reduced tracking surface. The iframe is created with
-  `referrerpolicy="no-referrer"`, so the provider's player does not learn which
-  of your articles the video sits in.
+  `referrerpolicy="strict-origin-when-cross-origin"`, so the provider learns
+  the site's origin but never which article the video sits in.
 - **Attribution stays local.** When a reader plays a video, the event is a
   normal element in your own `analytics_events` — a local record you control,
   not a beacon to a third-party warehouse.

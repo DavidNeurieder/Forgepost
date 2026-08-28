@@ -26,6 +26,18 @@ const MARKDOWN = [
 	''
 ].join('\n');
 
+// A post with a standalone YouTube URL line -> a click-to-load video block.
+const VIDEO_MARKDOWN = [
+	'# Video E2E Post',
+	'',
+	'Some words before the embed.',
+	'',
+	'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+	'',
+	'Some words after the embed.',
+	''
+].join('\n');
+
 test.describe.configure({ mode: 'serial' });
 
 let slug = '';
@@ -322,6 +334,221 @@ test('an experiment can be created, started, and concluded', async ({ browser })
 	await page.getByRole('button', { name: 'No improvement' }).click();
 	await expect(page.getByText('Decision: no_improvement')).toBeVisible();
 	await page.context().close();
+});
+
+// A module-scope slug for the video post so the two video tests can share it.
+let videoSlug = '';
+
+test('a video plays through click-to-load', async ({ browser }) => {
+	const page = await adminPage(browser);
+	await gotoDashboard(page);
+
+	await page.getByRole('button', { name: 'New post' }).click();
+	await page.waitForURL(/\/admin\/editor\//);
+	await page.getByLabel('Title', { exact: true }).fill('Video E2E Post');
+	await page.getByLabel('Markdown').fill(VIDEO_MARKDOWN);
+	await page.getByRole('button', { name: 'Save', exact: true }).click();
+	await expect(page.getByText('Saved')).toBeVisible();
+	await page.getByRole('button', { name: 'Publish', exact: true }).click();
+	await expect(page.getByText('Published', { exact: true })).toBeVisible();
+
+	videoSlug = (await page.getByRole('link', { name: 'View post' }).getAttribute('href'))!.replace(/^\/articles\//, '');
+	expect(videoSlug).not.toBe('');
+	await page.context().close();
+
+	// Public article: the click-to-load box is rendered and there is no iframe
+	// before the reader interacts.
+	const reader = await browser.newContext();
+	const rpage = await reader.newPage();
+	await rpage.goto(`/articles/${videoSlug}`);
+	const box = rpage.locator('button.video-box');
+	await expect(box).toBeVisible();
+	await expect(box).toHaveAttribute(
+		'data-src',
+		'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ'
+	);
+	await expect(rpage.locator('.article-body iframe')).toHaveCount(0);
+
+	// One click swaps in the player iframe with the privacy-host embed and the
+	// referrerpolicy YouTube requires — no-referrer would trigger Error 153.
+	await box.click();
+	const frame = rpage.locator('.article-body iframe.video-frame');
+	await expect(frame).toBeVisible();
+	await expect(frame).toHaveAttribute(
+		'src',
+		'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ'
+	);
+	await expect(frame).toHaveAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
+	expect(await frame.getAttribute('allowfullscreen')).not.toBeNull();
+	await reader.close();
+});
+
+test('YouTube embeds boot and (on unblocked networks) really play', async ({ browser }) => {
+	test.skip(!process.env.E2E_NETWORK, 'set E2E_NETWORK=1 to contact YouTube');
+	expect(videoSlug).not.toBe('');
+
+	const context = await browser.newContext({ locale: 'en-US' });
+	const page = await context.newPage();
+	await page.goto(`/articles/${videoSlug}`);
+	await page.locator('button.video-box').click();
+
+	const frameLocator = page.locator('.article-body iframe.video-frame');
+	await expect(frameLocator).toBeVisible();
+	const handle = await frameLocator.elementHandle();
+	const yt = await handle!.contentFrame();
+	expect(yt).not.toBeNull();
+
+	// Drive the embed for up to ~60s. Outcomes:
+	//  - Error 153 / "configuration error": OUR regression, always fail.
+	//  - "Video unavailable": YouTube is bot-blocking this network/browser, so
+	//    the test is inconclusive here and skips rather than turning red.
+	//  - Player boots and the <video> clock advances: real YouTube playback.
+	const errorOverlay = yt!.locator('.ytp-error-content, .ytp-error').first();
+	let clickedPlay = false;
+	for (let i = 0; i < 60; i++) {
+		if ((await errorOverlay.isVisible().catch(() => false)) && (await errorOverlay.textContent().catch(() => ''))) {
+			const text = (await errorOverlay.textContent()).trim();
+			if (/153|configuration error/i.test(text)) {
+				throw new Error(`YouTube reported player configuration error 153: "${text}"`);
+			}
+			if (/unavailable|verfügbar|not available/i.test(text)) {
+				test.skip(true, `YouTube bot-blocks this environment ("${text}"); nothing to play back`);
+				return;
+			}
+		}
+		const played = await yt!
+			.evaluate(() => {
+				const v = document.querySelector('video');
+				return v !== null && !v.paused && v.currentTime > 0.5;
+			})
+			.catch(() => false);
+		if (played) {
+			await context.close();
+			return;
+		}
+		if (!clickedPlay) {
+			const big = yt!.locator('.ytp-large-play-button');
+			if (await big.isVisible().catch(() => false)) {
+				await big.click().catch(() => {});
+				clickedPlay = true;
+			}
+		}
+		await page.waitForTimeout(1000);
+	}
+	await context.close();
+	throw new Error('YouTube player booted but the timeline never advanced; playback did not start');
+});
+
+test('a video actually plays (self-hosted mp4 via click-to-load)', async ({ browser }) => {
+	const fs = await import('node:fs');
+	const http = await import('node:http');
+	const path = await import('node:path');
+
+	// Serve a tiny real mp4 (H.264 + AAC, committed fixture) from a throwaway
+	// HTTP server so the assertion below proves *playback*, not just "an iframe
+	// appeared". YouTube can't drive this: it refuses embeds in automated and
+	// restricted networks ("This video is unavailable").
+	const mp4 = fs.readFileSync(path.join(process.cwd(), 'fixtures', 'sample.mp4'));
+	const media = http.createServer((req, res) => {
+		const range = req.headers.range;
+		const m = range ? /^bytes=(\d+)-(\d*)/.exec(range) : null;
+		if (m) {
+			const start = Number(m[1]);
+			const end = m[2] ? Number(m[2]) : mp4.length - 1;
+			res.writeHead(206, {
+				'Content-Type': 'video/mp4',
+				'Accept-Ranges': 'bytes',
+				'Content-Range': `bytes ${start}-${end}/${mp4.length}`,
+				'Content-Length': end - start + 1
+			});
+			res.end(mp4.subarray(start, end + 1));
+			return;
+		}
+		res.writeHead(200, {
+			'Content-Type': 'video/mp4',
+			'Accept-Ranges': 'bytes',
+			'Content-Length': mp4.length
+		});
+		res.end(mp4);
+	});
+	await new Promise<void>((resolve) => media.listen(0, '127.0.0.1', resolve));
+	const mediaPort = (media.address() as { port: number }).port;
+
+	// The standalone <iframe> line becomes a click-to-load video block whose
+	// data-src is the local file, i.e. the exact same pipeline the demo uses.
+	const src = `http://127.0.0.1:${mediaPort}/sample.mp4`;
+	const admin = await adminPage(browser);
+	await gotoDashboard(admin);
+	await admin.getByRole('button', { name: 'New post' }).click();
+	await admin.waitForURL(/\/admin\/editor\//);
+	await admin.getByLabel('Title', { exact: true }).fill('Real Play E2E Post');
+	await admin.getByLabel('Markdown').fill(
+		['# Real Play E2E Post', '', 'Some words before the embed.', '', `<iframe src="${src}" title="E2E sample"></iframe>`, ''].join('\n')
+	);
+	await admin.getByRole('button', { name: 'Save', exact: true }).click();
+	await expect(admin.getByText('Saved')).toBeVisible();
+	await admin.getByRole('button', { name: 'Publish', exact: true }).click();
+	await expect(admin.getByText('Published', { exact: true })).toBeVisible();
+	const realSlug = (await admin.getByRole('link', { name: 'View post' }).getAttribute('href'))!.replace(/^\/articles\//, '');
+	expect(realSlug).not.toBe('');
+	await admin.context().close();
+
+	// Click the play button, then inspect the real <video> inside the frame.
+	const reader = await browser.newContext();
+	const page = await reader.newPage();
+	await page.goto(`/articles/${realSlug}`);
+	const box = page.locator('button.video-box');
+	await expect(box).toBeVisible();
+	await expect(box).toHaveAttribute('data-src', src);
+	await box.click();
+
+	const frame = page.locator('iframe.video-frame');
+	await expect(frame).toBeVisible();
+	await expect(frame).toHaveAttribute('src', src);
+	const handle = await frame.elementHandle();
+	const mediaDoc = await handle!.contentFrame();
+	expect(mediaDoc).not.toBeNull();
+
+	// The video element appears and the stream actually decodes (readyState
+	// HAVE_CURRENT_DATA or better) — a real playable file, not a wood-frame
+	// iframe shell.
+	const decoded = () =>
+		mediaDoc!.evaluate(() => {
+			const v = document.querySelector('video');
+			return v !== null && v.readyState >= 2;
+		});
+	await expect
+		.poll(decoded, { timeout: 15_000, message: 'video element must appear and decode' })
+		.toBe(true);
+
+	// If the autoplay policy left the media paused (it normally doesn't here,
+	// because the click that injected the iframe is a user gesture), start it.
+	const initialPaused = await mediaDoc!.evaluate(() => {
+		const v = document.querySelector('video');
+		if (v && v.paused) {
+			v.play().catch(() => {});
+		}
+		return v !== null && v.paused;
+	});
+	if (initialPaused) {
+		await expect
+			.poll(decoded, { timeout: 5_000, message: 'play() should keep the media loaded' })
+			.toBe(true);
+	}
+
+	// REAL playback: the playback clock must advance past the first frame, not
+	// just decode into a stalled buffer.
+	const clock = () =>
+		mediaDoc!.evaluate(() => {
+			const v = document.querySelector('video');
+			return v ? v.currentTime : 0;
+		});
+	await expect
+		.poll(clock, { timeout: 15_000, message: 'playback must advance past the first frame' })
+		.toBeGreaterThan(0.4);
+
+	await new Promise<void>((resolve) => media.close(() => resolve()));
+	await reader.close();
 });
 
 test('the owner can delete a post', async ({ browser }) => {

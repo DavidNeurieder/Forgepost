@@ -21,7 +21,7 @@ use forgepost_application::services::backup::BackupService;
 use forgepost_application::services::document::DocumentService;
 use forgepost_application::services::experiment::ExperimentService;
 use forgepost_application::services::settings::SettingsService;
-use forgepost_content::now_ms;
+use forgepost_content::{BlockKind, now_ms};
 use forgepost_domain::model::{AnalyticsEvent, ExperimentVariantInput, Media, PostId, VisitorId};
 use forgepost_experiments::assign_variant;
 use forgepost_infrastructure::backup::ArchiveBackup;
@@ -462,6 +462,46 @@ async fn assert_demo_invariant(artifact: &Path) {
             text_chars
         );
     }
+
+    // The "Videos Without the Trackers" article ships a real click-to-load
+    // YouTube block (provider + id), so the bundled demo's video actually has a
+    // playable target with the expected privacy-host embed URL.
+    let videos_summary = owned
+        .iter()
+        .find(|d| d.title == "Videos Without the Trackers")
+        .expect("videos article");
+    let videos_full = documents_full
+        .get_owned(videos_summary.id.0, admin_user.id)
+        .await
+        .expect("get videos doc");
+    let video_blocks: Vec<_> = videos_full
+        .document
+        .blocks
+        .iter()
+        .filter(|b| b.kind == BlockKind::Video)
+        .collect();
+    assert_eq!(
+        video_blocks.len(),
+        1,
+        "the videos article must ship exactly one video block"
+    );
+    let video_version = videos_full
+        .document
+        .versions
+        .iter()
+        .find(|v| v.id == video_blocks[0].version_id)
+        .expect("video block has a current version");
+    assert_eq!(
+        video_version
+            .content
+            .get("provider")
+            .and_then(|v| v.as_str()),
+        Some("youtube")
+    );
+    assert_eq!(
+        video_version.content.get("id").and_then(|v| v.as_str()),
+        Some("dQw4w9WgXcQ")
+    );
 
     // Media rows + the actual files exist on disk.
     let media_pool = sqlx::sqlite::SqlitePoolOptions::new()

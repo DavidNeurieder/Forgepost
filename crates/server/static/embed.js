@@ -4,9 +4,16 @@
  * the reader's browser never talks to a third-party provider until they
  * actually choose to play. Clicking the button swaps in the iframe.
  *
- * Privacy baseline: every injected iframe gets referrerpolicy="no-referrer"
- * and only the `src` that the server itself built (whitelisted providers, or
- * an author-supplied https URL) is ever used as the embed target.
+ * Privacy baseline: every injected iframe gets
+ * referrerpolicy="strict-origin-when-cross-origin" and only the `src` that the
+ * server itself built (whitelisted providers, or an author-supplied https URL)
+ * is ever used as the embed target.
+ *
+ * Note on referrer policy: since July 2025 YouTube's embedded player requires
+ * an identifying `HTTP Referer` header and rejects embeds without one (Error
+ * 153). `strict-origin-when-cross-origin` is the policy YouTube recommends: the
+ * provider learns only the site's origin (e.g. `https://example.com`), never
+ * the article path, which is the privacy promise the click-to-load block makes.
  */
 (function () {
   'use strict';
@@ -21,7 +28,7 @@
     frame.src = src;
     frame.title = button.getAttribute('aria-label') || 'Video';
     frame.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
-    frame.referrerPolicy = 'no-referrer';
+    frame.referrerPolicy = 'strict-origin-when-cross-origin';
     frame.allowFullscreen = true;
     return frame;
   }

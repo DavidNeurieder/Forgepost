@@ -27,7 +27,7 @@ Version **0.2.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
   box: a lazy thumbnail and zero third-party requests until the reader chooses
   to play. YouTube's thumbnail is derived from the video id; Rumble's title
   and thumbnail are fetched once, best-effort, via oEmbed at save time. Embeds
-  render privacy-first (`youtube-nocookie.com`, `referrerpolicy="no-referrer"`)
+  render privacy-first (`youtube-nocookie.com`, `referrerpolicy="strict-origin-when-cross-origin"`)
   and articles gain `og:video` + a JSON-LD `VideoObject`.
 - **Per-block analytics** — privacy-lean browser tracking (banded scroll depth,
   completion, read time, block impressions), estimated reach and drop-off per
