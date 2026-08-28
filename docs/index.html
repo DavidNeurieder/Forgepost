@@ -82,7 +82,7 @@
           <div class="card">
             <div class="icon">📦</div>
             <h3>One binary, solo mode</h3>
-            <p>Single <code>forgepost</code> binary with embedded SQLite. Argon2 password hashing, session cookies, CSRF protection, rate-limited analytics API, and <code>forgepost export</code> for backups.</p>
+            <p>Single <code>forgepost</code> binary with embedded SQLite. Argon2 password hashing, session cookies, CSRF protection, and a rate-limited analytics API. <code>forgepost backup create</code> seals the database + media into a self-verifying <code>.fpb</code> archive (<code>verify</code> / <code>restore</code> with a rollback), and <code>forgepost demo</code> installs a ready-made blog with a live experiment.</p>
           </div>
           <div class="card">
             <div class="icon">🔒</div>
@@ -186,11 +186,25 @@ b           612           151            24.7%   <span class="t-pass">0.993</spa
           </div>
 
           <div class="terminal">
+            <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="term-title">the demo in one command</span></div>
+            <pre><span class="t-dim">$ ./target/release/forgepost demo</span>
+
+<span class="t-dim">demo installed into sqlite://forgepost-demo.db</span>
+<span class="t-dim">  articles: 6 long-form demo posts</span>
+<span class="t-dim">  media:    4 bundled images</span>
+<span class="t-dim">  action:   a live A/B experiment on 'Tracking Every Headline'</span>
+
+<span class="t-pass">login:</span> <span class="t-dim">admin@example.com / demo-password</span>
+<span class="t-pass">→</span> <span class="t-dim">http://127.0.0.1:8080/admin</span></pre>
+          </div>
+
+          <div class="terminal">
             <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="term-title">the flip is caused by your change, never by the runner</span></div>
             <pre><span class="t-dim"># back it up, move it, or migrate later</span>
-<span class="t-dim">$ forgepost export --output db.json</span>
+<span class="t-dim">$ forgepost backup create</span>
 
-<span class="t-pass">✓</span> <span class="t-dim">backup written — experiments, decisions, settings, everything</span>
+<span class="t-pass">✓</span> <span class="t-dim">sealed database + media into forgepost-&lt;ts&gt;.fpb</span>
+<span class="t-pass">✓</span> <span class="t-dim">archive verified before it reports success</span>
 
 <span class="t-dim"># or skip the reverse proxy entirely</span>
 <span class="t-dim">$ forgepost serve --tls-domain example.com --addr 0.0.0.0:443</span>
@@ -205,18 +219,23 @@ b           612           151            24.7%   <span class="t-pass">0.993</spa
     <section class="section section-tint" id="get-started">
       <div class="container">
         <h2>Get started in two minutes</h2>
-        <p class="center">Build the single binary, run it, and finish setup in the browser. No Node.js in production, no database server, no config files for 90% of installs.</p>
+        <p class="center">Build the single binary, then either install the demo blog or run your own setup. No Node.js in production, no database server, no config files for 90% of installs.</p>
         <div class="centered-code">
           <pre class="code-block"><code># Build the release binary
 cargo build --release --bin forgepost
 
-# Start the server (creates forgepost.db, runs migrations)
-./target/release/forgepost serve
+# The one-command quick start: installs 6 demo articles + a live
+# headline experiment, then serves on http://127.0.0.1:8080
+./target/release/forgepost demo
+#   login: admin@example.com / demo-password  →  http://127.0.0.1:8080/admin
 
+# Or start your own blog (creates forgepost.db, runs migrations)
+./target/release/forgepost serve
 # Open http://127.0.0.1:8080 → /setup wizard, then write your first post
 
-# Backups / migration path
-./target/release/forgepost export --output db.json
+# Backups: seal the database + media into a self-verifying .fpb archive
+./target/release/forgepost backup create
+./target/release/forgepost backup restore forgepost-&lt;ts&gt;.fpb --yes
 
 # Automatic HTTPS
 ./target/release/forgepost serve --tls-domain example.com --addr 0.0.0.0:443
