@@ -6,8 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-08-15
 
-Video embeds: a new `video` block kind with click-to-load rendering, privacy-first
-embed URLs, and first-class SEO (`og:video` + JSON-LD `VideoObject`).
+Video embeds (a new `video` block kind with click-to-load rendering,
+privacy-first embed URLs, and first-class SEO), a show/hide password toggle on
+the login and setup forms, and a hardening pass on the server's security
+surfaces.
 
 ### Added
 
@@ -33,6 +35,9 @@ embed URLs, and first-class SEO (`og:video` + JSON-LD `VideoObject`).
   `<iframe>` snippet and inserts it at the cursor; the blocks↔markdown
   round-trip preserves video blocks.
 - Videos are not experimentable (their content is a single immutable URL).
+- **Show/hide password** — an eye toggle reveals/obscures the password on
+  `/login` and on both `/setup` password fields (`password` and `confirm`),
+  with `aria-pressed`/`aria-label` state and a keyboard-visible focus ring.
 
 ### Changed
 
@@ -40,6 +45,25 @@ embed URLs, and first-class SEO (`og:video` + JSON-LD `VideoObject`).
 - `crates/server/Cargo.toml` gains `reqwest` (main deps, json + rustls-tls) for
   the oEmbed fetch; video-block diffs compare by provider/id/url identity so
   refreshed metadata never creates a new immutable version.
+
+### Security
+
+- **Rate limits now key on the socket peer, never on forwarded headers** — a
+  single attacker cannot spoof its way around the login or comment-service
+  limit with a forged `X-Forwarded-For`; the header is only honored when the
+  peer is a trusted proxy.
+- **Layered security assurance suite** — a deterministic regression suite
+  (authorization matrix, CSRF table, session/cookie lifecycle, proxy/IP
+  handling, upload hardening) backed by proptest invariants over the rate
+  limiter, markdown rendering, slugify, and ZIP import. See
+  `docs/security-testing.md`; CI now runs `cargo audit` so a dependency
+  vulnerability fails a merge.
+
+### Internal
+
+- Extracted the monolithic server into `domain`/`application`/`infrastructure`
+  crates (repository traits, service layer) and pinned e2e dashboard
+  assertions to the posts table.
 
 ## [0.1.0] - 2026-08-14
 
