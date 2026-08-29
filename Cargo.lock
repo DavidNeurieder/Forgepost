@@ -944,6 +944,7 @@ dependencies = [
  "forgepost-content",
  "forgepost-domain",
  "forgepost-experiments",
+ "proptest",
  "serde",
  "serde_json",
  "sqlx",
@@ -982,6 +983,7 @@ name = "forgepost-experiments"
 version = "0.2.0"
 dependencies = [
  "forgepost-content",
+ "proptest",
  "serde",
  "sha2",
  "uuid",

@@ -86,6 +86,16 @@ surfaces.
   actually given (400). Validated experiment events now record `version_id`,
   the exact immutable version the assigned variant pointed at, so conversion
   history is reproducible against the version pool.
+- **One assignment function for render and events** — `assign_variant`-based
+  selection lives once in the application layer
+  (`assigned_variant`/`verify_assignment`, shared by the article overlay and
+  the events route), so the render path and the attribution check can never
+  drift; rejection reasons are logged (visitor masked) behind a generic
+  `400 invalid experiment event`.
+- **Once-per-visitor conversion** — a partial unique index (plus an idempotent
+  `ON CONFLICT DO NOTHING` at the insert) guarantees a visitor can convert at
+  most once per experiment; duplicate resubmissions are 204 no-ops and can
+  never double-count a conversion.
 - **One running experiment per block** — a partial unique index forbids
   starting a second experiment on a block that already has a running one; the
   server maps the violation to a clean `409 Conflict`.

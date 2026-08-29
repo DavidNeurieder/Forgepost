@@ -88,11 +88,22 @@ not actually given. Validated experiment events also carry `version_id`, the
 exact immutable version the assigned variant pointed at, so conversion history
 can be reproduced against the version pool.
 
+The assignment logic lives once in the application layer
+(`forgepost_application::experiments::{assigned_variant, verify_assignment}`)
+and is shared by the article render overlay (`assigned_variants`) and the
+events endpoint, so the two paths can never drift. Rejections are returned as a
+generic `400 invalid experiment event` (the specific reason is only logged,
+with the visitor id masked), and each visitor may convert at most once per
+experiment — enforced by a partial unique index plus an idempotent
+`ON CONFLICT DO NOTHING` at the insert.
+
 | Boundary            | Test                                            | Assertion |
 |---------------------|-------------------------------------------------|-----------|
-| Assignment firewall | `experiment_events_require_assigned_variant`    | unassigned variant impression/conversion → 400; valid event 204 and its row records `version_id` |
+| Assignment firewall | `experiment_events_require_assigned_variant`    | unassigned variant impression/conversion → 400 and no analytics rows written; variant visitor claiming control → 400; valid event 204 and its row records `version_id` |
 | One-per-block guard | `experiment_rejects_second_running_on_block`    | starting a second experiment on a block with a running one → 409 (partial unique index) |
 | Idempotent conclude | `experiment_conclude_is_idempotent`             | second decide is a no-op; second promote → 409; exactly one decision row |
+| Once-per-visitor conversion | `experiment_events_require_assigned_variant` (duplicate resubmit) | a second conversion from the same visitor → 204 no-op, exactly one conversion row (partial unique index + `ON CONFLICT DO NOTHING`) |
+| Shared assignment invariant | `only_assigned_variant_can_verify` (proptest)   | assignment is deterministic, always a real variant, and `verify_assignment` accepts exactly that variant |
 
 The system-level `creator_journey_end_to_end` test posts only assignment-aware
 visitors and asserts the live report counts impressions/conversions per variant;
@@ -100,6 +111,13 @@ visitors and asserts the live report counts impressions/conversions per variant;
 assignment.
 
 ## Layer 2 — Property tests (proptest)
+
+### Experiment assignment — `crates/experiments`, application layer
+
+| Property | Test                                                        |
+|----------|-------------------------------------------------------------|
+| Assignment deterministic per (experiment, visitor) and always lands on a declared variant | `assignment_is_deterministic_and_in_candidate_set` (experiments crate) |
+| `verify_assignment` accepts exactly the assigned variant, never control-or-variant cross-claims | `only_assigned_variant_can_verify` (application crate) |
 
 ### Rate limiter — `crates/analytics/src/lib.rs`
 

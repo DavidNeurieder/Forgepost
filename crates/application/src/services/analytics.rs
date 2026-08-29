@@ -4,31 +4,17 @@ use std::sync::Arc;
 
 use forgepost_analytics::{DocumentStatsView, RateLimiter, block_stats, preview_text};
 use forgepost_content::now_ms;
-use forgepost_domain::model::{
-    AnalyticsEvent, Comment, DashboardMetric, DocumentSummary, PostId, VisitorId,
-};
+use forgepost_domain::model::{Comment, DashboardMetric, DocumentSummary};
 use uuid::Uuid;
 
-use crate::ports::{AnalyticsRepo, CommentRepo, DocumentRepo, ExperimentRepo, Repository};
+use crate::ports::{AnalyticsRepo, CommentRepo, DocumentRepo, Repository};
 use crate::services::ServiceError;
 
 pub struct AnalyticsService {
     analytics_repo: Arc<dyn AnalyticsRepo>,
     doc_repo: Arc<dyn DocumentRepo>,
-    exp_repo: Arc<dyn ExperimentRepo>,
     comment_repo: Arc<dyn CommentRepo>,
     rate_limiter: RateLimiter,
-}
-
-/// Parsed and validated event fields (what the handler hands to the service).
-pub struct ParsedEvent {
-    pub event_type: &'static str,
-    pub band: Option<i64>,
-    pub block_id: Option<Uuid>,
-    pub read_time_ms: Option<i64>,
-    pub experiment_id: Option<Uuid>,
-    pub variant_id: Option<Uuid>,
-    pub recommended_slug: Option<String>,
 }
 
 impl AnalyticsService {
@@ -36,7 +22,6 @@ impl AnalyticsService {
         Self {
             analytics_repo: repo.clone(),
             doc_repo: repo.clone(),
-            exp_repo: repo.clone(),
             comment_repo: repo,
             rate_limiter,
         }
@@ -47,87 +32,6 @@ impl AnalyticsService {
         if !self.rate_limiter.allow(client_ip, now_ms()) {
             return Err(ServiceError::RateLimited);
         }
-        Ok(())
-    }
-
-    /// Record an analytics event after full validation.
-    pub async fn record_event(
-        &self,
-        slug: &str,
-        parsed: &ParsedEvent,
-        visitor_id: Uuid,
-        pageview_id: Uuid,
-        referrer: Option<String>,
-        user_agent: Option<String>,
-    ) -> Result<(), ServiceError> {
-        let full = self
-            .doc_repo
-            .get_published_by_slug(slug)
-            .await?
-            .ok_or_else(|| ServiceError::Validation("article not found".into()))?;
-        let document_id = full.document.id;
-
-        // Validate block_id exists in document.
-        if let Some(bid) = parsed.block_id
-            && full.document.block(bid).is_none()
-        {
-            return Err(ServiceError::Validation("unknown block".into()));
-        }
-
-        // Validate experiment references.
-        if let (Some(exp_id), Some(variant_id)) = (parsed.experiment_id, parsed.variant_id) {
-            let exp = self
-                .exp_repo
-                .experiment(exp_id)
-                .await?
-                .ok_or_else(|| ServiceError::Validation("unknown experiment".into()))?;
-            if exp.status != "running" {
-                return Err(ServiceError::Validation("experiment is not running".into()));
-            }
-            if exp.document_id.0 != document_id {
-                return Err(ServiceError::Validation(
-                    "experiment belongs to another article".into(),
-                ));
-            }
-            if !self
-                .exp_repo
-                .experiment_variant_belongs(exp_id, variant_id)
-                .await?
-            {
-                return Err(ServiceError::Validation(
-                    "variant does not belong to experiment".into(),
-                ));
-            }
-        }
-
-        // Validate recommendation slug.
-        if let Some(target) = parsed.recommended_slug.as_deref()
-            && self.doc_repo.get_published_by_slug(target).await?.is_none()
-        {
-            return Err(ServiceError::Validation(
-                "recommended article not found".into(),
-            ));
-        }
-
-        let event = AnalyticsEvent {
-            id: Uuid::new_v4(),
-            document_id: PostId(document_id),
-            event_type: parsed.event_type.into(),
-            band: parsed.band,
-            block_id: parsed.block_id,
-            pageview_id,
-            visitor_id: VisitorId(visitor_id),
-            referrer,
-            user_agent,
-            read_time_ms: parsed.read_time_ms,
-            experiment_id: parsed.experiment_id,
-            variant_id: parsed.variant_id,
-            version_id: None,
-            recommended_slug: parsed.recommended_slug.clone(),
-            created_at_ms: now_ms(),
-        };
-        tracing::info!(event_type = %parsed.event_type, slug = %slug, "recording analytics event");
-        self.analytics_repo.record_analytics_event(&event).await?;
         Ok(())
     }
 

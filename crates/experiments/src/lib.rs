@@ -439,6 +439,7 @@ pub fn log_beta(a: f64, b: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn v(id: u64, impressions: u64, conversions: u64) -> VariantStats {
         // A deterministic id so reports are comparable.
@@ -687,6 +688,38 @@ mod tests {
         for i in 0..100u32 {
             let visitor = Uuid::from_u128(i as u128 + 1);
             assert_eq!(assign_variant(&exp, &visitor, control, 1.0, &[]), control);
+        }
+    }
+
+    proptest::proptest! {
+        // P1/P12: for any experiment shape and visitor, assignment is
+        // deterministic and always returns one of the declared candidates.
+        #[test]
+        fn assignment_is_deterministic_and_in_candidate_set(
+            control_share in 0.0f64..=1.0,
+            weights in proptest::collection::vec(1.0f64..100.0, 1..=6),
+            n_variants in 0usize..=6,
+            visitor_seed in any::<u128>(),
+        ) {
+            let exp = ExperimentId::from_u128(0xE5E5);
+            let control = VariantId::from_u128(1);
+            let variants: Vec<(VariantId, f64)> = weights
+                .iter()
+                .take(n_variants)
+                .enumerate()
+                .map(|(i, w)| (VariantId::from_u128(2 + i as u128), *w))
+                .collect();
+            let visitor = Uuid::from_u128(visitor_seed);
+            let a = assign_variant(&exp, &visitor, control, control_share, &variants);
+            let b = assign_variant(&exp, &visitor, control, control_share, &variants);
+            prop_assert_eq!(a, b, "assignment is deterministic");
+            let candidates: Vec<VariantId> = std::iter::once(control)
+                .chain(variants.iter().map(|(id, _)| *id))
+                .collect();
+            prop_assert!(
+                candidates.contains(&a),
+                "assigned id {a} is one of the declared variants"
+            );
         }
     }
 

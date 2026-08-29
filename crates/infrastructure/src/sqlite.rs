@@ -981,7 +981,10 @@ impl AnalyticsRepo for SqliteRepository {
                 (id, document_id, event_type, band, block_id, pageview_id, visitor_id,
                  referrer, user_agent, read_time_ms, experiment_id, variant_id, version_id,
                  recommended_slug, created_at_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (experiment_id, visitor_id)
+             WHERE event_type = 'experiment_conversion' AND experiment_id IS NOT NULL
+             DO NOTHING",
         )
         .bind(event.id.to_string())
         .bind(event.document_id.to_string())

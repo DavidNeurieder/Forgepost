@@ -9,7 +9,8 @@
 use forgepost_content::now_ms;
 use forgepost_domain::model::{ExperimentCounts, ExperimentDecision, ExperimentRecord};
 use forgepost_experiments::{
-    EngineConfig, ExperimentReport, Recommendation, VariantStats, analyze,
+    EngineConfig, ExperimentReport, Recommendation, VariantId, VariantStats, analyze,
+    assign_variant,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -73,6 +74,37 @@ pub struct DecisionOutcome {
     pub promoted_version_id: Option<Uuid>,
     pub confidence: Option<f64>,
     pub effect_size: Option<f64>,
+}
+
+/// The variant `visitor` is deterministically assigned for `exp`. This is the
+/// single source of truth shared by the article-render overlay
+/// (`assigned_variants`) and the event endpoint, so a conversion can only ever
+/// credit the exact variant the server handed the visitor.
+pub fn assigned_variant(exp: &ExperimentRecord, visitor_id: &Uuid) -> VariantId {
+    let control = exp
+        .variants
+        .iter()
+        .find(|v| v.is_control)
+        .expect("experiment always has a control variant");
+    let others: Vec<(VariantId, f64)> = exp
+        .variants
+        .iter()
+        .filter(|v| !v.is_control)
+        .map(|v| (v.id, v.weight))
+        .collect();
+    let control_share = 1.0 - (exp.traffic_weight / 100.0).clamp(0.0, 1.0);
+    assign_variant(&exp.id, visitor_id, control.id, control_share, &others)
+}
+
+/// True only when `submitted_variant` is exactly the variant `visitor` was
+/// assigned in `exp`. The server — never the browser — decides which variant
+/// gets credit for an impression/conversion.
+pub fn verify_assignment(
+    exp: &ExperimentRecord,
+    visitor_id: &Uuid,
+    submitted_variant: VariantId,
+) -> bool {
+    assigned_variant(exp, visitor_id) == submitted_variant
 }
 
 pub fn config_from(exp: &ExperimentRecord) -> EngineConfig {
@@ -413,4 +445,99 @@ pub async fn auto_decide_all(repo: &dyn Repository) -> Result<(), RepositoryErro
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use forgepost_domain::model::{ExperimentVariantRecord, PostId};
+    use forgepost_experiments::ExperimentId;
+    use proptest::prelude::*;
+    use uuid::Uuid;
+
+    fn sample_experiment(traffic_weight: f64, variant_weights: &[f64]) -> ExperimentRecord {
+        let exp_id = ExperimentId::new_v4();
+        let control_id = VariantId::new_v4();
+        let mut variants: Vec<ExperimentVariantRecord> = variant_weights
+            .iter()
+            .map(|w| ExperimentVariantRecord {
+                id: VariantId::new_v4(),
+                block_id: exp_id,
+                version_id: Uuid::new_v4(),
+                weight: *w,
+                is_control: false,
+            })
+            .collect();
+        variants.insert(
+            0,
+            ExperimentVariantRecord {
+                id: control_id,
+                block_id: exp_id,
+                version_id: Uuid::new_v4(),
+                weight: 0.0,
+                is_control: true,
+            },
+        );
+        ExperimentRecord {
+            id: exp_id,
+            document_id: PostId(Uuid::new_v4()),
+            block_id: exp_id,
+            name: "P12 sample".into(),
+            status: "running".into(),
+            control_version_id: variants[0].version_id,
+            goal: "completion".into(),
+            traffic_weight,
+            confidence_threshold: 0.95,
+            min_sample_per_variant: 10,
+            no_winner_prob: 0.85,
+            max_duration_ms: 100_000,
+            started_at_ms: Some(0),
+            decided_at_ms: None,
+            decision: None,
+            winning_variant_id: None,
+            created_at_ms: 0,
+            variants,
+        }
+    }
+
+    proptest! {
+        // P1/P12: assignment is deterministic and lands on a real variant, and
+        // `verify_assignment` accepts exactly the assigned variant — never the
+        // control when the visitor drew the variant, nor a variant when the
+        // visitor drew control. Only one id can ever pass for a given visitor.
+        #[test]
+        fn only_assigned_variant_can_verify(
+            traffic_weight in 0.0f64..1.5f64,
+            n_variants in 1usize..=5,
+            weights in prop::collection::vec(10.0f64..100.0, 1..=5),
+            visitor_lo in any::<u64>(),
+            visitor_hi in any::<u64>(),
+        ) {
+            let weights: Vec<f64> = weights.iter().take(n_variants).cloned().collect();
+            let exp = sample_experiment(traffic_weight.clamp(0.0, 100.0), &weights);
+            let visitor = Uuid::from_u128((visitor_hi as u128) << 64 | visitor_lo as u128);
+
+            // Deterministic.
+            let a = assigned_variant(&exp, &visitor);
+            let b = assigned_variant(&exp, &visitor);
+            prop_assert_eq!(a, b, "assignment is deterministic");
+
+            // The assigned variant is one of the candidate ids.
+            let ids: Vec<VariantId> = exp
+                .variants
+                .iter()
+                .map(|v| v.id)
+                .collect();
+            prop_assert!(ids.contains(&a), "assigned id is a real variant");
+
+            // Exactly the assigned id verifies.
+            for id in &ids {
+                prop_assert_eq!(
+                    verify_assignment(&exp, &visitor, *id),
+                    *id == a,
+                    "only the assigned variant verifies"
+                );
+            }
+        }
+    }
 }

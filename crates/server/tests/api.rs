@@ -1387,6 +1387,17 @@ async fn post_event(app: &Router, visitor: &str, body: Value) {
     assert_eq!(status, StatusCode::NO_CONTENT, "event accepted");
 }
 
+/// Count analytics rows for a whole document, an experiment, or a specific
+/// visitor+experiment, for rejection/idempotency assertions.
+async fn count_analytics_events(pool: &SqlitePool, where_clause: &str, args: &[&str]) -> i64 {
+    let q = format!("SELECT COUNT(*) FROM analytics_events WHERE {where_clause}");
+    let mut builder = sqlx::query_as::<_, (i64,)>(&q);
+    for a in args {
+        builder = builder.bind(a);
+    }
+    builder.fetch_one(pool).await.expect("count query").0
+}
+
 /// Full drop-off scenario across two visitors:
 ///   visitor A reads the whole article; visitor B only reaches the top.
 /// This exercises events → aggregations → estimated per-block reach → drop-off.
@@ -2457,7 +2468,17 @@ async fn experiment_events_require_assigned_variant() {
         "forged conversion rejected"
     );
 
-    // A visitor assigned the variant records impression + conversion.
+    // P7: rejected events are side-effect free — no impression/conversion row
+    // was written for this experiment.
+    let exp_where = "experiment_id = ?";
+    assert_eq!(
+        count_analytics_events(&pool, exp_where, &[&exp_id_str]).await,
+        0,
+        "no analytics rows after forged rejections"
+    );
+
+    // P10: the reverse direction — a visitor the server assigned to the
+    // variant cannot claim the control variant either.
     let variant_visitor = visitors_for(
         exp_id,
         Uuid::from_str(&control_id).unwrap(),
@@ -2465,6 +2486,31 @@ async fn experiment_events_require_assigned_variant() {
         true,
         1,
     )[0];
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/events",
+            Some(&format!("opv={variant_visitor}")),
+            None,
+            Some(json!({
+                "slug": slug,
+                "session_id": Uuid::new_v4(),
+                "kind": "experiment_impression",
+                "experiment_id": exp_id_str,
+                "variant_id": control_id,
+                "payload": {},
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "variant visitor cannot claim control"
+    );
+
+    // A visitor assigned the variant records impression + conversion.
     post_experiment_event(&app, &slug, variant_visitor, &exp_id_str, &variant_id, true).await;
 
     // The recorded event carries the exact version the variant pointed at.
@@ -2477,6 +2523,42 @@ async fn experiment_events_require_assigned_variant() {
     .await
     .expect("conversion event persisted");
     assert_eq!(version.as_deref(), Some(test_version_id.as_str()));
+
+    // P13/P14: the same visitor converting again is an idempotent no-op, not a
+    // second conversion — exactly one conversion row survives.
+    let (status, _) = send(
+        &app,
+        json_req(
+            Method::POST,
+            "/api/events",
+            Some(&format!("opv={variant_visitor}")),
+            None,
+            Some(json!({
+                "slug": slug,
+                "session_id": Uuid::new_v4(),
+                "kind": "experiment_conversion",
+                "experiment_id": exp_id_str,
+                "variant_id": variant_id,
+                "payload": {},
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "duplicate conversion is an idempotent success"
+    );
+    assert_eq!(
+        count_analytics_events(
+            &pool,
+            &format!("{exp_where} AND event_type = 'experiment_conversion'"),
+            &[&exp_id_str],
+        )
+        .await,
+        1,
+        "duplicate conversion is not double counted"
+    );
 }
 
 /// A block is assigned at most one running experiment: starting a second one

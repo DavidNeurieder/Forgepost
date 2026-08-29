@@ -8,10 +8,12 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use forgepost_analytics::{DocumentStatsView, EventKind, SCROLL_BANDS};
-use forgepost_application::experiments::{DecisionOutcome, ExperimentView, experiment_view};
+use forgepost_application::experiments::{
+    DecisionOutcome, ExperimentView, assigned_variant, experiment_view, verify_assignment,
+};
 use forgepost_application::ports::DocumentRepo;
 use forgepost_content::{Document, now_ms, render_html};
-use forgepost_experiments::{ExperimentId, VariantId, assign_variant};
+use forgepost_experiments::{ExperimentId, VariantId};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -205,19 +207,7 @@ pub(crate) fn assigned_variants(
 ) -> std::collections::HashMap<Uuid, (ExperimentId, VariantId)> {
     let mut map = std::collections::HashMap::new();
     for exp in experiments {
-        let control = exp
-            .variants
-            .iter()
-            .find(|v| v.is_control)
-            .expect("experiment always has a control variant");
-        let others: Vec<(VariantId, f64)> = exp
-            .variants
-            .iter()
-            .filter(|v| !v.is_control)
-            .map(|v| (v.id, v.weight))
-            .collect();
-        let control_share = 1.0 - (exp.traffic_weight / 100.0).clamp(0.0, 1.0);
-        let chosen = assign_variant(&exp.id, &visitor_id, control.id, control_share, &others);
+        let chosen = assigned_variant(exp, &visitor_id);
         map.entry(exp.block_id).or_insert((exp.id, chosen));
     }
     map
@@ -770,41 +760,33 @@ pub async fn record_event(
             .repo
             .experiment(exp_id)
             .await?
-            .ok_or_else(|| ApiError::bad_request("unknown experiment"))?;
+            .ok_or_else(|| ApiError::bad_request("invalid experiment event"))?;
         if exp.status != "running" {
-            return Err(ApiError::bad_request("experiment is not running"));
+            return Err(ApiError::bad_request("invalid experiment event"));
         }
         if exp.document_id.0 != document_id {
-            return Err(ApiError::bad_request(
-                "experiment belongs to another article",
-            ));
+            return Err(ApiError::bad_request("invalid experiment event"));
         }
-        let control = exp
-            .variants
-            .iter()
-            .find(|v| v.is_control)
-            .ok_or_else(|| ApiError::bad_request("experiment has no control variant"))?;
-        let others: Vec<(VariantId, f64)> = exp
-            .variants
-            .iter()
-            .filter(|v| !v.is_control)
-            .map(|v| (v.id, v.weight))
-            .collect();
-        let control_share = 1.0 - (exp.traffic_weight / 100.0).clamp(0.0, 1.0);
-        let assigned = assign_variant(&exp.id, &visitor_id, control.id, control_share, &others);
-        if assigned != variant_id {
-            return Err(ApiError::bad_request(
-                "visitor was not assigned this variant",
-            ));
+        // Attribution firewall: only the exact variant the server's
+        // deterministic assignment handed this visitor can be recorded.
+        // `verify_assignment` is the same function the article render overlay
+        // uses (crates/application/src/experiments.rs), so the two paths can
+        // never drift.
+        if !verify_assignment(&exp, &visitor_id, variant_id) {
+            tracing::warn!(
+                experiment_id = %exp_id,
+                visitor = %mask_visitor(&visitor_id),
+                variant_id = %variant_id,
+                "rejecting unattributed experiment event"
+            );
+            return Err(ApiError::bad_request("invalid experiment event"));
         }
         if !state
             .repo
             .experiment_variant_belongs(exp_id, variant_id)
             .await?
         {
-            return Err(ApiError::bad_request(
-                "variant does not belong to experiment",
-            ));
+            return Err(ApiError::bad_request("invalid experiment event"));
         }
         experiment_context = exp
             .variants
@@ -1227,6 +1209,13 @@ pub(crate) async fn try_login(
             Err(err)
         }
     }
+}
+
+/// Compact, stable fingerprint of a visitor id for logs, so rejected
+/// attribution attempts don't leak the raw cookie value.
+fn mask_visitor(id: &Uuid) -> String {
+    let raw = id.as_u128();
+    format!("{:016x}", (raw >> 64) as u64 ^ raw as u64)
 }
 
 /// `visitor_identity`, with the option to set the `Secure` flag on the minted

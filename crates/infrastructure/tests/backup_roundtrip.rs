@@ -75,7 +75,7 @@ async fn seed(r: &SqliteRepository, media_dir: &std::path::Path) {
 
 async fn assert_restored(db_url: &str, media_dir: &std::path::Path) {
     let r = repo(db_url).await;
-    assert_eq!(migrate(&r).await, 9, "schema restored");
+    assert_eq!(migrate(&r).await, 10, "schema restored");
     let settings = r.site_settings().await.expect("settings");
     assert_eq!(settings.name, "Roundtrip Blog");
     assert!(settings.comments_enabled);

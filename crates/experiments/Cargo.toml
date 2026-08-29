@@ -10,3 +10,6 @@ forgepost-content = { path = "../content" }
 serde = { workspace = true }
 sha2 = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
