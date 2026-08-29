@@ -4,7 +4,7 @@ All notable changes to Forgepost are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] - 2026-08-15
+## [0.2.0] - 2026-08-29
 
 Video embeds (a new `video` block kind with click-to-load rendering,
 privacy-first embed URLs, and first-class SEO), a show/hide password toggle on

@@ -69,7 +69,7 @@ crates/server       Axum app: page routes, API, auth, repository, TLS
 crates/server/templates   Askama templates (all pages server-rendered)
 crates/server/static      app.css, favicon, tracker.js (embedded in the binary)
 e2e                 Playwright end-to-end suite against the built binary
-migrations          SQLite schema (0001 … 0008)
+migrations          SQLite schema (0001 … 0010)
 docs                Website (GitHub Pages, static)
 ```
 
@@ -118,7 +118,7 @@ The binary lands at `target/release/forgepost`. Verify it:
 On first start this:
 
 1. creates `forgepost.db` in the current directory,
-2. runs the SQLite migrations (`migrations/0001 … 0008`),
+2. runs the SQLite migrations (`migrations/0001 … 0010`),
 3. spawns the background experiment auto-decider,
 4. listens on `127.0.0.1:8080`.
 
