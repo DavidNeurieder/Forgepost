@@ -4,6 +4,24 @@ All notable changes to Forgepost are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-09-07
+
+Patch release shipping the CI and dependency fixes merged after 0.2.0. There
+are no user-facing feature changes.
+
+### Fixed
+
+- **Dependency updates** — `h2` bumped past RUSTSEC-2026-0258 (unbounded empty
+  DATA frames), the yanked `chacha20` 0.10.1 was dropped (both surfaced by the
+  new `cargo audit` CI job), and other transitive crates were refreshed
+  (`x509-parser`, `tokio-rustls`, `wasm-bindgen`, …).
+- **Clippy 1.98 lints** — the `loop`/`while let` rewrite in the content parser
+  and the checked-division guard in the experiment engine (no behavior
+  change).
+- **CI** — e2e now builds the server binary at the workspace root and only the
+  Playwright steps run in `e2e/`; the audit job has the `checks: write`
+  permission its comments need; all actions bumped to node24 runtimes.
+
 ## [0.2.0] - 2026-08-29
 
 Video embeds (a new `video` block kind with click-to-load rendering,
@@ -244,5 +262,6 @@ single binary.
   leaderboards are explicitly deferred beyond the MVP gates (see
   `docs/mvp_plan_v6.md`).
 
+[0.2.1]: https://github.com/DavidNeurieder/Forgepost/releases/tag/v0.2.1
 [0.2.0]: https://github.com/DavidNeurieder/Forgepost/releases/tag/v0.2.0
 [0.1.0]: https://github.com/DavidNeurieder/Forgepost/releases/tag/v0.1.0

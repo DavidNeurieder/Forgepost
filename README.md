@@ -9,7 +9,7 @@ Markdown, publish, watch where readers drop off, then A/B test alternative
 content on a single block and let a Bayesian engine decide when a variant is a
 clear winner.
 
-Version **0.2.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
+Version **0.2.1** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
 
 ## Features
 
