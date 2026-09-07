@@ -84,7 +84,7 @@ jobs:
             awk 'BEGIN{c=0} /^## \[0\./ {c++; if(c==2) exit} c==1 {print}' CHANGELOG.md
           } > RELEASE_NOTES.md
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: forgepost-v*.tar.gz
           body_path: RELEASE_NOTES.md
