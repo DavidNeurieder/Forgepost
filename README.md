@@ -59,6 +59,11 @@ Version **0.2.0** — an AGPL-3.0 solo-mode MVP built for a single self-hoster.
   database). A bundled **demo blog** (six articles, images, and a live A/B
   experiment) installs in one command with `forgepost demo`.
 
+## Screenshots
+
+<img src="pictures/screenshot1.png"  alt="Screenshot 1">  
+  
+  
 ## Project layout
 
 ```
