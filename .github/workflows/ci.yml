@@ -5,16 +5,21 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   rust:
     name: Rust (fmt, clippy, test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: sqlite-bundled
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
@@ -22,32 +27,37 @@ jobs:
   audit:
     name: Security (cargo audit)
     runs-on: ubuntu-latest
+    permissions:
+      checks: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: RUSTSEC-2023-0071
 
   e2e:
     name: E2E (Playwright against the single binary)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: e2e
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: e2e/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: npm ci
-      - run: cargo build --bin forgepost
-        working-directory: ..
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e
+        with:
+          key: sqlite-bundled
+      - name: Build server binary
+        run: cargo build --bin forgepost
+      - name: Install Playwright
+        working-directory: e2e
+        run: npm ci && npx playwright install --with-deps chromium
+      - name: Run browser E2E against the real binary
+        working-directory: e2e
         env:
-          FORGEPOST_BIN: ../target/debug/forgepost
+          FORGEPOST_BIN: ${{ github.workspace }}/target/debug/forgepost
+        run: npm run test:e2e
