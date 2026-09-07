@@ -924,7 +924,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "forgepost-analytics"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "forgepost-content",
@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "forgepost-application"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "forgepost-analytics",
@@ -956,7 +956,7 @@ dependencies = [
 
 [[package]]
 name = "forgepost-content"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "proptest",
  "serde",
@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "forgepost-domain"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "argon2",
  "forgepost-content",
@@ -980,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "forgepost-experiments"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "forgepost-content",
  "proptest",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "forgepost-infrastructure"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "forgepost-analytics",
@@ -1013,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "forgepost-server"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argon2",
