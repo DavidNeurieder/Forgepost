@@ -237,11 +237,10 @@ pub fn analyze(
     elapsed_ms: i64,
 ) -> ExperimentReport {
     let total_obs: u64 = variants.iter().map(|v| v.impressions).sum::<u64>() + control.impressions;
-    let n_looks = if config.min_sample_per_variant > 0 {
-        (total_obs / config.min_sample_per_variant).max(1)
-    } else {
-        1
-    };
+    let n_looks = total_obs
+        .checked_div(config.min_sample_per_variant)
+        .unwrap_or(1)
+        .max(1);
     let adjusted_confidence = 1.0 - (1.0 - config.confidence_threshold) / n_looks as f64;
 
     let mut reports = Vec::with_capacity(variants.len() + 1);

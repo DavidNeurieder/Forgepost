@@ -100,17 +100,11 @@ pub fn parse_markdown(source: &str) -> Vec<ParsedBlock> {
         if trimmed.starts_with('!') || trimmed.starts_with("[![") {
             let mut rest = trimmed;
             let mut images = Vec::new();
-            loop {
-                let Some(img) = parse_image_at_start(rest) else {
-                    break;
-                };
+            while let Some(img) = parse_image_at_start(rest) {
                 let consumed = img.consumed;
                 images.push(img);
                 rest = rest[consumed..].trim_start();
-                if rest.is_empty() {
-                    break;
-                }
-                if !(rest.starts_with('!') || rest.starts_with("[![")) {
+                if rest.is_empty() || !(rest.starts_with('!') || rest.starts_with("[![")) {
                     break;
                 }
             }
